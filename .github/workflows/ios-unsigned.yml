@@ -115,7 +115,6 @@ jobs:
 
               private var metalView: MTKView?
               private var ciContext: CIContext?
-              private var ciContextHDR: CIContext?
               private var commandQueue: MTLCommandQueue?
               private let bufferLock = NSLock()
               private var latestBuffer: CVPixelBuffer?
@@ -148,11 +147,6 @@ jobs:
                   ciContext = CIContext(mtlDevice: device, options: [
                       .cacheIntermediates: false,
                       .workingColorSpace: CGColorSpaceCreateDeviceRGB()
-                  ])
-                  // Für HDR: linearer Arbeitsfarbraum, sonst rechnet der Schärfe-Pass in der PQ-Kurve.
-                  ciContextHDR = CIContext(mtlDevice: device, options: [
-                      .cacheIntermediates: false,
-                      .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
                   ])
 
                   let mv = MTKView(frame: bounds, device: device)
@@ -401,11 +395,11 @@ jobs:
                   }
 
                   // Klarheit: großer Radius = lokaler Detailkontrast (der "3D-Pop" teurer TVs)
-                  let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.25)
+                  let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.15)
                   if clarity > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
                           kCIInputRadiusKey: 8.0,
-                          kCIInputIntensityKey: min(clarity, 1.0) * 0.6
+                          kCIInputIntensityKey: min(clarity, 1.0) * 0.45
                       ])
                   }
 
@@ -425,13 +419,6 @@ jobs:
                       ])
                   }
 
-                  let useDither = UserDefaults.standard.object(forKey: "pxSharpDither") as? Bool ?? false
-                  if useDither {
-                      image = image.applyingFilter("CIDither", parameters: [
-                          "inputIntensity": 0.06
-                      ])
-                  }
-
                   let canvasRect = CGRect(origin: .zero, size: target)
                   let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
                   let composited = image.composited(over: canvas)
@@ -443,7 +430,7 @@ jobs:
                       outSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
                   }
 
-                  let ctx = hdrActive ? (ciContextHDR ?? ciContext) : ciContext
+                  let ctx = ciContext
                   ctx?.render(composited,
                               to: drawable.texture,
                               commandBuffer: cb,
@@ -484,11 +471,10 @@ jobs:
               var onMaxQuality: () -> Void = {}
 
               @AppStorage("pxSharpLevel") private var level: Double = 0.6
-              @AppStorage("pxSharpClarity") private var clarity: Double = 0.25
+              @AppStorage("pxSharpClarity") private var clarity: Double = 0.15
               @AppStorage("pxSharpDenoise") private var denoise: Double = 0.0
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
-              @AppStorage("pxSharpDither") private var dither: Bool = false
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
 
               var body: some View {
@@ -543,7 +529,6 @@ jobs:
                           }
                           Slider(value: $saturation, in: 0...1, step: 0.05)
                       }
-                      Toggle("Deband / Dither", isOn: $dither)
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
                           onMaxQuality()
