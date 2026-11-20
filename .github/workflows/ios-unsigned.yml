@@ -343,6 +343,9 @@ jobs:
                       // 10-Bit-Buffer sind PQ-kodiert — explizit taggen, sonst nimmt CoreImage sRGB an
                       // und die PQ-Ausgabe wirkt weiß/ausgewaschen.
                       image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: pq])
+                  } else if let hd = CGColorSpace(name: CGColorSpace.itur_709) {
+                      // SDR explizit als BT.709 taggen — garantiert die richtige Matrix und Range.
+                      image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: hd])
                   } else {
                       image = CIImage(cvPixelBuffer: pixelBuffer)
                   }
@@ -363,6 +366,11 @@ jobs:
 
                   let sx = target.width / src.width
                   let sy = target.height / src.height
+                  let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
+                  if pixelPerfect {
+                      // 1:1: keine Skalierung, jeder Stream-Pixel sitzt auf genau einem Panel-Pixel.
+                      image = image.transformed(by: CGAffineTransform(scaleX: 1, y: 1))
+                  } else {
                   switch currentMode {
                   case .fit:
                       let s = min(sx, sy)
@@ -381,6 +389,7 @@ jobs:
                           kCIInputScaleKey: sy,
                           kCIInputAspectRatioKey: sx / sy
                       ])
+                  }
                   }
 
                   let placed = image.extent
@@ -487,6 +496,7 @@ jobs:
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
+              @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
 
               var body: some View {
                   VStack(alignment: .leading, spacing: 10) {
@@ -551,6 +561,7 @@ jobs:
                           Slider(value: $saturation, in: 0...1, step: 0.05)
                       }
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
+                      Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
                           onMaxQuality()
                       }
