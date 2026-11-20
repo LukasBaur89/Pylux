@@ -44,6 +44,8 @@ jobs:
           import AVFoundation
           import CoreImage
           import CoreVideo
+          import Metal
+          import MetalFX
           import MetalKit
           import os.log
 
@@ -124,6 +126,10 @@ jobs:
               private var displayLink: CADisplayLink?
               private var needsPresent = false
               private var hdrStreak = 0
+              private var mfxScaler: MTLFXSpatialScaler?
+              private var mfxIn: MTLTexture?
+              private var mfxOut: MTLTexture?
+              private var mfxKey = ""
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -282,6 +288,53 @@ jobs:
                   metalView?.draw()
               }
 
+              // MARK: - MetalFX
+
+              /// Apple MetalFX Spatial Scaler: kantenbewusste Rekonstruktion statt Lanczos.
+              /// Nur wenn per Schalter aktiviert und vom Gerät unterstützt.
+              private func ensureMetalFX(device: MTLDevice, input: CGSize, output: CGSize) -> Bool {
+                  let key = "\(Int(input.width))x\(Int(input.height))->\(Int(output.width))x\(Int(output.height))"
+                  if key == mfxKey, mfxScaler != nil, mfxIn != nil, mfxOut != nil { return true }
+                  guard input.width >= 2, input.height >= 2, output.width >= 2, output.height >= 2 else { return false }
+                  guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else { return false }
+
+                  let desc = MTLFXSpatialScalerDescriptor()
+                  desc.inputWidth = Int(input.width)
+                  desc.inputHeight = Int(input.height)
+                  desc.outputWidth = Int(output.width)
+                  desc.outputHeight = Int(output.height)
+                  desc.colorTextureFormat = .bgra8Unorm
+                  desc.outputTextureFormat = .bgra8Unorm
+                  desc.colorProcessingMode = .perceptual
+
+                  guard let scaler = desc.makeSpatialScaler(device: device) else { return false }
+
+                  let inDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                        width: Int(input.width),
+                                                                        height: Int(input.height),
+                                                                        mipmapped: false)
+                  inDesc.usage = [.shaderRead, .renderTarget]
+                  inDesc.storageMode = .private
+
+                  let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                         width: Int(output.width),
+                                                                         height: Int(output.height),
+                                                                         mipmapped: false)
+                  outDesc.usage = [.shaderRead, .renderTarget]
+                  outDesc.storageMode = .private
+
+                  guard let it = device.makeTexture(descriptor: inDesc),
+                        let ot = device.makeTexture(descriptor: outDesc) else { return false }
+
+                  mfxIn = it
+                  mfxOut = ot
+                  mfxScaler = scaler
+                  mfxKey = key
+                  os_log(.default, log: videoViewLog, "[StreamVideoUIView] MetalFX %dx%d -> %dx%d",
+                         Int(input.width), Int(input.height), Int(output.width), Int(output.height))
+                  return true
+              }
+
               // MARK: - HDR / EDR
 
               /// HDR nur, wenn der Buffer wirklich PQ/BT.2020 meldet.
@@ -367,7 +420,10 @@ jobs:
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
-                  if pixelPerfect {
+                  let useMFX = (UserDefaults.standard.object(forKey: "pxSharpMetalFX") as? Bool ?? false) && !pixelPerfect && !hdrActive
+                  if useMFX {
+                      // Skalierung übernimmt MetalFX am Ende.
+                  } else if pixelPerfect {
                       // 1:1: keine Skalierung, jeder Stream-Pixel sitzt auf genau einem Panel-Pixel.
                       image = image.transformed(by: CGAffineTransform(scaleX: 1, y: 1))
                   } else {
@@ -438,6 +494,51 @@ jobs:
                       ])
                   }
 
+                  if useMFX, let device = metalView?.device {
+                      let fit = min(target.width / src.width, target.height / src.height)
+                      let outW = max(2, Int((src.width * fit).rounded(.down)))
+                      let outH = max(2, Int((src.height * fit).rounded(.down)))
+                      let ox = (Int(target.width) - outW) / 2
+                      let oy = (Int(target.height) - outH) / 2
+
+                      if ensureMetalFX(device: device,
+                                       input: src,
+                                       output: CGSize(width: outW, height: outH)),
+                         let inTex = mfxIn, let outTex = mfxOut, let scaler = mfxScaler {
+
+                          // Drawable leeren, damit die Balken schwarz sind
+                          let rp = MTLRenderPassDescriptor()
+                          rp.colorAttachments[0].texture = drawable.texture
+                          rp.colorAttachments[0].loadAction = .clear
+                          rp.colorAttachments[0].storeAction = .store
+                          rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+                          cb.makeRenderCommandEncoder(descriptor: rp)?.endEncoding()
+
+                          ciContext?.render(image, to: inTex, commandBuffer: cb,
+                                            bounds: CGRect(origin: .zero, size: src),
+                                            colorSpace: outSpace)
+
+                          scaler.colorTexture = inTex
+                          scaler.outputTexture = outTex
+                          scaler.inputContentWidth = Int(src.width)
+                          scaler.inputContentHeight = Int(src.height)
+                          scaler.encode(commandBuffer: cb)
+
+                          if let blit = cb.makeBlitCommandEncoder() {
+                              blit.copy(from: outTex, sourceSlice: 0, sourceLevel: 0,
+                                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                                        sourceSize: MTLSize(width: outW, height: outH, depth: 1),
+                                        to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
+                                        destinationOrigin: MTLOrigin(x: ox, y: oy, z: 0))
+                              blit.endEncoding()
+                          }
+
+                          cb.present(drawable)
+                          cb.commit()
+                          return
+                      }
+                  }
+
                   let canvasRect = CGRect(origin: .zero, size: target)
                   let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
                   let composited = image.composited(over: canvas)
@@ -497,6 +598,7 @@ jobs:
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
+              @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
 
               var body: some View {
                   VStack(alignment: .leading, spacing: 10) {
@@ -562,6 +664,7 @@ jobs:
                       }
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
+                      Toggle("MetalFX Upscaling (Apple)", isOn: $metalFX)
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
                           onMaxQuality()
                       }
