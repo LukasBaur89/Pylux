@@ -15,8 +15,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Submodules (sr.ht über GitHub-Mirror)
+        run: |
+          git config --global url."https://github.com/thestr4ng3r/jerasure".insteadOf "https://git.sr.ht/~thestr4ng3r/jerasure"
+          git config --global url."https://github.com/thestr4ng3r/gf-complete".insteadOf "https://git.sr.ht/~thestr4ng3r/gf-complete"
+          git submodule update --init --recursive             third-party/jerasure third-party/gf-complete third-party/nanopb third-party/curl
 
       - name: Branding und Renderer
         run: |
