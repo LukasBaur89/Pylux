@@ -381,6 +381,24 @@ jobs:
                       ])
                   }
 
+                  // Klarheit: großer Radius = lokaler Detailkontrast (der "3D-Pop" teurer TVs)
+                  let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.25)
+                  if clarity > 0.02 {
+                      image = image.applyingFilter("CIUnsharpMask", parameters: [
+                          kCIInputRadiusKey: 8.0,
+                          kCIInputIntensityKey: min(clarity, 1.0) * 0.6
+                      ])
+                  }
+
+                  // Sättigung: 0.5 = neutral, 0 = 80 %, 1 = 120 %
+                  let satRaw = Float(UserDefaults.standard.object(forKey: "pxSharpSaturation") as? Double ?? 0.5)
+                  let sat = 0.8 + min(max(satRaw, 0), 1) * 0.4
+                  if abs(sat - 1.0) > 0.01 {
+                      image = image.applyingFilter("CIColorControls", parameters: [
+                          kCIInputSaturationKey: sat
+                      ])
+                  }
+
                   let vib = Float(UserDefaults.standard.object(forKey: "pxSharpVibrance") as? Double ?? 0.0)
                   if vib > 0.01 {
                       image = image.applyingFilter("CIVibrance", parameters: [
@@ -446,8 +464,10 @@ jobs:
               var onMaxQuality: () -> Void = {}
 
               @AppStorage("pxSharpLevel") private var level: Double = 0.6
+              @AppStorage("pxSharpClarity") private var clarity: Double = 0.25
               @AppStorage("pxSharpDenoise") private var denoise: Double = 0.0
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
+              @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
               @AppStorage("pxSharpDither") private var dither: Bool = false
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
 
@@ -462,6 +482,16 @@ jobs:
                                   .monospacedDigit()
                           }
                           Slider(value: $level, in: 0...1.0, step: 0.05)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Klarheit")
+                              Spacer()
+                              Text(String(format: "%.0f %%", clarity * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $clarity, in: 0...1, step: 0.05)
                       }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
@@ -482,6 +512,16 @@ jobs:
                                   .monospacedDigit()
                           }
                           Slider(value: $vibrance, in: 0...1, step: 0.05)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Sättigung")
+                              Spacer()
+                              Text(String(format: "%.0f %%", 80 + saturation * 40))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $saturation, in: 0...1, step: 0.05)
                       }
                       Toggle("Deband / Dither", isOn: $dither)
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
