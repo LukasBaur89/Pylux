@@ -115,6 +115,7 @@ jobs:
 
               private var metalView: MTKView?
               private var ciContext: CIContext?
+              private var ciContextHDR: CIContext?
               private var commandQueue: MTLCommandQueue?
               private let bufferLock = NSLock()
               private var latestBuffer: CVPixelBuffer?
@@ -123,6 +124,7 @@ jobs:
               private var hdrActive = false
               private var displayLink: CADisplayLink?
               private var needsPresent = false
+              private var hdrStreak = 0
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -146,6 +148,11 @@ jobs:
                   ciContext = CIContext(mtlDevice: device, options: [
                       .cacheIntermediates: false,
                       .workingColorSpace: CGColorSpaceCreateDeviceRGB()
+                  ])
+                  // Für HDR: linearer Arbeitsfarbraum, sonst rechnet der Schärfe-Pass in der PQ-Kurve.
+                  ciContextHDR = CIContext(mtlDevice: device, options: [
+                      .cacheIntermediates: false,
+                      .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
                   ])
 
                   let mv = MTKView(frame: bounds, device: device)
@@ -227,7 +234,15 @@ jobs:
                   bufferLock.unlock()
                   let hdr = pixelBufferIsHDR(pixelBuffer)
                   if hdr != hdrActive {
-                      DispatchQueue.main.async { [weak self] in self?.applyHDR(hdr) }
+                      // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
+                      // das Bild bei einzelnen Ausreißern (hell/dunkel).
+                      hdrStreak += 1
+                      if hdrStreak >= 8 {
+                          hdrStreak = 0
+                          DispatchQueue.main.async { [weak self] in self?.applyHDR(hdr) }
+                      }
+                  } else {
+                      hdrStreak = 0
                   }
                   if !loggedFrame {
                       loggedFrame = true
@@ -297,7 +312,7 @@ jobs:
                       caml.wantsExtendedDynamicRangeContent = true
                       caml.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
                       caml.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005,
-                                                           maxLuminance: 1000,
+                                                           maxLuminance: 1600,
                                                            opticalOutputScale: 100)
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] HDR/EDR an")
                   } else {
@@ -428,11 +443,12 @@ jobs:
                       outSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
                   }
 
-                  ciContext?.render(composited,
-                                    to: drawable.texture,
-                                    commandBuffer: cb,
-                                    bounds: canvasRect,
-                                    colorSpace: outSpace)
+                  let ctx = hdrActive ? (ciContextHDR ?? ciContext) : ciContext
+                  ctx?.render(composited,
+                              to: drawable.texture,
+                              commandBuffer: cb,
+                              bounds: canvasRect,
+                              colorSpace: outSpace)
 
                   cb.present(drawable)
                   cb.commit()
