@@ -494,6 +494,13 @@ jobs:
                       ])
                   }
 
+                  let outSpace: CGColorSpace
+                  if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+                      outSpace = pq
+                  } else {
+                      outSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+                  }
+
                   if useMFX, let device = metalView?.device {
                       let fit = min(target.width / src.width, target.height / src.height)
                       let outW = max(2, Int((src.width * fit).rounded(.down)))
@@ -542,13 +549,6 @@ jobs:
                   let canvasRect = CGRect(origin: .zero, size: target)
                   let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
                   let composited = image.composited(over: canvas)
-
-                  let outSpace: CGColorSpace
-                  if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
-                      outSpace = pq
-                  } else {
-                      outSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-                  }
 
                   let ctx = ciContext
                   ctx?.render(composited,
