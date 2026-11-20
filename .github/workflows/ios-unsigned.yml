@@ -323,11 +323,13 @@ jobs:
                   guard src.width > 0, src.height > 0 else { return }
 
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.6)
-                  if level > 0.02 {
-                      // Erst entrauschen (Codec-Artefakte), dann skalieren, dann schärfen.
+                  let denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.35)
+                  if level > 0.02 || denoise > 0.02 {
+                      // MPEG-Rauschfilter: glättet Blöcke in flachen Flächen, bevor skaliert wird.
+                      let nl = 0.003 + min(max(denoise, 0), 1) * 0.04
                       image = image.applyingFilter("CINoiseReduction", parameters: [
-                          "inputNoiseLevel": 0.015,
-                          "inputSharpness": 0.35
+                          "inputNoiseLevel": nl,
+                          "inputSharpness": 0.4
                       ])
                   }
 
@@ -427,7 +429,10 @@ jobs:
           # --- Schärfe-Slider in die Video-Einstellungen ----------------------------
           cat > /tmp/SharpnessRow.swift <<'ROW_EOF'
           struct SharpnessRow: View {
+              var onMaxQuality: () -> Void = {}
+
               @AppStorage("pxSharpLevel") private var level: Double = 0.6
+              @AppStorage("pxSharpDenoise") private var denoise: Double = 0.35
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpDither") private var dither: Bool = false
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
@@ -446,6 +451,16 @@ jobs:
                       }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
+                              Text("Rauschfilter (MPEG)")
+                              Spacer()
+                              Text(String(format: "%.0f %%", denoise * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $denoise, in: 0...1, step: 0.05)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
                               Text("Farbdynamik")
                               Spacer()
                               Text(String(format: "%.0f %%", vibrance * 100))
@@ -456,7 +471,10 @@ jobs:
                       }
                       Toggle("Deband / Dither", isOn: $dither)
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
-                      Text("Entrauschen → Lanczos auf Panel-Auflösung → Kantenschärfung. Der Regler verstärkt Kanten, nicht das Rauschen.")
+                      Button("Maximale Qualität: 1080p · 45 Mbit") {
+                          onMaxQuality()
+                      }
+                      Text("Erst Rauschfilter, dann Lanczos auf Panel-Auflösung, dann Kantenschärfung. Bei Blockbildung: Rauschfilter hoch, Schärfe runter.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                   }
@@ -470,8 +488,9 @@ jobs:
           changed = []
 
           anchor = '            .onChange(of: prefs.codec) { _ in prefs.save() }\n'
-          if 'SharpnessRow()' not in s and anchor in s:
-              s = s.replace(anchor, anchor + '\n            SharpnessRow()\n', 1)
+          if 'SharpnessRow' not in s and anchor in s:
+              call = '\n            SharpnessRow(onMaxQuality: { prefs.resolutionIndex = 3; prefs.bitrate = 45000; prefs.save() })\n'
+              s = s.replace(anchor, anchor + call, 1)
               s = s.rstrip('\n') + '\n\n' + open('/tmp/SharpnessRow.swift', encoding='utf-8').read()
               changed.append('sharpness-row')
 
