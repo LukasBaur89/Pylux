@@ -1,0 +1,368 @@
+name: PXSharp
+
+# Ein Datei-Build: Branding, Icon, Renderer und IPA entstehen hier.
+# Trigger: jeder Push, oder manuell über "Run workflow".
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setze Renderer ein
+        run: |
+          cat > ios/Pylux/Views/StreamVideoView.swift <<'SWIFT_SOURCE_EOF'
+          // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+          // SwiftUI view for displaying decoded video stream
+          //
+          // PATCH: Metal/CoreImage render path with Lanczos scaling + sharpening.
+          //
+          // Only this file needs to be replaced. The decoder keeps feeding the
+          // AVSampleBufferDisplayLayer (Picture-in-Picture stays alive); the subclass
+          // below intercepts every enqueued sample and hands the CVPixelBuffer to the
+          // Metal view sitting on top.
+          //
+          // Tunables: see the constants at the top of StreamVideoUIView.
+
+          import SwiftUI
+          import AVFoundation
+          import CoreImage
+          import MetalKit
+          import os.log
+
+          private let videoViewLog = OSLog(subsystem: "com.pylux.stream", category: "StreamVideoView")
+
+          struct StreamVideoView: UIViewRepresentable {
+              let aspectRatio: CGFloat
+              var displayMode: DisplayMode = .fit
+              var onViewCreated: ((StreamVideoUIView) -> Void)?
+
+              init(aspectRatio: CGFloat = 16.0 / 9.0, displayMode: DisplayMode = .fit, onViewCreated: ((StreamVideoUIView) -> Void)? = nil) {
+                  self.aspectRatio = aspectRatio
+                  self.displayMode = displayMode
+                  self.onViewCreated = onViewCreated
+              }
+
+              func makeCoordinator() -> Coordinator {
+                  Coordinator(aspectRatio: aspectRatio)
+              }
+
+              func makeUIView(context: Context) -> StreamVideoUIView {
+                  let view = StreamVideoUIView()
+                  view.coordinator = context.coordinator
+                  view.setupDisplayLayer()
+                  view.updateVideoGravity(displayMode)
+                  onViewCreated?(view)
+                  return view
+              }
+
+              func updateUIView(_ uiView: StreamVideoUIView, context: Context) {
+                  context.coordinator.aspectRatio = aspectRatio
+                  uiView.updateVideoGravity(displayMode)
+              }
+
+              class Coordinator {
+                  var aspectRatio: CGFloat
+                  var lastLoggedBounds: CGRect?
+                  init(aspectRatio: CGFloat) { self.aspectRatio = aspectRatio }
+              }
+          }
+
+          /// Intercepts sample buffers before they reach the display layer.
+          final class SharpeningDisplayLayer: AVSampleBufferDisplayLayer {
+              weak var frameSink: StreamVideoUIView?
+
+              override func enqueue(_ sampleBuffer: CMSampleBuffer) {
+                  if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                      frameSink?.enqueueFrame(imageBuffer)
+                  }
+                  // Keep the normal path alive so PiP and the fallback still work.
+                  super.enqueue(sampleBuffer)
+              }
+          }
+
+          /// UIView that hosts the AVSampleBufferDisplayLayer (PiP) and a Metal view on top.
+          final class StreamVideoUIView: UIView, MTKViewDelegate {
+              weak var coordinator: StreamVideoView.Coordinator?
+
+              // ---- Tunables ----------------------------------------------------------
+              /// 0.0 = nur skalieren, 0.55 = deutlich, 1.0 = aggressiv
+              var sharpness: Float = 0.55
+              /// true, falls das Bild kopfsteht
+              private let mirrorVertical = false
+              /// false = exakt altes Verhalten
+              private let sharpeningEnabled = true
+              // ------------------------------------------------------------------------
+
+              override class var layerClass: AnyClass { SharpeningDisplayLayer.self }
+
+              private var metalView: MTKView?
+              private var ciContext: CIContext?
+              private var commandQueue: MTLCommandQueue?
+              private let bufferLock = NSLock()
+              private var latestBuffer: CVPixelBuffer?
+              private var currentMode: DisplayMode = .fit
+              private var loggedFrame = false
+
+              override init(frame: CGRect) {
+                  super.init(frame: frame)
+                  commonInit()
+              }
+
+              required init?(coder: NSCoder) {
+                  super.init(coder: coder)
+                  commonInit()
+              }
+
+              private func commonInit() {
+                  clipsToBounds = true
+                  backgroundColor = .black
+                  setupMetal()
+              }
+
+              private func setupMetal() {
+                  guard sharpeningEnabled, let device = MTLCreateSystemDefaultDevice() else { return }
+                  commandQueue = device.makeCommandQueue()
+                  ciContext = CIContext(mtlDevice: device, options: [
+                      .cacheIntermediates: false,
+                      .workingColorSpace: CGColorSpaceCreateDeviceRGB()
+                  ])
+
+                  let mv = MTKView(frame: bounds, device: device)
+                  mv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                  mv.framebufferOnly = true
+                  mv.isPaused = true
+                  mv.enableSetNeedsDisplay = true
+                  mv.isOpaque = true
+                  mv.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+                  mv.colorPixelFormat = .bgra8Unorm
+                  mv.autoResizeDrawable = true
+                  mv.delegate = self
+                  mv.isUserInteractionEnabled = false
+                  if mirrorVertical {
+                      mv.transform = CGAffineTransform(scaleX: 1, y: -1)
+                  }
+                  addSubview(mv)
+                  metalView = mv
+                  os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
+              }
+
+              func setupDisplayLayer() {
+                  guard let avLayer = layer as? SharpeningDisplayLayer else { return }
+                  avLayer.frameSink = self
+                  avLayer.videoGravity = .resizeAspect
+                  avLayer.backgroundColor = UIColor.black.cgColor
+                  os_log(.default, log: videoViewLog, "[StreamVideoUIView] setupDisplayLayer ok")
+              }
+
+              func updateVideoGravity(_ mode: DisplayMode) {
+                  currentMode = mode
+                  if let avLayer = layer as? AVSampleBufferDisplayLayer {
+                      let gravity: AVLayerVideoGravity
+                      switch mode {
+                      case .fit: gravity = .resizeAspect
+                      case .zoom: gravity = .resizeAspectFill
+                      case .stretch: gravity = .resize
+                      }
+                      if avLayer.videoGravity != gravity {
+                          avLayer.videoGravity = gravity
+                          avLayer.flush()
+                      }
+                  }
+                  metalView?.setNeedsDisplay()
+              }
+
+              /// Display layer for attaching to VideoDecoder (PiP).
+              var videoDisplayLayer: AVSampleBufferDisplayLayer? {
+                  layer as? AVSampleBufferDisplayLayer
+              }
+
+              // MARK: - Frame input
+
+              func enqueueFrame(_ pixelBuffer: CVPixelBuffer) {
+                  guard sharpeningEnabled, metalView != nil else { return }
+                  bufferLock.lock()
+                  latestBuffer = pixelBuffer
+                  bufferLock.unlock()
+                  if !loggedFrame {
+                      loggedFrame = true
+                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d",
+                             CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer))
+                  }
+                  DispatchQueue.main.async { [weak self] in
+                      self?.metalView?.setNeedsDisplay()
+                  }
+              }
+
+              // MARK: - MTKViewDelegate
+
+              func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+              func draw(in view: MTKView) {
+                  guard let drawable = view.currentDrawable,
+                        let cb = commandQueue?.makeCommandBuffer() else { return }
+
+                  bufferLock.lock()
+                  let pb = latestBuffer
+                  bufferLock.unlock()
+                  guard let pixelBuffer = pb else { return }
+
+                  let target = CGSize(width: drawable.texture.width, height: drawable.texture.height)
+                  guard target.width > 0, target.height > 0 else { return }
+
+                  var image = CIImage(cvPixelBuffer: pixelBuffer)
+                  let src = image.extent.size
+                  guard src.width > 0, src.height > 0 else { return }
+
+                  let sx = target.width / src.width
+                  let sy = target.height / src.height
+                  var scaleX = sx
+                  var scaleY = sy
+                  switch currentMode {
+                  case .fit:
+                      let s = min(sx, sy); scaleX = s; scaleY = s
+                  case .zoom:
+                      let s = max(sx, sy); scaleX = s; scaleY = s
+                  case .stretch:
+                      break
+                  }
+
+                  image = image.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+                  let placed = image.extent
+                  let dx = (target.width - placed.width) / 2 - placed.origin.x
+                  let dy = (target.height - placed.height) / 2 - placed.origin.y
+                  image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+
+                  if sharpness > 0 {
+                      image = image.applyingFilter("CISharpenLuminance", parameters: [
+                          kCIInputSharpnessKey: sharpness
+                      ])
+                  }
+
+                  let canvasRect = CGRect(origin: .zero, size: target)
+                  let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
+                  let composited = image.composited(over: canvas)
+
+                  ciContext?.render(composited,
+                                    to: drawable.texture,
+                                    commandBuffer: cb,
+                                    bounds: canvasRect,
+                                    colorSpace: CGColorSpaceCreateDeviceRGB())
+
+                  cb.present(drawable)
+                  cb.commit()
+              }
+          }
+          SWIFT_SOURCE_EOF
+          wc -l ios/Pylux/Views/StreamVideoView.swift
+
+      - name: Setze Icon ein
+        run: |
+          python3 - <<'PY'
+          import base64
+          data = "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O/ffG0dNiOnsNwTCsH6FZnFp9aF/+cennzn+m79+y6zt/N5Lr7eilLans8suveTGX7jpyJH7xuPN0WhhmNuuqqrJZHtrc2PfgYuqui5ZA/QaYCXnqq73HTi0tbkxmWxXVeVYQACABtAAGkAD9NYAhzSABgABABoADYAGQAOAAAANgAZAA6ABQACABtAAGgANgAYAAQAaQANoAA2gAdAAIABAA2gADaABNAAaAAQAaAANoAE0gAbQABoABABoAA2gATSABtAAgAAADaABNIAG0AAaAASAU0ADaAANoAE0gAbQACAAQAOgATSABtAAGgAEAGgANIAG0AAaQAOAAAANgAZAA2gADQACADQAGgANoAE0AAgA0ABoADQAGgAEAGgADaAB0ABoABAAoAE0gAZAA6ABQACABtAAGkADaAA0AAgA0AAaQANoAA2ABgABABpAA2gADaABNIAGAAEAGkADaAANoAE0AAgAQANoAA2gATSABgABABpAA2gADaABNIAGAAEAGgANoAE0gAbQACAAQAOgATSABtAAGgAEAGgANAAaQANoABAAoAHQAGgADaABQACABkADoAHQACAAQANoAA2ABkADgAAADaABNAAaAA0AAgA0gAbQABpAA6ABQACABtAAGkADaAA0AAIA0AAaQANoAA2gATQAAgDQABpAA2gADaABQAAAGkADaAANoAE0AAgA0AAaQANoAA2gATQACADQAGgADaABNIAGAAEAGgANoAE0gAbQACAAQAOgAdAAGkADgAAADYAGQAN4nmgAEACgAdAAaAA0AAgA0AAaQAOgAdAAIABAA2gADYAGQAMgAAANoAE0gAbQAGgABACgATSABtAAGgANgAAANIAG0AAaQANoAA2AAAA0gAbQABpAA2gAEACABtAAGkADaAANAAIANIAG0AAaQANoAA0AAgA0ABpAA2gADaABQACABkADaAANoAE0AAgA0ABoADSABtAAIABAA6AB0ACeJxoABABoADQAGgANgAAANIAG0ABoADQAAgDQABpAA6AB0AAIAEADaAANoAE0ABoAAQBoAA2gATSABkADIAAADaABNIAG0AAaQAMgAAANoAE0gAbQABoABACgATSABtAAGkADgAAADaABNIAG0AAaQAOAAAANgAbQABpAA2gAEACgAdAAtp0G0AAaAAQAaAA0ABpAA2gABIAAAA2ABkADoAEQAIAGQAOgAdAACABAA2gADYAGQAMgAAANoAE0ABoADYAAADSABtAAGkADoAEQAIAG0AAaQANoADQAAgDQABpAA2gADaABNAACANAAGkADaAANoAFAAAAaQANoAA2gATQACADQABpAA2gADaABNAAIANAAaAANoAE0gAYAAQAaAA1g22kADaABEACABkADoAE0gAZAAAAaAA2ABkADIAAADYAGQAOgARAAgAbQAGcbYIiDSQNoAA2gARAAwHnZAJcuvvsaDTDPBvibe+NoIYQ90AC7szaEaNv13wDv/YWb7jty3/b2Vl2P9kADVFUpxfNkPg1wemM62UkaAAEAvEADbN//hfpVb15459Vlsw2VBui9AW64ttr32u2//XxcXA6DHHbfb4Bnjp36jV87PN1tk1bsvQEuv/SS99540+c+91ftbFZV9XAbYGd7a3Nj/6FXxpQ0wDwaoNp/4UWnT53YnU40AAIAeJ4GSCmkavLAlxev++Xmja8uYw0wjwZ497Xdd09P//Uf4tJqyHmYDbCwuPLgPz9w0cWvfff1b9+ZzjRA3w0w2b389Zdc/OpL7rv383WzEAf5vZEQQlXVk52tdjbbf/DQMIP2fG+AUtXNytr6qePHctf5O0UAAM+ZACVWTdmdbN9/7+J1v6gB5nLTLpNu+ZZfyc+cmB59YLANEEJoFha/dN+Ri1/z2nddpwHm8OL6znR23Tuuufg1r/vikXvrUTPUBihVVW+d3mhnu/sOHioaoPcGyDmPFhfX1vedOqEBEADACzRAMyrbm9v3H9EAc7ljhxDDLC//6uH8nYE3QKxHoy8euVcDhPm8XZR2prN3Xff2i1/z2mE3QKiqanz6ZDubaYB5NcDi4vLqBRoAAQC8cAOMFjTAPBsg740GiDHVo0YDaIAX81kgDTDXBugWlzQAAgDQABrg5XiiaAANoAE0AAIA0ABoAM8TDaABNAACANAAaAA0gAbQAAgAQAOgAdAAaAAEAKAB0ABoADQAAgDQABpAA6AB0AAIAEADaAANgAZAAyAAAA2gATSABtAAaAAEAKABNIAG0AAaAA2AAAA0gAbQABpAA2gAf6cIAEADaAANoAE0gAZAAAgAQANoAA2gATSABkAAABpAA2gADaABNIAGQAAAGgANoAE0gAbQAAgAQAOgAdAAGkADIAAADYAGQANoAA2AAAA0ABoADYAGQAAAGgANgAZAAyAAAA2gATQAGgANgAAANIAG0ABoADQAAgDQABpAA2gADYAGQAAAGkADaAANoAHQAAgAQANoAA2gATSABvB3KgAANIAG0AAaQANoAAQAoAE0gAbQABpAA2gABACgAdwzNIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAaAANoAEQAIAGQAOgATSABkAAABoADYAGQAMgAAANgAZAA6ABEACABtAAGgANgAZAAAAaQANoADQAGgABAGgADaABNIAGQAMIAAANoAE0gAbQAK4oGkAAAGgADaABNIAG0AAIAAANoAE0gAbQABoAAQBoAA2gATSABtAAGgABAGgANIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAaAANoAEQAIAGQAOgATSABkAAABoADYAGQAMgAAANgAZAA6ABEACABtAAGgANgAYQAAAaQANoADQAGkAAAGgADaABNIAGQAMIAAANoAE0gAbQABpAAwgAAA2gATSABtAAGgABAKABNIAG0AAaQAMgAAANoAE0gAbQABpAAyAAAA2ABtAAGkADaAAEAKAB0AAaQANoAA2AAAA0ABoADaABNAACANAAaAA0gAbQAAgAQAOgAdAAaAABAKAB0ABoADSAAADQABpAA6AB0AACAEADaAANoAE0ABpAAABoAA2gATSABkADCAAADaABNIAG0AAaQAMIAAANoAE0gAbQABoAAQCgATSABtAAGkADIAAADaABNIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAGkADaAANgAAANAAaAA2gATQAAgDQAGgANIAG0AACAEADoAHQAGgAAQCgAdyxNQAaAA0gAAA0gAbQAGgANIAAANAAGkADaAANgAYQAAAaQANoAA2gAdAAAgBAA2gADaABNIAG0AACAEADaAANoAE0gAZAAABoAA2gATSABtAACABAA2gADaABNIAG0AAIAEADoAE0gAbQABoAAQBoADSABtAAGkADCAAADYAGQANoAA0gAAA0ABoADaABNIAAABh6A1z/S82bX1W2ckjRwcylASZHH0gLy2GIs+lHG2A662L0PJlXA3whVlVK1UAH07MNsP/gRcOslJ+JBljfd/L4sa7rogYQAADP2wA74+37j4ze8vbmskvDrATbrs8GKDHM8vIth8vmdHr0n2IzGnIDfOmv71vbd+Cd1/1822UNMJcGuPSyN/39l/+uy2Ww519V9fj0qd3dyQX7Dnrg5tIAC4tLa+v7xxsnu7b1d/pT/d05AuC8lXNcWOqOf6f91rdCHYM37vtvgFmOS2F05dVDPvxScl2PSp49+uh/RK/szuchCCGEt73tbYuLi2WInxb7oWf1ztY45xyMz7k8VXJeXFqumyaUIgAEAMCP36dTCKVsbhz8k79c++DvltM5VJVT6VXbplc0m5+553t/9NtxtDDYBqjrerxx7I7f/4O/uPvTu51V0bdZ266vLjx49JGbbrzxxImTVV0P80P2Mca2na2uXfDGq66p6loq9l6JJVVV13Xf+K9/H29upKryZQwBAPDj6z+XrfGBO+9eu+138v/6EvA81v+hevOue0589La0vBZiGmYA1HW9dfr47R/88J9/6k+3J20pQQD0vf5XFh46+sjhmw9vnD69sLScB/kOwLPrf/0NV1ydqip3ncduDuu/bb/59Ue3xht13Vj/AgDg+df/7e/Px9pQ105lDuv/s/ec+MhtcWV1+Ov/rk9/cmsyK8H6n8/6v/nmw6dOnVpcWh7msP7B9V/Vde58U3xu63+8af0LAADrf/jrP6RQ8vDXfwjRqpvv+u+sf6x/AQBg/Vv/1r/1b/1b/9a/AACw/q1/69/6t/6tfwQAYP1b/9a/9W/9W//WPwIAsP6x/q1/69/6t/4RAID1j/Vv/Vv/1r/1LwAArH+sf6x/69/6FwAA1j/WP9Y/1r8AALD+rX/rH+sf618AAFj/1r/1j/WP9S8AAKx/69/6t/6tf6x/AQBg/Vv/1r/1b/1b/9a/AACw/q1/69/6t/6tfwQAYP1b/9a/9W/9W//WPwIAsP6x/q1/69/6t/4RAID1j/Vv1Vn/1r/1jwAArH+sf6x/69/6FwAA1j/WP9Y/1r8AALD+rX/rH+sf618AAFj/1r/1j/WP9S8AAKx/69/6t/6tf6x/AQBg/Vv/1r/1b/1b/9a/AACw/q1/69/6t/6tfwQAYP1b/9a/9W/9W//WPwIAsP6x/q1/69/6t/4RAID1j/Xv0bP+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/rH8B4AgA69/6t/6x/rH+BQCA9W/9W/9Y/1j/AgDA+rf+rX/r3/rH+hcAANa/9W/9W//Wv/Vv/QsAAOvf+rf+rX/r3/pHAADWv/Vv/Vv/1r/1b/0jAADrH+vf+rf+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/69/6RwAA1j/WP9Y/1j8CALD+rX/rH+sf6x8BAFj/1r/1b/1b/1j/AgDA+rf+rX/r3/rH+hcAANa/9W/9W//Wv/Vv/QsAAOvf+rf+rX/r3/pHAADWv/Vv/Vv/1r/1b/0jAADrH+vf+rf+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/69/6RwAA1j/WP9Y/1j8CALD+rX/rH+sf6x8BAFj/1r/1b/1b/1j/CADA+rf+rX/r3/rH+hcAANa/9W/9W//Wv/Vv/QsAAOvf+rf+rX/r3/pHAADWv/Vv/Vv/1r/1b/0jAADrH+vf+rf+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/69/6RwAA1j/WP9Y/1j8CALD+rX/rH+sf6x8BAFj/1r/1b/1b/1j/CADA+rf+rX/r3/rH+kcAANa/9W/9W//Wv/XvWAQAgPVv/Vv/1r/1b/0jAADr3/q3/q1/69/6t/4RAID1j/Vv/Vv/1r/1jwAArH+sf6x/69/6RwAA1j/WP9a/54n1jwAArH+sf6x/rH8EAGD9W//WP9Y/1j8CALD+rX/r3/q3/rH+EQCA9W/9W//Wv/WP9Y8AAKx/69/6t/6tf+sfBABg/Vv/1r/1b/1b/wgAwPq3/q1/69/6t/6tfwQAYP1j/Vv/1r/1b/0jAADrH+sf69/6t/4RAID1j/WP9e/hs/4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/rH+EQCA9W/9W//Wv/Vv/YMAAKx/69/6t/6tf+sfBABY/9a/9W/9W//Wv/UPAgCsf6x/69/6t/6tfwQAYP1j/WP9W//WPwIAsP6x/rH+sf4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CADA+rf+rX/r3/q3/kEAgPWP9W/9W//Wv/UPAgCsf6x/69/6t/6tfxAAYP1j/WP9W//WPwIAsP6x/rH+sf4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CADA+rf+rX/r3/q3/kEAgPWP9W/9W//Wv/UPAgCsf6x/69/6t/6tfxAAYP1j/WP9W//WPwgAsP6x/rH+sf4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CADA+rf+rX/r3/q3/kEAgPWP9W/9W//Wv/UPAgCsf6x/69/6t/6tfxAAYP1j/WP9W//WPwgAsP6x/rH+sf5BAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+rf+rX/r3/oHAQDWP9Y/1r/1b/2DAADrH+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+rf+rX/r3/oHAQDWP9Y/1r/1b/2DAADrH+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/rH+sf6BwEA1r/1b/1b/9Y/1j8IALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+rfqrH/r3/oHAQDWP9Y/1r/1b/2DAADrH+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/rH+sf6BwEA1r/1b/1b/9Y/1j8IALD+rX/r3/q3/q1/6x8EAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+vfoWf/Wv/UPAgCsf6x/rH/r3/oHAQDWP9Y/1j/WPwgAsP6tf+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/q3/q1/rH8QAGD9W//Wv/Vv/Vv/1j8IALD+rX/r3/q3/q1/QABg/Vv/1r/1b/1b/9Y/CACw/rH+rX/r3/q3/kEAgPWP9Y/1b/1b/yAAwPrH+sf6t/6tfxAAYP1j/WP9Y/2DAADr3/rfS+u/WP/W/wus/9Uz67+y/q1/2KOMIc7j9R9L15bJ+ODH7177wPu7705j3YScHUx/ct4T6z+ltHX6+Afu+NBnPvXJze1pKTGlkA2LvnRdXl9dePDoI4eHv/5ns5W1C95w5dVVVeUuxxhDKUEC9HL81j+8nH9RC8vrToHzcv2fuTEf+Phn1+54Xz4WQhXcp/td/yEuhc277jnx0aGv/93J9of/8I8/cefHQgjF06RfZw78qw89fOstt54c8PoPIZbcrV6w7+z6zzl6pvT7TIkxzmYz6x8EALxgALRtWt8/esf1ZTwOKdl1ve+6EHKePviVkGJI9TDX/5kPFVRVdcMNN+Tc5Vx8oqP/86+r9PDXHjl54nuLSytDXf9n/6nLq2t13eTcWf9zCMUUdyc7k+3tqq6tfxAA8PwN0LV5MvZdl7k9AiHGlbUz02ng/9Tp9qbHa47qheWmafLgP6GXc1dKsf7n1QApxZQq6x8EAPykCVpZ/2G+n+/eE//MlJLX/uc6rPNeWXWeJ/N9E8YhQPAlYPjJrxntkQHK3AeoQ8AGBYKfAQUAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAABAAAAAAAIAAAAQAAAAwN5QOwLOiDG+hP+qlOLoAMBdGwHA3tO17TlfR0JIKcbofSQA6E8ppeu6+FLu2umllQMCgHBevpCwtm9/jDGUc7iOxBh3p5PpZMfVBAB6W/913SytrIZzfTk/xp2tcdvO3LURAIRSSlXVr3/TVXU9evFvDpZS6lHz7Scef/rJx+um8a4iAIT//xfsctctr6xe/pZrcm5DePFTvqRUP/bf/7Zx8niqa3dtAQAhhJBzl3N7TgGQ2+gKAgCh91fuctfmcm4BEIrvACAA+LGXFc7lOnL2hQinBgBzeS8glHO8cbtrE/wMKAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAAAeAIAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAADoU+0I+CnFGGOMzqFPpRSHAAznLuAQer/nOnMEAPNcorlt2xijSdrfmYeQUozR23fAIF6P6LrOGu0zANq2zblzFAgA5nbdX1hcWt9/sKrrIAD6Wv8xxt3pZDrZ8aobMPe7QF03SyurbgF9FkDuuuXVNa+7IQCYz4sQuev2X/iKAxddHFyF+rzdjppvP/H4008+XjeNGwAw37vA8srq5W+5JufWh1L6fTGolJydOQKAue3R0rYuQX0eeG594AoY0kWpa3MRAH2/F+wYEACE+b4K5AwcOPAzfVEqvpba54E7AoKfAQUAAAQAAAAgAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAB4brUj4Fnl2f8x7IepeIyAQV2W3DvcPhAA7E0pVSnVxdVh6PfZkuo6xugogCGIMaaqDjmE4Lo09BtISm4fPPuXu7C87hSIMS6vrsUYvYgz/LdpYoy708l0suM6Dsz9JYm6bpZWVr20vFdu9jtb47aduX0gADgrd51D2CsNkFKM0Rd4gEE0QM7ZnNw7t49k/RN8BIjvq2pPhr10x3UIQBjGG8i124fbBwIAFwUA3D6A4GdAAQAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAA0Lf/Ayehbpa0f6QCAAAAAElFTkSuQmCC"
+          path = "ios/Pylux/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
+          with open(path, "wb") as f:
+              f.write(base64.b64decode(data))
+          print("icon bytes", len(base64.b64decode(data)))
+          PY
+
+      - name: Branding
+        run: |
+          set -e
+          sed -i '' 's/PRODUCT_BUNDLE_IDENTIFIER = com\.pylux\.stream;/PRODUCT_BUNDLE_IDENTIFIER = com.pylux.stream.sharp;/g' \
+            ios/Pylux.xcodeproj/project.pbxproj
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string PXSharp" ios/Pylux/Info.plist \
+            || /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName PXSharp" ios/Pylux/Info.plist
+          cat > ios/Pylux/Pylux.entitlements <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          </dict>
+          </plist>
+          PLIST
+          git --no-pager diff --stat | tail -5
+
+      - name: Abhängigkeiten
+        run: |
+          brew install cmake ninja protobuf@29 python-setuptools
+          pip3 install --user --break-system-packages 'protobuf>=5,<6'
+          echo "$(brew --prefix)/opt/protobuf@29/bin" >> "$GITHUB_PATH"
+
+      - name: iOS Toolchain
+        working-directory: ios
+        run: |
+          if [ ! -f ios.toolchain.cmake ]; then
+            curl -sL -o ios.toolchain.cmake \
+              https://raw.githubusercontent.com/leetal/ios-cmake/master/ios.toolchain.cmake
+          fi
+
+      - name: Baue chiaki-lib
+        working-directory: ios
+        run: |
+          cmake -S . -B build-iphoneos -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+            -DPLATFORM=OS64 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_LIBIDN2=OFF \
+            -DCURL_USE_LIBPSL=OFF \
+            -DUSE_NGHTTP2=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build build-iphoneos --config Release --target chiaki-lib
+
+      - name: Kombiniere statische Libs
+        working-directory: ios
+        run: |
+          find build-iphoneos -name "*.a" -print0 | \
+            xargs -0 libtool -static -o build-iphoneos/libchiaki_complete.a
+
+      - name: Baue App (ohne Signatur)
+        working-directory: ios
+        run: |
+          xcodebuild -project Pylux.xcodeproj -scheme Pylux \
+            -sdk iphoneos -configuration Release \
+            -derivedDataPath build-derived \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Packe IPA
+        run: |
+          APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
+          test -d "$APP"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist"
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry PXSharp-unsigned.ipa Payload
+          ls -lh PXSharp-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PXSharp-unsigned
+          path: out/PXSharp-unsigned.ipa
+          retention-days: 14
+
+      - name: Release mit IPA
+        uses: softprops/action-gh-release@v2
+        with:
+          tag: build-${{ github.run_number }}
+          name: PXSharp ${{ github.run_number }}
+          body: |
+            IPA unten unter "Assets" laden und über SideStore installieren.
+          files: out/PXSharp-unsigned.ipa
