@@ -139,7 +139,7 @@ jobs:
                   commandQueue = device.makeCommandQueue()
                   ciContext = CIContext(mtlDevice: device, options: [
                       .cacheIntermediates: false,
-                      .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+                      .workingColorSpace: CGColorSpaceCreateDeviceRGB()
                   ])
 
                   let mv = MTKView(frame: bounds, device: device)
@@ -151,11 +151,15 @@ jobs:
                   mv.enableSetNeedsDisplay = true
                   mv.isOpaque = true
                   mv.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-                  // 16-Bit-Float, damit HDR (PQ) verlustfrei durchgeht.
-                  mv.colorPixelFormat = .rgba16Float
+                  // SDR bleibt bei 8 Bit — exakt wie im Build, der sauber aussah.
+                  mv.colorPixelFormat = .bgra8Unorm
                   mv.autoResizeDrawable = true
                   mv.delegate = self
                   mv.isUserInteractionEnabled = false
+                  if let caml = mv.layer as? CAMetalLayer {
+                      caml.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+                      caml.wantsExtendedDynamicRangeContent = false
+                  }
                   if mirrorVertical {
                       mv.transform = CGAffineTransform(scaleX: 1, y: -1)
                   }
@@ -201,10 +205,14 @@ jobs:
                   bufferLock.lock()
                   latestBuffer = pixelBuffer
                   bufferLock.unlock()
+                  let hdr = pixelBufferIsHDR(pixelBuffer)
+                  if hdr != hdrActive {
+                      DispatchQueue.main.async { [weak self] in self?.applyHDR(hdr) }
+                  }
                   if !loggedFrame {
                       loggedFrame = true
-                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d",
-                             CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer))
+                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
+                             CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), hdr ? 1 : 0)
                   }
                   DispatchQueue.main.async { [weak self] in
                       self?.metalView?.setNeedsDisplay()
@@ -229,8 +237,9 @@ jobs:
               private func applyHDR(_ on: Bool) {
                   guard on != hdrActive else { return }
                   hdrActive = on
-                  guard let caml = metalView?.layer as? CAMetalLayer else { return }
+                  guard let mv = metalView, let caml = mv.layer as? CAMetalLayer else { return }
                   if on {
+                      mv.colorPixelFormat = .rgba16Float
                       caml.wantsExtendedDynamicRangeContent = true
                       caml.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
                       caml.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005,
@@ -238,6 +247,7 @@ jobs:
                                                            opticalOutputScale: 100)
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] HDR/EDR an")
                   } else {
+                      mv.colorPixelFormat = .bgra8Unorm
                       caml.wantsExtendedDynamicRangeContent = false
                       caml.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
                       caml.edrMetadata = nil
@@ -261,12 +271,16 @@ jobs:
                   let target = CGSize(width: drawable.texture.width, height: drawable.texture.height)
                   guard target.width > 0, target.height > 0 else { return }
 
-                  var image = CIImage(cvPixelBuffer: pixelBuffer)
+                  var image: CIImage
+                  if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+                      // 10-Bit-Buffer sind PQ-kodiert — explizit taggen, sonst nimmt CoreImage sRGB an
+                      // und die PQ-Ausgabe wirkt weiß/ausgewaschen.
+                      image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: pq])
+                  } else {
+                      image = CIImage(cvPixelBuffer: pixelBuffer)
+                  }
                   let src = image.extent.size
                   guard src.width > 0, src.height > 0 else { return }
-
-                  let hdr = pixelBufferIsHDR(pixelBuffer)
-                  if hdr != hdrActive { applyHDR(hdr) }
 
                   let sx = target.width / src.width
                   let sy = target.height / src.height
