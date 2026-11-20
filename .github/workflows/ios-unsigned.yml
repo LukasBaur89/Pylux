@@ -124,6 +124,7 @@ jobs:
               private var displayLink: CADisplayLink?
               private var needsPresent = false
               private var hdrStreak = 0
+              private var casKernel: CIKernel?
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -148,6 +149,7 @@ jobs:
                       .cacheIntermediates: false,
                       .workingColorSpace: CGColorSpaceCreateDeviceRGB()
                   ])
+                  casKernel = Self.makeCASKernel()
 
                   let mv = MTKView(frame: bounds, device: device)
                   mv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -282,6 +284,32 @@ jobs:
                   metalView?.draw()
               }
 
+              // MARK: - CAS
+
+              /// Kantenschärfung mit Amplitudenbegrenzung (AMD CAS): schärft nur dort,
+              /// wo ein echter Kontrastunterschied ist. Keine Höfe, kein Rausch-Boost.
+              private static func makeCASKernel() -> CIKernel? {
+                  let src = """
+                  kernel vec4 pxcas(sampler img, float amount, float texel) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(img, p);
+                      vec4 n = sample(img, p + vec2(0.0, -texel));
+                      vec4 s = sample(img, p + vec2(0.0,  texel));
+                      vec4 e = sample(img, p + vec2( texel, 0.0));
+                      vec4 w = sample(img, p + vec2(-texel, 0.0));
+
+                      vec3 mn = min(min(n.rgb, s.rgb), min(e.rgb, w.rgb));
+                      vec3 mx = max(max(n.rgb, s.rgb), max(e.rgb, w.rgb));
+                      vec3 amp = sqrt(clamp(min(mn, 2.0 - mx) / max(mx, vec3(0.001)), 0.0, 1.0));
+                      float peak = -1.0 / mix(8.0, 4.0, clamp(amount, 0.0, 1.0));
+                      vec3 k = amp * peak;
+                      vec3 outc = ((n.rgb + s.rgb + e.rgb + w.rgb) * k + c.rgb) / (1.0 + 4.0 * k);
+                      return vec4(clamp(outc, 0.0, 1.0), c.a);
+                  }
+                  """
+                  return CIKernel(source: src)
+              }
+
               // MARK: - HDR / EDR
 
               /// 10-Bit-PQ-Buffer? Dann EDR-Layer aktivieren, sonst SDR.
@@ -351,8 +379,9 @@ jobs:
 
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.6)
                   let denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0)
-                  if denoise > 0.02 {
-                      // MPEG-Rauschfilter: glättet Blöcke in flachen Flächen, bevor skaliert wird.
+                  if denoise > 0.25 {
+                      // CINoiseReduction ist teuer — erst ab 25 % einschalten, darunter kostet es
+                      // nur Leistung ohne sichtbaren Effekt (und lässt das Bild ruckeln).
                       let nl = 0.003 + min(denoise, 1) * 0.03
                       image = image.applyingFilter("CINoiseReduction", parameters: [
                           "inputNoiseLevel": nl,
@@ -388,10 +417,19 @@ jobs:
                   image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
 
                   if level > 0.02 {
-                      image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 1.0,
-                          kCIInputIntensityKey: min(level, 1.0)
-                      ])
+                      if let kernel = casKernel,
+                         let out = kernel.apply(extent: image.extent,
+                                                roiCallback: { _, rect in rect.insetBy(dx: -2, dy: -2) },
+                                                arguments: [image,
+                                                            NSNumber(value: level),
+                                                            NSNumber(value: 1.0 / Float(max(image.extent.width, 1)))]) {
+                          image = out
+                      } else {
+                          image = image.applyingFilter("CIUnsharpMask", parameters: [
+                              kCIInputRadiusKey: 1.0,
+                              kCIInputIntensityKey: min(level, 1.0)
+                          ])
+                      }
                   }
 
                   // Detail: mittlerer Radius = Textur (Gras, Stoff, Metall)
@@ -412,9 +450,9 @@ jobs:
                       ])
                   }
 
-                  // Sättigung: 0.5 = neutral, 0 = 80 %, 1 = 120 %
+                  // Farbe: 50 % = neutral, 0 % = 90 %, 100 % = 110 %
                   let satRaw = Float(UserDefaults.standard.object(forKey: "pxSharpSaturation") as? Double ?? 0.5)
-                  let sat = 0.8 + min(max(satRaw, 0), 1) * 0.4
+                  let sat = 0.9 + min(max(satRaw, 0), 1) * 0.2
                   if abs(sat - 1.0) > 0.01 {
                       image = image.applyingFilter("CIColorControls", parameters: [
                           kCIInputSaturationKey: sat
@@ -543,7 +581,7 @@ jobs:
                           HStack {
                               Text("Sättigung")
                               Spacer()
-                              Text(String(format: "%.0f %%", 80 + saturation * 40))
+                              Text(String(format: "%.0f %%", 90 + saturation * 20))
                                   .foregroundColor(.secondary)
                                   .monospacedDigit()
                           }
@@ -569,7 +607,7 @@ jobs:
                               saturation = 0.5
                           }
                       }
-                      Text("Rauschfilter nur bei Blockbildung hochdrehen — er glättet. Standard 0 %. Schärfe wirkt danach auf Panel-Auflösung.")
+                      Text("Schärfe nutzt CAS (kantengeführt, keine Höfe). Rauschfilter greift ab 25 %. Farbe: 50 % = neutral.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                   }
