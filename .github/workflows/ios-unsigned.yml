@@ -39,6 +39,7 @@ jobs:
           import SwiftUI
           import AVFoundation
           import CoreImage
+          import CoreVideo
           import MetalKit
           import os.log
 
@@ -115,6 +116,7 @@ jobs:
               private var latestBuffer: CVPixelBuffer?
               private var currentMode: DisplayMode = .fit
               private var loggedFrame = false
+              private var hdrActive = false
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -137,7 +139,7 @@ jobs:
                   commandQueue = device.makeCommandQueue()
                   ciContext = CIContext(mtlDevice: device, options: [
                       .cacheIntermediates: false,
-                      .workingColorSpace: CGColorSpaceCreateDeviceRGB()
+                      .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ?? CGColorSpaceCreateDeviceRGB()
                   ])
 
                   let mv = MTKView(frame: bounds, device: device)
@@ -149,7 +151,8 @@ jobs:
                   mv.enableSetNeedsDisplay = true
                   mv.isOpaque = true
                   mv.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-                  mv.colorPixelFormat = .bgra8Unorm
+                  // 16-Bit-Float, damit HDR (PQ) verlustfrei durchgeht.
+                  mv.colorPixelFormat = .rgba16Float
                   mv.autoResizeDrawable = true
                   mv.delegate = self
                   mv.isUserInteractionEnabled = false
@@ -208,6 +211,40 @@ jobs:
                   }
               }
 
+              // MARK: - HDR / EDR
+
+              /// 10-Bit-PQ-Buffer? Dann EDR-Layer aktivieren, sonst SDR.
+              private func pixelBufferIsHDR(_ pb: CVPixelBuffer) -> Bool {
+                  let fmt = CVPixelBufferGetPixelFormatType(pb)
+                  if fmt == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                     fmt == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange {
+                      return true
+                  }
+                  if let prim = CVBufferCopyAttachment(pb, kCVImageBufferColorPrimariesKey, nil) {
+                      if String(describing: prim).contains("2020") { return true }
+                  }
+                  return false
+              }
+
+              private func applyHDR(_ on: Bool) {
+                  guard on != hdrActive else { return }
+                  hdrActive = on
+                  guard let caml = metalView?.layer as? CAMetalLayer else { return }
+                  if on {
+                      caml.wantsExtendedDynamicRangeContent = true
+                      caml.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
+                      caml.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005,
+                                                           maxLuminance: 1000,
+                                                           opticalOutputScale: 100)
+                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] HDR/EDR an")
+                  } else {
+                      caml.wantsExtendedDynamicRangeContent = false
+                      caml.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+                      caml.edrMetadata = nil
+                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] HDR/EDR aus")
+                  }
+              }
+
               // MARK: - MTKViewDelegate
 
               func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -227,6 +264,9 @@ jobs:
                   var image = CIImage(cvPixelBuffer: pixelBuffer)
                   let src = image.extent.size
                   guard src.width > 0, src.height > 0 else { return }
+
+                  let hdr = pixelBufferIsHDR(pixelBuffer)
+                  if hdr != hdrActive { applyHDR(hdr) }
 
                   let sx = target.width / src.width
                   let sy = target.height / src.height
@@ -267,11 +307,18 @@ jobs:
                   let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
                   let composited = image.composited(over: canvas)
 
+                  let outSpace: CGColorSpace
+                  if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+                      outSpace = pq
+                  } else {
+                      outSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+                  }
+
                   ciContext?.render(composited,
                                     to: drawable.texture,
                                     commandBuffer: cb,
                                     bounds: canvasRect,
-                                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB())
+                                    colorSpace: outSpace)
 
                   cb.present(drawable)
                   cb.commit()
@@ -327,16 +374,22 @@ jobs:
           python3 - <<'PATCH_EOF'
           p = 'ios/Pylux/Views/SettingsView.swift'
           s = open(p, encoding='utf-8').read()
+          changed = []
+
           anchor = '            .onChange(of: prefs.codec) { _ in prefs.save() }\n'
-          row = '\n            SharpnessRow()\n'
-          extra = open('/tmp/SharpnessRow.swift', encoding='utf-8').read()
           if 'SharpnessRow()' not in s and anchor in s:
-              s = s.replace(anchor, anchor + row, 1)
-              s = s.rstrip('\n') + '\n\n' + extra
+              s = s.replace(anchor, anchor + '\n            SharpnessRow()\n', 1)
+              s = s.rstrip('\n') + '\n\n' + open('/tmp/SharpnessRow.swift', encoding='utf-8').read()
+              changed.append('sharpness-row')
+
+          codec_anchor = '                Text("H.265 (PS5 only)").tag(1)\n'
+          if 'H.265 HDR' not in s and codec_anchor in s:
+              s = s.replace(codec_anchor, codec_anchor + '                Text("H.265 HDR (PS5 + HDR-TV)").tag(2)\n', 1)
+              changed.append('hdr-codec')
+
+          if changed:
               open(p, 'w', encoding='utf-8').write(s)
-              print('settings: patched')
-          else:
-              print('settings: skipped anchor=%s already=%s' % (anchor in s, 'SharpnessRow()' in s))
+          print('settings changed:', changed)
           PATCH_EOF
 
           git --no-pager diff --stat | tail -8
