@@ -322,6 +322,15 @@ jobs:
                   let src = image.extent.size
                   guard src.width > 0, src.height > 0 else { return }
 
+                  let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.6)
+                  if level > 0.02 {
+                      // Erst entrauschen (Codec-Artefakte), dann skalieren, dann schärfen.
+                      image = image.applyingFilter("CINoiseReduction", parameters: [
+                          "inputNoiseLevel": 0.015,
+                          "inputSharpness": 0.35
+                      ])
+                  }
+
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   switch currentMode {
@@ -349,11 +358,10 @@ jobs:
                   let dy = (target.height - placed.height) / 2 - placed.origin.y
                   image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
 
-                  let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.7)
-                  if level > 0.01 {
+                  if level > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 1.4,
-                          kCIInputIntensityKey: min(level, 1.6)
+                          kCIInputRadiusKey: 1.0,
+                          kCIInputIntensityKey: min(level, 1.0) * 0.85
                       ])
                   }
 
@@ -367,7 +375,7 @@ jobs:
                   let useDither = UserDefaults.standard.object(forKey: "pxSharpDither") as? Bool ?? false
                   if useDither {
                       image = image.applyingFilter("CIDither", parameters: [
-                          "inputIntensity": 0.2
+                          "inputIntensity": 0.06
                       ])
                   }
 
@@ -419,7 +427,7 @@ jobs:
           # --- Schärfe-Slider in die Video-Einstellungen ----------------------------
           cat > /tmp/SharpnessRow.swift <<'ROW_EOF'
           struct SharpnessRow: View {
-              @AppStorage("pxSharpLevel") private var level: Double = 0.7
+              @AppStorage("pxSharpLevel") private var level: Double = 0.6
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpDither") private var dither: Bool = false
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
@@ -434,7 +442,7 @@ jobs:
                                   .foregroundColor(.secondary)
                                   .monospacedDigit()
                           }
-                          Slider(value: $level, in: 0...1.5, step: 0.05)
+                          Slider(value: $level, in: 0...1.0, step: 0.05)
                       }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
@@ -448,7 +456,7 @@ jobs:
                       }
                       Toggle("Deband / Dither", isOn: $dither)
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
-                      Text("Lanczos-Skalierung auf Panel-Auflösung, danach Kantenschärfung. Über 100 % verstärkt Halos an harten Kanten.")
+                      Text("Entrauschen → Lanczos auf Panel-Auflösung → Kantenschärfung. Der Regler verstärkt Kanten, nicht das Rauschen.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                   }
