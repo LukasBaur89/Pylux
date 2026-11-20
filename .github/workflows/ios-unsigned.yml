@@ -155,7 +155,9 @@ jobs:
                   mv.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
                   // SDR bleibt bei 8 Bit — exakt wie im Build, der sauber aussah.
                   mv.colorPixelFormat = .bgra8Unorm
-                  mv.autoResizeDrawable = true
+                  // Drawable-Größe selbst bestimmen: sonst kann MTKView mit contentScaleFactor 1
+                  // arbeiten und das Bild wird vom Compositor hochskaliert (weich + blockig).
+                  mv.autoResizeDrawable = false
                   mv.delegate = self
                   mv.isUserInteractionEnabled = false
                   if let caml = mv.layer as? CAMetalLayer {
@@ -168,6 +170,18 @@ jobs:
                   addSubview(mv)
                   metalView = mv
                   os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
+              }
+
+              override func layoutSubviews() {
+                  super.layoutSubviews()
+                  guard let mv = metalView else { return }
+                  let scale = window?.screen.scale ?? UIScreen.main.scale
+                  if mv.contentScaleFactor != scale { mv.contentScaleFactor = scale }
+                  let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+                  if size.width > 0, size.height > 0, mv.drawableSize != size {
+                      mv.drawableSize = size
+                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] drawableSize=%.0fx%.0f", size.width, size.height)
+                  }
               }
 
               func setupDisplayLayer() {
@@ -323,10 +337,10 @@ jobs:
                   guard src.width > 0, src.height > 0 else { return }
 
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.6)
-                  let denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.35)
-                  if level > 0.02 || denoise > 0.02 {
+                  let denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0)
+                  if denoise > 0.02 {
                       // MPEG-Rauschfilter: glättet Blöcke in flachen Flächen, bevor skaliert wird.
-                      let nl = 0.003 + min(max(denoise, 0), 1) * 0.04
+                      let nl = 0.003 + min(denoise, 1) * 0.03
                       image = image.applyingFilter("CINoiseReduction", parameters: [
                           "inputNoiseLevel": nl,
                           "inputSharpness": 0.4
@@ -363,7 +377,7 @@ jobs:
                   if level > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
                           kCIInputRadiusKey: 1.0,
-                          kCIInputIntensityKey: min(level, 1.0) * 0.85
+                          kCIInputIntensityKey: min(level, 1.0)
                       ])
                   }
 
@@ -432,7 +446,7 @@ jobs:
               var onMaxQuality: () -> Void = {}
 
               @AppStorage("pxSharpLevel") private var level: Double = 0.6
-              @AppStorage("pxSharpDenoise") private var denoise: Double = 0.35
+              @AppStorage("pxSharpDenoise") private var denoise: Double = 0.0
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpDither") private var dither: Bool = false
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
@@ -474,7 +488,7 @@ jobs:
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
                           onMaxQuality()
                       }
-                      Text("Erst Rauschfilter, dann Lanczos auf Panel-Auflösung, dann Kantenschärfung. Bei Blockbildung: Rauschfilter hoch, Schärfe runter.")
+                      Text("Rauschfilter nur bei Blockbildung hochdrehen — er glättet. Standard 0 %. Schärfe wirkt danach auf Panel-Auflösung.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                   }
