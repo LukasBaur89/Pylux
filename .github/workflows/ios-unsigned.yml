@@ -117,6 +117,8 @@ jobs:
               private var currentMode: DisplayMode = .fit
               private var loggedFrame = false
               private var hdrActive = false
+              private var displayLink: CADisplayLink?
+              private var needsPresent = false
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -214,9 +216,43 @@ jobs:
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
                              CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), hdr ? 1 : 0)
                   }
-                  DispatchQueue.main.async { [weak self] in
-                      self?.metalView?.setNeedsDisplay()
+                  if pacingEnabled {
+                      needsPresent = true
+                  } else {
+                      DispatchQueue.main.async { [weak self] in
+                          self?.metalView?.setNeedsDisplay()
+                      }
                   }
+              }
+
+              // MARK: - Frame Pacing
+
+              private var pacingEnabled: Bool {
+                  UserDefaults.standard.object(forKey: "pxSharpPacing") as? Bool ?? true
+              }
+
+              override func didMoveToWindow() {
+                  super.didMoveToWindow()
+                  if window != nil { startDisplayLink() } else { stopDisplayLink() }
+              }
+
+              private func startDisplayLink() {
+                  guard displayLink == nil, metalView != nil else { return }
+                  let link = CADisplayLink(target: self, selector: #selector(displayTick))
+                  link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+                  link.add(to: .main, forMode: .common)
+                  displayLink = link
+              }
+
+              private func stopDisplayLink() {
+                  displayLink?.invalidate()
+                  displayLink = nil
+              }
+
+              @objc private func displayTick() {
+                  guard needsPresent else { return }
+                  needsPresent = false
+                  metalView?.draw()
               }
 
               // MARK: - HDR / EDR
@@ -258,6 +294,10 @@ jobs:
               // MARK: - MTKViewDelegate
 
               func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+              deinit {
+                  displayLink?.invalidate()
+              }
 
               func draw(in view: MTKView) {
                   guard let drawable = view.currentDrawable,
@@ -312,8 +352,22 @@ jobs:
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.7)
                   if level > 0.01 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 1.5,
-                          kCIInputIntensityKey: min(level, 1.0)
+                          kCIInputRadiusKey: 1.4,
+                          kCIInputIntensityKey: min(level, 1.6)
+                      ])
+                  }
+
+                  let vib = Float(UserDefaults.standard.object(forKey: "pxSharpVibrance") as? Double ?? 0.0)
+                  if vib > 0.01 {
+                      image = image.applyingFilter("CIVibrance", parameters: [
+                          "inputAmount": min(vib, 1.0)
+                      ])
+                  }
+
+                  let useDither = UserDefaults.standard.object(forKey: "pxSharpDither") as? Bool ?? false
+                  if useDither {
+                      image = image.applyingFilter("CIDither", parameters: [
+                          "inputIntensity": 0.2
                       ])
                   }
 
@@ -366,18 +420,35 @@ jobs:
           cat > /tmp/SharpnessRow.swift <<'ROW_EOF'
           struct SharpnessRow: View {
               @AppStorage("pxSharpLevel") private var level: Double = 0.7
+              @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
+              @AppStorage("pxSharpDither") private var dither: Bool = false
+              @AppStorage("pxSharpPacing") private var pacing: Bool = true
 
               var body: some View {
-                  VStack(alignment: .leading, spacing: 6) {
-                      HStack {
-                          Text("Bildschärfe")
-                          Spacer()
-                          Text(String(format: "%.0f %%", level * 100))
-                              .foregroundColor(.secondary)
-                              .monospacedDigit()
+                  VStack(alignment: .leading, spacing: 10) {
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Bildschärfe")
+                              Spacer()
+                              Text(String(format: "%.0f %%", level * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $level, in: 0...1.5, step: 0.05)
                       }
-                      Slider(value: $level, in: 0...1, step: 0.05)
-                      Text("0 % = aus · 100 % = maximal. Lanczos-Skalierung auf Panel-Auflösung, danach Kantenschärfung.")
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Farbdynamik")
+                              Spacer()
+                              Text(String(format: "%.0f %%", vibrance * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $vibrance, in: 0...1, step: 0.05)
+                      }
+                      Toggle("Deband / Dither", isOn: $dither)
+                      Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
+                      Text("Lanczos-Skalierung auf Panel-Auflösung, danach Kantenschärfung. Über 100 % verstärkt Halos an harten Kanten.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                   }
@@ -448,6 +519,8 @@ jobs:
           xcodebuild -project Pylux.xcodeproj -scheme Pylux \
             -sdk iphoneos -configuration Release \
             -derivedDataPath build-derived \
+            MARKETING_VERSION=1.0.0 \
+            CURRENT_PROJECT_VERSION=1 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
