@@ -96,8 +96,8 @@ jobs:
               weak var coordinator: StreamVideoView.Coordinator?
 
               // ---- Tunables ----------------------------------------------------------
-              /// 0.0 = nur skalieren, 0.55 = deutlich, 1.0 = aggressiv
-              var sharpness: Float = 0.55
+              /// 0.0 = nur skalieren, 0.7 = deutlich, 1.0 = aggressiv
+              var sharpness: Float = 0.7
               /// true, falls das Bild kopfsteht
               private let mirrorVertical = false
               /// false = exakt altes Verhalten
@@ -140,7 +140,9 @@ jobs:
 
                   let mv = MTKView(frame: bounds, device: device)
                   mv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-                  mv.framebufferOnly = true
+                  // WICHTIG: CIContext schreibt per Shader in das Drawable -> framebufferOnly MUSS false sein,
+                  // sonst bleibt die Textur uninitialisiert (lila/grüner Bildschirm).
+                  mv.framebufferOnly = false
                   mv.isPaused = true
                   mv.enableSetNeedsDisplay = true
                   mv.isOpaque = true
@@ -258,7 +260,7 @@ jobs:
                                     to: drawable.texture,
                                     commandBuffer: cb,
                                     bounds: canvasRect,
-                                    colorSpace: CGColorSpaceCreateDeviceRGB())
+                                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB())
 
                   cb.present(drawable)
                   cb.commit()
