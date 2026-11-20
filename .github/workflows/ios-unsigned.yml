@@ -394,6 +394,15 @@ jobs:
                       ])
                   }
 
+                  // Detail: mittlerer Radius = Textur (Gras, Stoff, Metall)
+                  let detail = Float(UserDefaults.standard.object(forKey: "pxSharpDetail") as? Double ?? 0.2)
+                  if detail > 0.02 {
+                      image = image.applyingFilter("CIUnsharpMask", parameters: [
+                          kCIInputRadiusKey: 2.5,
+                          kCIInputIntensityKey: min(detail, 1.0) * 0.5
+                      ])
+                  }
+
                   // Klarheit: großer Radius = lokaler Detailkontrast (der "3D-Pop" teurer TVs)
                   let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.15)
                   if clarity > 0.02 {
@@ -472,6 +481,7 @@ jobs:
 
               @AppStorage("pxSharpLevel") private var level: Double = 0.6
               @AppStorage("pxSharpClarity") private var clarity: Double = 0.15
+              @AppStorage("pxSharpDetail") private var detail: Double = 0.2
               @AppStorage("pxSharpDenoise") private var denoise: Double = 0.0
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
@@ -488,6 +498,16 @@ jobs:
                                   .monospacedDigit()
                           }
                           Slider(value: $level, in: 0...1.0, step: 0.05)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Detail")
+                              Spacer()
+                              Text(String(format: "%.0f %%", detail * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $detail, in: 0...1, step: 0.05)
                       }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
@@ -532,6 +552,22 @@ jobs:
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
                           onMaxQuality()
+                      }
+                      HStack {
+                          Button("Ultra-Preset") {
+                              level = 0.8
+                              detail = 0.5
+                              clarity = 0.3
+                          }
+                          Spacer()
+                          Button("Zurücksetzen") {
+                              level = 0.6
+                              detail = 0.2
+                              clarity = 0.15
+                              denoise = 0.0
+                              vibrance = 0.0
+                              saturation = 0.5
+                          }
                       }
                       Text("Rauschfilter nur bei Blockbildung hochdrehen — er glättet. Standard 0 %. Schärfe wirkt danach auf Panel-Auflösung.")
                           .font(.caption)
