@@ -806,6 +806,30 @@ jobs:
                   return shadowKernel
               }
 
+              private var ditherKernel: CIColorKernel?
+              private var ditherTried = false
+
+              /// Dithering vor der 8-Bit-Ausgabe. Ein Panel mit 10 Bit braucht das nicht;
+              /// unser Ausgang hat 8 Bit — ohne Dither entstehen in langen Verlaeufen
+              /// sichtbare Stufen. Weisses Rauschen mit ±0,6 Stufen ist unsichtbar,
+              /// zerstoert aber die Stufenkanten (klassische Fernseher-Technik).
+              private func ditherKernelInstance() -> CIColorKernel? {
+                  if ditherTried { return ditherKernel }
+                  ditherTried = true
+                  let src = """
+                  kernel vec4 pxDither(__sample c, float amp) {
+                      vec2 p = destCoord();
+                      float h = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+                      float h2 = fract(sin(dot(p + vec2(37.0, 17.0), vec2(12.9898, 78.233))) * 43758.5453);
+                      float d = (h + h2 - 1.0) * amp;
+                      return vec4(clamp(c.rgb + vec3(d), vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  ditherKernel = CIColorKernel(source: src)
+                  if ditherKernel == nil { os_log(.error, log: videoViewLog, "[px] dither kernel compile failed") }
+                  return ditherKernel
+              }
+
               private var cleanKernel: CIKernel?
               private var cleanTried = false
 
@@ -1270,7 +1294,11 @@ jobs:
 
                   let aD = denoise > 0.02 ? min(denoise, 1.0) * 0.85 : 0.0
                   let aB = deblock > 0.02 ? min(max(deblock, 0), 1) * 0.90 * filterBoost : 0.0
-                  let aG = (dbn > 0.02 && scene.perfLevel == 0) ? min(dbn, 1.0) * 0.65 * filterBoost : 0.0
+                  // Deband laeuft IMMER. Der Sparmodus hatte sie abgeschaltet — dadurch
+                  // kamen die Treppenstufen in dunklen Verlaeufen zurueck (im 100-%-Bild
+                  // als diagonale Streifen sichtbar). Sie kostet im zusammengefassten
+                  // Kernel nur einen Ring, nicht einen eigenen Durchgang.
+                  let aG = dbn > 0.02 ? min(dbn, 1.0) * 0.65 * filterBoost : 0.0
 
                   if (aD + aB + aG) > 0.02, let k = cleanKernelInstance(),
                      let out = k.apply(extent: image.extent,
@@ -1457,6 +1485,14 @@ jobs:
 
                   if !colorEngine {
                       image = applyCalibration(image)
+                  }
+
+                  // Dithering zuletzt (nur SDR/8 Bit; HDR laeuft mit 16 Bit)
+                  if !hdrActive, let dk = ditherKernelInstance(),
+                     let out = dk.apply(extent: image.extent,
+                                        roiCallback: { _, rect in rect },
+                                        arguments: [image, NSNumber(value: 0.0024)]) {
+                      image = out
                   }
 
                   let outSpace: CGColorSpace
@@ -2356,7 +2392,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 66 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 67 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
