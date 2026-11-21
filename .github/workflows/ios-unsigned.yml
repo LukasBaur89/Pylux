@@ -421,23 +421,26 @@ jobs:
                   let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.15)
 
                   if level > 0.02 {
-                      // LUMA-ONLY: keine Farbsäume an Kanten -> hohe Werte bleiben sauber.
-                      image = image.applyingFilter("CISharpenLuminance", parameters: [
-                          "inputSharpness": min(level, 1.0) * 1.6
+                      // Bewusst wieder CIUnsharpMask: CISharpenLuminance hat in HDR (PQ) das
+                      // Farbsignal zerstört (lila Bild). UnsharpMask ist bewährt und bleibt
+                      // farbrichtig; die Halos werden über die zwei Stufen klein gehalten.
+                      image = image.applyingFilter("CIUnsharpMask", parameters: [
+                          kCIInputRadiusKey: 1.0,
+                          kCIInputIntensityKey: min(level, 1.0)
                       ])
                   }
                   // Textur (Gras, Stoff, Metall)
                   if detail > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
                           kCIInputRadiusKey: 2.5,
-                          kCIInputIntensityKey: min(detail, 1.0) * 0.40
+                          kCIInputIntensityKey: min(detail, 1.0) * 0.5
                       ])
                   }
                   // Lokaler Detailkontrast ("3D-Pop")
                   if clarity > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
                           kCIInputRadiusKey: 8.0,
-                          kCIInputIntensityKey: min(clarity, 1.0) * 0.40
+                          kCIInputIntensityKey: min(clarity, 1.0) * 0.45
                       ])
                   }
                   return image
@@ -526,16 +529,6 @@ jobs:
                       image = image.applyingFilter("CINoiseReduction", parameters: [
                           "inputNoiseLevel": nl,
                           "inputSharpness": 0.4
-                      ])
-                  }
-
-                  // DETAIL-VORSTUFE: bei Quellauflösung (1080p) schärfen, BEVOR skaliert wird.
-                  // Der Upscaler bekommt dadurch echte Kanten statt weicher Pixel — das ist der
-                  // Unterschied zwischen "hochgerechnet" und "detailreich". Luma-only, daher kein Saum.
-                  let detailPre = Float(UserDefaults.standard.object(forKey: "pxSharpDetail") as? Double ?? 0.2)
-                  if detailPre > 0.05 {
-                      image = image.applyingFilter("CISharpenLuminance", parameters: [
-                          "inputSharpness": min(detailPre, 1.0) * 0.9
                       ])
                   }
 
@@ -666,18 +659,7 @@ jobs:
                           scaler.inputContentHeight = Int(src.height)
                           scaler.encode(commandBuffer: cb)
 
-                          // Schärfe NACH MetalFX: erst die Rekonstruktion, dann die Kanten.
-                          // outTex wurde von MetalFX beschrieben und ist zeilenkompatibel zu
-                          // CoreImage, daher derselbe Weg wie ein CI-Render.
-                          if let mfxCI = CIImage(mtlTexture: outTex,
-                                                 options: [.colorSpace: outSpace]) {
-                              let sharpened = applyDetailStage(mfxCI)
-                              ciContext?.render(sharpened,
-                                                to: drawable.texture,
-                                                commandBuffer: cb,
-                                                bounds: CGRect(x: ox, y: oy, width: outW, height: outH),
-                                                colorSpace: outSpace)
-                          } else if let blit = cb.makeBlitCommandEncoder() {
+                          if let blit = cb.makeBlitCommandEncoder() {
                               blit.copy(from: outTex, sourceSlice: 0, sourceLevel: 0,
                                         sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                                         sourceSize: MTLSize(width: outW, height: outH, depth: 1),
@@ -758,6 +740,7 @@ jobs:
               @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
               @AppStorage("pxSharpWB_B") private var wbB: Double = 1.0
               @AppStorage("pxSharpTunedV1") private var tunedV1: Bool = false
+              @AppStorage("pxSharpTunedV2") private var tunedV2: Bool = false
 
               private func preset(_ title: String, _ action: @escaping () -> Void) -> some View {
                   Button(title, action: action)
@@ -973,8 +956,9 @@ jobs:
                               Text("Framerate: 60 ist das Protokoll-Maximum. Höher wäre nur lokal interpoliert und bringt keine Information.")
                               Text("Bitrate: der echte Qualitätshebel. 50 statt 12 Mbit = weniger Blockbildung = mehr Detail, ganz ohne Schärfung.")
                               Text("Codec: H.265 packt dieselbe Bitrate effizienter als H.264. Immer H.265 wählen.")
-                              Text("Schärfe ist jetzt luma-only (nur Helligkeit). Dadurch keine Farbsäume mehr — höhere Werte bleiben sauber.")
-                              Text("Detail wirkt zweistufig: einmal bei 1080p vor dem Skalieren, einmal am Panel. Das ist der Unterschied zwischen „hochgerechnet“ und „detailreich“.")
+                              Text("Schärfe: Kanten (1 px). Ab etwa 85 % bekommen Konturen einen harten Saum.")
+                              Text("Detail: Textur (2,5 px). Gras, Stoff, Metall — der Regler für „materialig“.")
+                              Text("Für mehr Schärfe zuerst die Bitrate erhöhen, dann Detail, erst zuletzt Schärfe.")
                               Text("MetalFX: Apples kantenbewusste Rekonstruktion statt Lanczos — die einzige echte Auflösungserhöhung ohne Informationsverlust.")
                           }
                           .font(.caption)
@@ -982,13 +966,13 @@ jobs:
                       }
                   }
                   .onAppear {
-                      guard !tunedV1 else { return }
-                      // Einmalige Grundoptimierung: sauberes Quellsignal VOR der Schärfung.
-                      // Ohne Deblocking verstärkt jede Schärfung MPEG-Rauschen — genau das
-                      // wirkt dann unnatürlich, egal wie fein der Regler arbeitet.
-                      if denoise < 0.25 { denoise = 0.30 }
-                      if vibrance < 0.10 { vibrance = 0.10 }
-                      pacing = true
+                      if !tunedV2 {
+                          // Build-30 hatte den Rauschfilter zwangsweise auf 30 % gesetzt und
+                          // damit das Bild weichgezeichnet. Das wird hier zurückgenommen.
+                          if abs(denoise - 0.30) < 0.001 { denoise = 0.0 }
+                          if abs(vibrance - 0.10) < 0.001 { vibrance = 0.0 }
+                          tunedV2 = true
+                      }
                       tunedV1 = true
                   }
               }
@@ -1033,6 +1017,12 @@ jobs:
               s = s.replace(anchor, anchor + call, 1)
               s = s.rstrip('\n') + '\n\n' + open('/tmp/SharpnessRow.swift', encoding='utf-8').read()
               changed.append('sharpness-row')
+
+          codec_old = '                Text("H.265 (PS5 only)").tag(1)\n'
+          codec_new = '                Text("H.265 (HDR-f\u00e4hig)").tag(1)\n'
+          if codec_old in s:
+              s = s.replace(codec_old, codec_new, 1)
+              changed.append('codec-label')
 
           if changed:
               open(p, 'w', encoding='utf-8').write(s)
