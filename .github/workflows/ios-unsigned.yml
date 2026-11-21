@@ -662,14 +662,23 @@ jobs:
                       ])
                   }
 
-                  // Farbtemperatur: 0 = warm (5500K), 50 = neutral (6500K), 100 = kühl (7500K)
+                  // Farbtemperatur als NORMALISIERTE Matrix. CITemperatureAndTint hat die
+                  // Kanäle ungefiltert verstärkt: bei 5500 K und 9500 K waren je über 8 %
+                  // aller Pixel geclippt. Hier wird gegen die Luma-Gewichtung geteilt,
+                  // dadurch bleibt die Helligkeit gleich und es entsteht kein Clipping.
                   let tempRaw = Float(UserDefaults.standard.object(forKey: "pxSharpTemp") as? Double ?? 0.5)
-                  if abs(tempRaw - 0.5) > 0.01 {
-                      let target = 6500.0 + Double(tempRaw - 0.5) * 8000.0
-                      let clamped = min(max(target, 2500.0), 10500.0)
-                      image = image.applyingFilter("CITemperatureAndTint", parameters: [
-                          "inputNeutral": CIVector(x: 6500, y: 0),
-                          "inputTargetNeutral": CIVector(x: clamped, y: 0)
+                  if abs(tempRaw - 0.5) > 0.005 {
+                      let t = Double(tempRaw - 0.5) * 2.0          // -1 = warm, +1 = kühl
+                      let kR = 1.0 - 0.22 * t
+                      let kG = 1.0
+                      let kB = 1.0 + 0.22 * t
+                      let kn = 0.2126 * kR + 0.7152 * kG + 0.0722 * kB
+                      image = image.applyingFilter("CIColorMatrix", parameters: [
+                          "inputRVector": CIVector(x: CGFloat(kR / kn), y: 0, z: 0, w: 0),
+                          "inputGVector": CIVector(x: 0, y: CGFloat(kG / kn), z: 0, w: 0),
+                          "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(kB / kn), w: 0),
+                          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                          "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
                       ])
                   }
 
@@ -908,55 +917,55 @@ jobs:
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886)
                       level = 0.30; detail = 0.10; clarity = 0.05
-                      deblock = 0.15; denoise = 0.0; vibrance = 0.05
+                      deblock = 0.08; denoise = 0.0; vibrance = 0.05
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.00
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 1: // Sony BRAVIA 7 II
-                      level = 0.55; detail = 0.40; clarity = 0.28
-                      deblock = 0.25; denoise = 0.0; vibrance = 0.30
+                      level = 0.70; detail = 0.40; clarity = 0.28
+                      deblock = 0.10; denoise = 0.0; vibrance = 0.30
                       saturation = 0.60; contrast = 0.62; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
                       clearImage = 0.50; toneMap = 1
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
-                      level = 0.75; detail = 0.55; clarity = 0.38
-                      deblock = 0.20; denoise = 0.0; vibrance = 0.30
-                      saturation = 0.60; contrast = 0.68; temp = 0.850
+                      level = 0.85; detail = 0.55; clarity = 0.38
+                      deblock = 0.10; denoise = 0.0; vibrance = 0.30
+                      saturation = 0.60; contrast = 0.62; temp = 0.700
                       gamma = 1.00; black = 0.0; hdrPeak = 900
                       clearImage = 0.70; toneMap = 1
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93
-                      level = 0.60; detail = 0.45; clarity = 0.25
-                      deblock = 0.25; denoise = 0.0; vibrance = 0.35
-                      saturation = 0.62; contrast = 0.60; temp = 0.6375
+                      level = 0.75; detail = 0.45; clarity = 0.25
+                      deblock = 0.10; denoise = 0.0; vibrance = 0.35
+                      saturation = 0.62; contrast = 0.60; temp = 0.600
                       gamma = 1.00; black = 0.0; hdrPeak = 850
                       clearImage = 0.45; toneMap = 2
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid
-                      level = 0.80; detail = 0.60; clarity = 0.35
-                      deblock = 0.20; denoise = 0.0; vibrance = 0.35
-                      saturation = 0.62; contrast = 0.70; temp = 0.9375
+                      level = 0.85; detail = 0.60; clarity = 0.35
+                      deblock = 0.10; denoise = 0.0; vibrance = 0.35
+                      saturation = 0.62; contrast = 0.64; temp = 0.800
                       gamma = 1.00; black = 0.0; hdrPeak = 950
                       clearImage = 0.65; toneMap = 2
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 6: // Game (minimal)
                       level = 0.50; detail = 0.25; clarity = 0.05
-                      deblock = 0.20; denoise = 0.0; vibrance = 0.10
+                      deblock = 0.10; denoise = 0.0; vibrance = 0.10
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.00
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra
-                      level = 0.90; detail = 0.55; clarity = 0.30
-                      deblock = 0.25; denoise = 0.0; vibrance = 0.10
+                      level = 1.00; detail = 0.55; clarity = 0.30
+                      deblock = 0.10; denoise = 0.0; vibrance = 0.10
                       saturation = 0.50; contrast = 0.55; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.55
@@ -999,7 +1008,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 38 (Tuner)").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 39").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
