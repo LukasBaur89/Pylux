@@ -690,7 +690,7 @@ jobs:
                   let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f",
                                    gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK)
                   if key != colorLUTKey || colorLUTData == nil {
-                      let n = 33
+                      let n = 65
                       var data = [Float](repeating: 0, count: n * n * n * 4)
                       var idx = 0
                       for bi in 0..<n {
@@ -778,7 +778,7 @@ jobs:
                   }
                   guard let lut = colorLUTData else { return input }
                   return input.applyingFilter("CIColorCube", parameters: [
-                      "inputCubeDimension": 33,
+                      "inputCubeDimension": 65,
                       "inputCubeData": lut
                   ])
               }
@@ -2377,6 +2377,10 @@ jobs:
                   shadow = 0.35
                   tvBrightness = true
                   chroma = 0.50
+                  deconv = 0.95
+                  scaler = 1
+                  easuAmt = 1.0
+                  halo = 0.45
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
                       level = 0.35; detail = 0.15; clarity = 0.08
@@ -2408,12 +2412,12 @@ jobs:
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
                       gamut = 0
-                      level = 1.00; detail = 0.88; clarity = 0.28
+                      level = 1.00; detail = 0.95; clarity = 0.28
                       deblock = 0.30; denoise = 0.12; vibrance = 0.35
                       saturation = 0.60; contrast = 0.50; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 0.88; toneMap = 2; localDim = 0.30; deband = 0.18
-                      brightness = 0.45; shadow = 0.40; chroma = 0.60; coring = 0.60
+                      clearImage = 0.95; toneMap = 2; localDim = 0.30; deband = 0.18
+                      brightness = 0.45; shadow = 0.40; chroma = 0.70; coring = 0.45
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -2622,7 +2626,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 81 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 82 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
