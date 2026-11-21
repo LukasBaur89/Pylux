@@ -1193,7 +1193,7 @@ jobs:
                   // In dunklen Szenen bis zu 2,4x staerker: dort sind die 8-Bit-Stufen
                   // sichtbar und die Augen empfindlich.
                   let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
-                  if dbn > 0.02, let k = deblockKernelInstance(),
+                  if dbn > 0.02, scene.perfLevel == 0, let k = deblockKernelInstance(),
                      let out = k.apply(extent: image.extent,
                                        roiCallback: { _, rect in rect.insetBy(dx: -8, dy: -8) },
                                        arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012),
@@ -1228,7 +1228,7 @@ jobs:
                   // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
                   // ein Drittel der Pixel.
                   let clarityAmt = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0)
-                  if clarityAmt > 0.02, let lc = diffKernelInstance() {
+                  if clarityAmt > 0.02, scene.perfLevel == 0, let lc = diffKernelInstance() {
                       let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
                       let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
                           kCIInputRadiusKey: 2.2
@@ -1469,6 +1469,14 @@ jobs:
               private var gainEma: Double = 1.0
               private var noiseEma: Double = 0.0
               private var renderMsEma: Double = 0
+              private var perfLevelStore: Int = 0
+              private var perfCooldown: CFTimeInterval = 0
+
+              var perfLevel: Int {
+                  lock.lock()
+                  defer { lock.unlock() }
+                  return perfLevelStore
+              }
 
               // Vom Renderer gelesen
               private(set) var gain: Double = 1.0
@@ -1488,6 +1496,15 @@ jobs:
               func noteRenderMs(_ ms: Double) {
                   lock.lock()
                   renderMsEma += (ms - renderMsEma) * 0.08
+                  // Lastregel: wenn die GPU ueber das Budget kommt, werden zuerst die
+                  // beiden unsichtbarsten Stufen abgeschaltet (Deband, Klarheit).
+                  // 10 s Sperre, damit es nicht hin- und herschaltet.
+                  if perfLevelStore == 0 && renderMsEma > 19.0 {
+                      perfLevelStore = 1
+                      perfCooldown = CACurrentMediaTime() + 10.0
+                  } else if perfLevelStore == 1 && CACurrentMediaTime() > perfCooldown && renderMsEma < 16.2 {
+                      perfLevelStore = 0
+                  }
                   lock.unlock()
               }
 
@@ -1898,6 +1915,7 @@ jobs:
                       o["pxSceneP90"] = String(format: "%.3f", PXScene.shared.p90)
                       o["pxRenderMs"] = String(format: "%.2f", PXScene.shared.renderMs)
                       o["pxScreenBrightness"] = String(format: "%.2f", Double(UIScreen.main.brightness))
+                      o["pxPerfLevel"] = String(PXScene.shared.perfLevel)
                       o["pxSceneDark"] = String(format: "%.3f", PXScene.shared.darkFrac)
                       if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
                           return String(data: data, encoding: .utf8) ?? "{}"
@@ -2203,7 +2221,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 60 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 61 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
