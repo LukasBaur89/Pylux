@@ -28,7 +28,7 @@ jobs:
 
           # --- Renderer -------------------------------------------------------------
           cat > ios/Pylux/Views/StreamVideoView.swift <<'SWIFT_SOURCE_EOF'
-          ﻿// SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+          // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
           // SwiftUI view for displaying decoded video stream
           //
           // PATCH: Metal/CoreImage render path with Lanczos scaling + sharpening.
@@ -166,7 +166,7 @@ jobs:
                   diagLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
                   diagLabel.numberOfLines = 0
                   diagLabel.isUserInteractionEnabled = false
-                  diagLabel.text = "diag: warte auf Frames â€¦"
+                  diagLabel.text = "diag: warte auf Frames …"
                   addSubview(diagLabel)
                   setupMetal()
               }
@@ -182,15 +182,15 @@ jobs:
                   let mv = MTKView(frame: bounds, device: device)
                   mv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
                   // WICHTIG: CIContext schreibt per Shader in das Drawable -> framebufferOnly MUSS false sein,
-                  // sonst bleibt die Textur uninitialisiert (lila/grÃ¼ner Bildschirm).
+                  // sonst bleibt die Textur uninitialisiert (lila/grüner Bildschirm).
                   mv.framebufferOnly = false
                   mv.isPaused = true
                   mv.enableSetNeedsDisplay = true
                   mv.isOpaque = true
                   mv.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-                  // SDR bleibt bei 8 Bit â€” exakt wie im Build, der sauber aussah.
+                  // SDR bleibt bei 8 Bit — exakt wie im Build, der sauber aussah.
                   mv.colorPixelFormat = .bgra8Unorm
-                  // Drawable-GrÃ¶ÃŸe selbst bestimmen: sonst kann MTKView mit contentScaleFactor 1
+                  // Drawable-Größe selbst bestimmen: sonst kann MTKView mit contentScaleFactor 1
                   // arbeiten und das Bild wird vom Compositor hochskaliert (weich + blockig).
                   mv.autoResizeDrawable = false
                   mv.delegate = self
@@ -274,7 +274,7 @@ jobs:
                   bufferLock.unlock()
                   let hdr = pixelBufferIsHDR(pixelBuffer)
                   if hdr != hdrActive {            // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
-                      // das Bild bei einzelnen AusreiÃŸern (hell/dunkel).
+                      // das Bild bei einzelnen Ausreißern (hell/dunkel).
                       hdrStreak += 1
                       if hdrStreak >= 8 {
                           hdrStreak = 0
@@ -301,7 +301,7 @@ jobs:
                           parts.append("mtx=\(String(describing: m))")
                       }
                       parts.append("hdr=\(hdr ? 1 : 0)")
-                      let line = parts.joined(separator: "  Â·  ")
+                      let line = parts.joined(separator: "  ·  ")
                       UserDefaults.standard.set(line, forKey: "pxSharpDiag")
                       DispatchQueue.main.async { [weak self] in self?.diagLabel.text = line }
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
@@ -349,7 +349,7 @@ jobs:
               // MARK: - MetalFX
 
               /// Apple MetalFX Spatial Scaler: kantenbewusste Rekonstruktion statt Lanczos.
-              /// Nur wenn per Schalter aktiviert und vom GerÃ¤t unterstÃ¼tzt.
+              /// Nur wenn per Schalter aktiviert und vom Gerät unterstützt.
               private func ensureMetalFX(device: MTLDevice, input: CGSize, output: CGSize) -> Bool {
                   let key = "\(Int(input.width))x\(Int(input.height))->\(Int(output.width))x\(Int(output.height))"
                   if key == mfxKey, mfxScaler != nil, mfxIn != nil, mfxOut != nil { return true }
@@ -396,7 +396,7 @@ jobs:
               // MARK: - HDR / EDR
 
               /// HDR nur, wenn der Buffer wirklich PQ/BT.2020 meldet.
-              /// 10 Bit allein reicht NICHT â€” sonst wird SDR-Inhalt als PQ gerendert und wirkt dunkel.
+              /// 10 Bit allein reicht NICHT — sonst wird SDR-Inhalt als PQ gerendert und wirkt dunkel.
               private func pixelBufferIsHDR(_ pb: CVPixelBuffer) -> Bool {
                   if UserDefaults.standard.bool(forKey: "pxSharpHdrOff") { return false }
                   if let prim = CVBufferCopyAttachment(pb, kCVImageBufferColorPrimariesKey, nil) {
@@ -440,7 +440,7 @@ jobs:
               }
 
               /// Kalibrierungs-LUT: Gamma pro Kanal (R/G/B). Das ist der Teil, den ein
-              /// kalibrierter Fernseher Ã¼ber seine CMS-Ebene macht. Wird nur gebaut, wenn
+              /// kalibrierter Fernseher über seine CMS-Ebene macht. Wird nur gebaut, wenn
               /// mindestens ein Kanal von 1.00 abweicht, und dann gecacht.
               private func applyCalibration(_ input: CIImage) -> CIImage {
                   let gr = Float(UserDefaults.standard.object(forKey: "pxSharpGammaR") as? Double ?? 1.0)
@@ -478,10 +478,10 @@ jobs:
               }
 
               /// CAS = Contrast Adaptive Sharpening (nach AMD FidelityFX). Der Unterschied zu
-              /// CIUnsharpMask: die VerstÃ¤rkung wird pro Pixel an den lokalen Kontrast angepasst
+              /// CIUnsharpMask: die Verstärkung wird pro Pixel an den lokalen Kontrast angepasst
               /// und das Ergebnis hart auf den lokalen Wertebereich begrenzt. Dadurch entstehen
-              /// keine hellen/dunklen SÃ¤ume (Halos) an Kanten â€” das ist der Grund, warum
-              /// UnsharpMask kÃ¼nstlich aussieht.
+              /// keine hellen/dunklen Säume (Halos) an Kanten — das ist der Grund, warum
+              /// UnsharpMask künstlich aussieht.
               private func casKernelInstance() -> CIKernel? {
                   if casTried { return casKernel }
                   casTried = true
@@ -519,7 +519,7 @@ jobs:
                                  + a2.rgb + c2.rgb + f2.rgb + h2.rgb) * 0.125;
 
                       vec3 range = mx - mn;
-                      // Echte Kante (hoher Kontrast) -> kaum VerstÃ¤rkung, Textur -> volle.
+                      // Echte Kante (hoher Kontrast) -> kaum Verstärkung, Textur -> volle.
                       vec3 adapt = vec3(1.0) - clamp(range * 4.0, vec3(0.0), vec3(1.0));
                       vec3 edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
                       vec3 tex  = (c.rgb - avg2) * s2;
@@ -535,8 +535,8 @@ jobs:
               }
 
               /// Kantenerhaltendes Deblocking: mittelt nur Nachbarn, die innerhalb einer
-              /// Schwelle liegen. Blockkanten (kleine SprÃ¼nge) werden geglÃ¤ttet, echte Kanten
-              /// (groÃŸe SprÃ¼nge) bleiben stehen. CIMedianFilter hat vorher 19 % SchÃ¤rfe gekostet.
+              /// Schwelle liegen. Blockkanten (kleine Sprünge) werden geglättet, echte Kanten
+              /// (große Sprünge) bleiben stehen. CIMedianFilter hat vorher 19 % Schärfe gekostet.
               private func deblockKernelInstance() -> CIKernel? {
                   if dbTried { return dbKernel }
                   dbTried = true
@@ -593,18 +593,18 @@ jobs:
                   return diffKernel
               }
 
-              /// Farb-Engine: EINE 3D-LUT fÃ¼r WeiÃŸabgleich, SÃ¤ttigung, Vibrance, Gamma,
+              /// Farb-Engine: EINE 3D-LUT für Weißabgleich, Sättigung, Vibrance, Gamma,
               /// Schwarzpegel und Kanal-Kalibrierung. Alles in linearem Licht.
               ///
-              /// Warum das der Kern des "unnatÃ¼rlichen Bildes" war:
+              /// Warum das der Kern des "unnatürlichen Bildes" war:
               /// - CIVibrance hat im Gamma-Raum gemessen den Farbton verschoben (R/G fiel
-              ///   bei Amount 0.70 von 0.938 auf 0.854 â€” das Bild wurde grÃ¼nlich).
-              /// - Der Temperatur-Regler hat einzelne KanÃ¤le Ã¼ber 1.0 geschoben: bei 0.80
+              ///   bei Amount 0.70 von 0.938 auf 0.854 — das Bild wurde grünlich).
+              /// - Der Temperatur-Regler hat einzelne Kanäle über 1.0 geschoben: bei 0.80
               ///   waren 16.5 % aller Pixel geclippt.
               /// - Der Schwarzpegel war ein reiner Offset und hat Highlights verbrannt
               ///   (bei 0.10: 8.9 % Clipping).
               /// Hier wird alles um die Luma-Achse gerechnet und am Ende per Pixel
-              /// weich begrenzt, statt KanÃ¤le einzeln abzuschneiden.
+              /// weich begrenzt, statt Kanäle einzeln abzuschneiden.
               private func applyColorEngine(_ input: CIImage) -> CIImage {
                   let gr = Float(UserDefaults.standard.object(forKey: "pxSharpGammaR") as? Double ?? 1.0)
                   let gg = Float(UserDefaults.standard.object(forKey: "pxSharpGammaG") as? Double ?? 1.0)
@@ -618,7 +618,7 @@ jobs:
                   let wbBr = Float(UserDefaults.standard.object(forKey: "pxSharpWB_B") as? Double ?? 1.0)
                   let black = Float(UserDefaults.standard.object(forKey: "pxSharpBlack") as? Double ?? 0.0)
 
-                  // WeiÃŸabgleich: Temperatur als KanalverhÃ¤ltnis, gegen Luma normalisiert.
+                  // Weißabgleich: Temperatur als Kanalverhältnis, gegen Luma normalisiert.
                   let t = Double(tempRaw - 0.5) * 2.0
                   var gainR = Double(1.0 - 0.22 * t) * Double(wbRr)
                   var gainG = Double(wbGr)
@@ -698,10 +698,10 @@ jobs:
 
               /// Lokales Dimming (Mini-LED-Emulation). Ein echter Mini-LED-Fernseher dimmt
               /// die Hintergrundbeleuchtung zonenweise: dunkle Bildbereiche bekommen weniger
-              /// Licht, helle bleiben stehen. Ergebnis sind tiefe SchwÃ¤rzen und ein deutlich
-              /// hÃ¶herer Eindruck von Kontrast, ohne dass die MitteltÃ¶ne flach werden.
-              /// Hier wird dafÃ¼r eine stark verkleinerte Luma-Karte weichgezeichnet und als
-              /// VerstÃ¤rkungsfaktor auf das Bild gelegt â€” der Radius entspricht einer
+              /// Licht, helle bleiben stehen. Ergebnis sind tiefe Schwärzen und ein deutlich
+              /// höherer Eindruck von Kontrast, ohne dass die Mitteltöne flach werden.
+              /// Hier wird dafür eine stark verkleinerte Luma-Karte weichgezeichnet und als
+              /// Verstärkungsfaktor auf das Bild gelegt — der Radius entspricht einer
               /// Dimming-Zone, nicht einem Pixel.
               private func localDimKernelInstance() -> CIColorKernel? {
                   if ldTried { return ldKernel }
@@ -723,11 +723,20 @@ jobs:
                   guard strength > 0.02, let lc = localDimKernelInstance() else { return input }
                   let ext = input.extent
                   let s = 1.0 / max(zone, 2.0)
-                  let small = input.transformed(by: CGAffineTransform(scaleX: s, y: s))
+                  // Wichtig: echtes Herunterskalieren mit Tiefpass. Ein bilineares
+                  // transformed(by:) wuerde bei Faktor 36 nur jedes 36. Pixel abtasten und
+                  // eine verrauschte Zonenkarte erzeugen (fleckiges Dimming).
+                  let small = input.applyingFilter("CILanczosScaleTransform", parameters: [
+                      kCIInputScaleKey: s,
+                      kCIInputAspectRatioKey: 1.0
+                  ])
                   let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
                       kCIInputRadiusKey: 3.0
                   ]).cropped(to: small.extent)
-                  let up = blurred.transformed(by: CGAffineTransform(scaleX: 1.0 / s, y: 1.0 / s))
+                  let up = blurred.applyingFilter("CILanczosScaleTransform", parameters: [
+                      kCIInputScaleKey: 1.0 / s,
+                      kCIInputAspectRatioKey: 1.0
+                  ])
                   if let out = lc.apply(extent: ext, arguments: [
                       input, up, NSNumber(value: strength), NSNumber(value: 0.22), NSNumber(value: 0.006)
                   ]) {
@@ -736,8 +745,8 @@ jobs:
                   return input
               }
 
-              /// Kanten (luma-only), Textur und Klarheit â€” immer auf der finalen
-              /// Panel-AuflÃ¶sung, nie auf dem 1080p-Signal.
+              /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
+              /// Panel-Auflösung, nie auf dem 1080p-Signal.
               private func applyDetailStage(_ input: CIImage) -> CIImage {
                   var image = input
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.6)
@@ -802,7 +811,7 @@ jobs:
               }
 
               func draw(in view: MTKView) {
-                  // HDR-Peak live nachziehen (Panel-Headroom Ã¤ndert sich mit der Display-Helligkeit)
+                  // HDR-Peak live nachziehen (Panel-Headroom ändert sich mit der Display-Helligkeit)
                   if hdrActive {
                       let peak = UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600
                       if abs(peak - appliedPeak) > 0.5, let caml = view.layer as? CAMetalLayer {
@@ -828,13 +837,13 @@ jobs:
 
                   var image: CIImage
                   if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
-                      // 10-Bit-Buffer sind PQ-kodiert â€” explizit taggen, sonst nimmt CoreImage sRGB an
-                      // und die PQ-Ausgabe wirkt weiÃŸ/ausgewaschen.
+                      // 10-Bit-Buffer sind PQ-kodiert — explizit taggen, sonst nimmt CoreImage sRGB an
+                      // und die PQ-Ausgabe wirkt weiß/ausgewaschen.
                       image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: pq])
                   } else {
                       // WICHTIG: SDR NICHT selbst taggen. VideoToolbox legt Matrix, Primaries und
                       // Range (16-235 vs 0-255) als Attachments an den Buffer. Ein hartes BT.709-Tag
-                      // Ã¼berschreibt die Range und drÃ¼ckt das Bild zusammen -> Schatten laufen zu.
+                      // überschreibt die Range und drückt das Bild zusammen -> Schatten laufen zu.
                       image = CIImage(cvPixelBuffer: pixelBuffer)
                   }
                   let src = image.extent.size
@@ -865,13 +874,13 @@ jobs:
                       ])
                   }
 
-                  // Gamma: hebt oder senkt die MitteltÃ¶ne (dunkle Szenen durchzeichnen)
+                  // Gamma: hebt oder senkt die Mitteltöne (dunkle Szenen durchzeichnen)
                   let colorEngine = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? NSNumber)?.boolValue ?? true
                   let gamma = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
                   if !colorEngine && abs(gamma - 1.0) > 0.01 {
                       image = image.applyingFilter("CIGammaAdjust", parameters: ["inputPower": gamma])
                   }
-                  // Schwarzwert: Offset auf alle KanÃ¤le
+                  // Schwarzwert: Offset auf alle Kanäle
                   let black = Float(UserDefaults.standard.object(forKey: "pxSharpBlack") as? Double ?? 0.0)
                   if !colorEngine && abs(black) > 0.001 {
                       image = image.applyingFilter("CIColorControls", parameters: [
@@ -885,7 +894,7 @@ jobs:
                   // Tone Mapping als echte S-Kurve (CIToneCurve): kontrollierter Kontrast in
                   // den Mitten, Rolloff in den Lichtern, leichte Anhebung der Schatten.
                   // CIHighlightShadowAdjust (vorher) war ein lokaler Operator und hat
-                  // Helligkeitskanten um helle Objekte erzeugt â€” genau das wirkt kÃ¼nstlich.
+                  // Helligkeitskanten um helle Objekte erzeugt — genau das wirkt künstlich.
                   let toneMap = UserDefaults.standard.integer(forKey: "pxSharpToneMap")
                   if toneMap == 1 {
                       image = image.applyingFilter("CIToneCurve", parameters: [
@@ -917,10 +926,10 @@ jobs:
                       }
                   }
 
-                  // MPEG-BlÃ¶cke: kantenerhaltend, nicht Median. Median hat bei 0,25 bereits
-                  // 19 % der SchÃ¤rfe vernichtet (gemessen). Der Kernel mittelt nur Nachbarn
+                  // MPEG-Blöcke: kantenerhaltend, nicht Median. Median hat bei 0,25 bereits
+                  // 19 % der Schärfe vernichtet (gemessen). Der Kernel mittelt nur Nachbarn
                   // innerhalb einer Luma-Schwelle -> Blockkante weg, echte Kante bleibt.
-                  // Bewusst VOR der Skalierung, damit bei 1080p geglÃ¤ttet wird.
+                  // Bewusst VOR der Skalierung, damit bei 1080p geglättet wird.
                   let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.0)
                   let dbMode = (UserDefaults.standard.object(forKey: "pxSharpDeblockMode") as? Int ?? 1) != 0
                   if deblock > 0.02 {
@@ -939,9 +948,22 @@ jobs:
                       }
                   }
 
-                  // Clear Image: KantenvorverstÃ¤rkung bei QuellauflÃ¶sung, damit der Upscaler
-                  // echte Kanten statt weicher Pixel bekommt â€” ebenfalls CAS, damit die
-                  // VorverstÃ¤rkung keine Halos in die Skalierung schickt.
+                  // Sanfte Verlaeufe (Deband): dieselbe kantenfoermige Glaettung wie beim
+                  // Deblocking, aber mit groesserem Radius und sehr kleiner Luma-Schwelle.
+                  // Sie fasst nur Pixel an, die sich fast nicht unterscheiden, und glaettet
+                  // damit Treppenstufen in Himmeln/Verlaeufen, ohne Textur zu kosten.
+                  let dbn = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.0)
+                  if dbn > 0.02, let k = deblockKernelInstance(),
+                     let out = k.apply(extent: image.extent,
+                                       roiCallback: { _, rect in rect.insetBy(dx: -8, dy: -8) },
+                                       arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012),
+                                                   NSNumber(value: min(dbn, 1.0) * 0.65)]) {
+                      image = out
+                  }
+
+                  // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
+                  // echte Kanten statt weicher Pixel bekommt — ebenfalls CAS, damit die
+                  // Vorverstärkung keine Halos in die Skalierung schickt.
                   let clearImage = Float(UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0)
                   if clearImage > 0.05 {
                       if let k = casKernelInstance(),
@@ -964,7 +986,7 @@ jobs:
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
                   let useMFX = false
                   if useMFX {
-                      // Skalierung Ã¼bernimmt MetalFX am Ende.
+                      // Skalierung übernimmt MetalFX am Ende.
                   } else if pixelPerfect {
                       // 1:1: keine Skalierung, jeder Stream-Pixel sitzt auf genau einem Panel-Pixel.
                       image = image.transformed(by: CGAffineTransform(scaleX: 1, y: 1))
@@ -995,14 +1017,8 @@ jobs:
                   let dy = (target.height - placed.height) / 2 - placed.origin.y
                   image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
 
-                  // Immer schÃ¤rfen â€” genau wie im bewÃ¤hrten Build 28. MetalFX skaliert danach.
+                  // Immer schärfen — genau wie im bewährten Build 28. MetalFX skaliert danach.
                   image = applyDetailStage(image)
-
-                  // Mini-LED-Emulation: zonenweises Dimming auf der finalen Panel-AuflÃ¶sung.
-                  let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.0)
-                  if localDim > 0.02 && !hdrActive {
-                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * 0.65, zone: 36)
-                  }
 
                   // Kontrast: 50 % = neutral
                   let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
@@ -1012,13 +1028,19 @@ jobs:
                       ])
                   }
 
+                  // Mini-LED-Emulation: zonenweises Dimming auf der finalen Panel-Auflösung.
+                  let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.25)
+                  if localDim > 0.02 && !hdrActive {
+                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * 0.65, zone: 36)
+                  }
+
                   // Farbtemperatur als NORMALISIERTE Matrix. CITemperatureAndTint hat die
-                  // KanÃ¤le ungefiltert verstÃ¤rkt: bei 5500 K und 9500 K waren je Ã¼ber 8 %
+                  // Kanäle ungefiltert verstärkt: bei 5500 K und 9500 K waren je über 8 %
                   // aller Pixel geclippt. Hier wird gegen die Luma-Gewichtung geteilt,
                   // dadurch bleibt die Helligkeit gleich und es entsteht kein Clipping.
                   let tempRaw = Float(UserDefaults.standard.object(forKey: "pxSharpTemp") as? Double ?? 0.5)
                   if !colorEngine && abs(tempRaw - 0.5) > 0.005 {
-                      let t = Double(tempRaw - 0.5) * 2.0          // -1 = warm, +1 = kÃ¼hl
+                      let t = Double(tempRaw - 0.5) * 2.0          // -1 = warm, +1 = kühl
                       let kR = 1.0 - 0.22 * t
                       let kG = 1.0
                       let kB = 1.0 + 0.22 * t
@@ -1032,7 +1054,7 @@ jobs:
                       ])
                   }
 
-                  // WeiÃŸabgleich RGB (Feinschliff): 1.00 = neutral. Damit lÃ¤sst sich der letzte
+                  // Weißabgleich RGB (Feinschliff): 1.00 = neutral. Damit lässt sich der letzte
                   // Farbstich rausnehmen, den ein einzelner Kelvin-Regler nicht trifft.
                   let wbR = Float(UserDefaults.standard.object(forKey: "pxSharpWB_R") as? Double ?? 1.0)
                   let wbG = Float(UserDefaults.standard.object(forKey: "pxSharpWB_G") as? Double ?? 1.0)
@@ -1096,11 +1118,11 @@ jobs:
                           rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
                           cb.makeRenderCommandEncoder(descriptor: rp)?.endEncoding()
 
-                          // WICHTIG: bounds mÃ¼ssen den tatsÃ¤chlichen Bildbereich abdecken.
+                          // WICHTIG: bounds müssen den tatsächlichen Bildbereich abdecken.
                           // Das Bild wurde vorher auf die Drawable-Mitte verschoben (extent
                           // beginnt z.B. bei x=406,y=255). Mit bounds=(0,0,1920,1080) wurde
                           // nur eine Ecke gerendert; der Rest der Textur blieb undefinierter
-                          // Speicher â€” genau das war das lila Bild bei MetalFX.
+                          // Speicher — genau das war das lila Bild bei MetalFX.
                           ciContext?.render(image, to: inTex, commandBuffer: cb,
                                             bounds: image.extent,
                                             colorSpace: outSpace)
@@ -1159,9 +1181,9 @@ jobs:
 
           // MARK: - PXProbe: Messung direkt in der App
           /// Rendert das zuletzt angezeigte Bild und berechnet Bildkennzahlen auf dem
-          /// GerÃ¤t. Damit ist eine Messung in ~100 ms mÃ¶glich, exakt auf demselben Bild,
-          /// ohne Screenshot-Umweg. ZusÃ¤tzlich wird die Bewegung zwischen zwei Probes
-          /// gemeldet, damit man weiÃŸ, ob ein Vergleich Ã¼berhaupt gÃ¼ltig ist.
+          /// Gerät. Damit ist eine Messung in ~100 ms möglich, exakt auf demselben Bild,
+          /// ohne Screenshot-Umweg. Zusätzlich wird die Bewegung zwischen zwei Probes
+          /// gemeldet, damit man weiß, ob ein Vergleich überhaupt gültig ist.
           final class PXProbe {
               static let shared = PXProbe()
               private let lock = NSLock()
@@ -1320,7 +1342,7 @@ jobs:
                   let lapVar = lapN > 0 ? (lapSq / Double(lapN) - (lapSum / Double(lapN)) * (lapSum / Double(lapN))) : 0
                   let flatNoise = flatN > 0 ? flatSum / Double(flatN) : 0
 
-                  // Bewegung gegenÃ¼ber der letzten Messung: nur gÃ¼ltig, wenn Bild steht
+                  // Bewegung gegenüber der letzten Messung: nur gültig, wenn Bild steht
                   var motion = -1.0
                   lock.lock()
                   if let prev = prevLuma, prev.count == luma.count {
@@ -1486,6 +1508,7 @@ jobs:
               @AppStorage("pxSharpToneMap") private var toneMap: Int = 0
               @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
               @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.25
+              @AppStorage("pxSharpDeband") private var deband: Double = 0.30
               @AppStorage("pxSharpColorEngine") private var colorEngine: Bool = true
 
               /// Bildmodi, abgeleitet aus den echten Feature-Listen der beiden Geräte:
@@ -1505,7 +1528,7 @@ jobs:
                       deblock = 0.30; denoise = 0.20; vibrance = 0.05
                       saturation = 0.50; contrast = 0.52; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.00; localDim = 0.15; toneMap = 0
+                      clearImage = 0.00; localDim = 0.15; toneMap = 0; deband = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 1: // Sony BRAVIA 7 II (XR Clear Image, Contrast Booster)
@@ -1513,7 +1536,7 @@ jobs:
                       deblock = 0.40; denoise = 0.25; vibrance = 0.22
                       saturation = 0.58; contrast = 0.58; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
-                      clearImage = 0.55; toneMap = 1; localDim = 0.30
+                      clearImage = 0.55; toneMap = 1; localDim = 0.30; deband = 0.30
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
@@ -1521,7 +1544,7 @@ jobs:
                       deblock = 0.40; denoise = 0.25; vibrance = 0.30
                       saturation = 0.62; contrast = 0.62; temp = 0.550
                       gamma = 1.00; black = 0.0; hdrPeak = 900
-                      clearImage = 0.70; toneMap = 2; localDim = 0.45
+                      clearImage = 0.70; toneMap = 2; localDim = 0.45; deband = 0.30
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
@@ -1529,7 +1552,7 @@ jobs:
                       deblock = 0.40; denoise = 0.25; vibrance = 0.25
                       saturation = 0.60; contrast = 0.58; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 0.60; toneMap = 2; localDim = 0.30
+                      clearImage = 0.60; toneMap = 2; localDim = 0.30; deband = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -1537,7 +1560,7 @@ jobs:
                       deblock = 0.40; denoise = 0.25; vibrance = 0.35
                       saturation = 0.62; contrast = 0.62; temp = 0.560
                       gamma = 1.00; black = 0.0; hdrPeak = 950
-                      clearImage = 0.70; toneMap = 2; localDim = 0.50
+                      clearImage = 0.70; toneMap = 2; localDim = 0.50; deband = 0.30
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 6: // Game (minimal, max. Reaktionszeit)
@@ -1545,7 +1568,7 @@ jobs:
                       deblock = 0.35; denoise = 0.15; vibrance = 0.10
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.10; toneMap = 0; localDim = 0.15
+                      clearImage = 0.10; toneMap = 0; localDim = 0.15; deband = 0.15
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
@@ -1553,7 +1576,7 @@ jobs:
                       deblock = 0.45; denoise = 0.30; vibrance = 0.15
                       saturation = 0.52; contrast = 0.55; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.65; toneMap = 0; localDim = 0.25
+                      clearImage = 0.65; toneMap = 0; localDim = 0.25; deband = 0.30
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   }
@@ -1586,6 +1609,7 @@ jobs:
                   clearImage = 0.0
                   toneMap = 0
                   localDim = 0.0
+                  deband = 0.0
                   colorEngine = true
                   metalFX = false; pixelPerfect = false
               }
@@ -1595,7 +1619,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 42").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 43").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -1632,6 +1656,19 @@ jobs:
                           }
                           Slider(value: $localDim, in: 0...1, step: 0.05)
                           Text("Das Kernstueck eines Mini-LED-Fernsehers: die Hintergrundbeleuchtung wird zonenweise gedimmt. Dunkle Bildbereiche werden tiefer, helle bleiben stehen — das erzeugt den hohen Kontrast, den ein Panel allein nicht hat. Zu hoch: Schatten laufen zu.")
+                              .font(.caption)
+                              .foregroundColor(.secondary)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Sanfte Verläufe (Deband)")
+                              Spacer()
+                              Text(String(format: "%.0f %%", deband * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $deband, in: 0...1, step: 0.05)
+                          Text("Glättet Treppenstufen in Himmel, Nebel und Verläufen, ohne Textur zu kosten. Ein 10-Bit-Fernseher hat dieses Problem weniger — hier ersetzt es die 10-Bit-Verarbeitung.")
                               .font(.caption)
                               .foregroundColor(.secondary)
                       }
@@ -1899,6 +1936,12 @@ jobs:
                       }
                   }
                   .onAppear {
+                      // Erster Start nach der Installation: die @AppStorage-Defaults stehen
+                      // dann nur in der UI, nicht in den UserDefaults. Ohne diesen Aufruf
+                      // blieben Regler wie lokales Dimming im Renderer auf 0.
+                      if UserDefaults.standard.object(forKey: "pxSharpLocalDim") == nil {
+                          applyMode(mode)
+                      }
                       if !tunedV2 {
                           // Build-30 hatte den Rauschfilter zwangsweise auf 30 % gesetzt und
                           // damit das Bild weichgezeichnet. Das wird hier zurückgenommen.
