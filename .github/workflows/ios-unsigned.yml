@@ -131,6 +131,8 @@ jobs:
               private var mfxOut: MTLTexture?
               private var mfxKey = ""
               private var appliedPeak: Double = 0
+              private var lutData: Data?
+              private var lutKey: String = ""
               private let diagLabel = UILabel()
 
               override init(frame: CGRect) {
@@ -413,6 +415,44 @@ jobs:
                   displayLink?.invalidate()
               }
 
+              /// Kalibrierungs-LUT: Gamma pro Kanal (R/G/B). Das ist der Teil, den ein
+              /// kalibrierter Fernseher über seine CMS-Ebene macht. Wird nur gebaut, wenn
+              /// mindestens ein Kanal von 1.00 abweicht, und dann gecacht.
+              private func applyCalibration(_ input: CIImage) -> CIImage {
+                  let gr = Float(UserDefaults.standard.object(forKey: "pxSharpGammaR") as? Double ?? 1.0)
+                  let gg = Float(UserDefaults.standard.object(forKey: "pxSharpGammaG") as? Double ?? 1.0)
+                  let gb = Float(UserDefaults.standard.object(forKey: "pxSharpGammaB") as? Double ?? 1.0)
+                  if abs(gr - 1) < 0.002 && abs(gg - 1) < 0.002 && abs(gb - 1) < 0.002 { return input }
+
+                  let key = String(format: "%.3f/%.3f/%.3f", gr, gg, gb)
+                  if key != lutKey || lutData == nil {
+                      let n = 32
+                      var data = [Float](repeating: 0, count: n * n * n * 4)
+                      var i = 0
+                      for b in 0..<n {
+                          for g in 0..<n {
+                              for r in 0..<n {
+                                  let cr = pow(Float(r) / Float(n - 1), gr)
+                                  let cg = pow(Float(g) / Float(n - 1), gg)
+                                  let cb = pow(Float(b) / Float(n - 1), gb)
+                                  data[i + 0] = min(max(cr, 0), 1)
+                                  data[i + 1] = min(max(cg, 0), 1)
+                                  data[i + 2] = min(max(cb, 0), 1)
+                                  data[i + 3] = 1
+                                  i += 4
+                              }
+                          }
+                      }
+                      lutData = data.withUnsafeBufferPointer { Data(buffer: $0) }
+                      lutKey = key
+                  }
+                  guard let lut = lutData else { return input }
+                  return input.applyingFilter("CIColorCube", parameters: [
+                      "inputCubeDimension": 32,
+                      "inputCubeData": lut
+                  ])
+              }
+
               /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
               /// Panel-Auflösung, nie auf dem 1080p-Signal.
               private func applyDetailStage(_ input: CIImage) -> CIImage {
@@ -533,10 +573,22 @@ jobs:
                       ])
                   }
 
+                  // MPEG-Blöcke: Median entfernt Blockkanten und Impulsrauschen, ohne
+                  // Kanten zu zerstören (Gauß würde das ganze Bild weichzeichnen).
+                  // Bewusst VOR der Skalierung, damit bei 1080p geglättet wird.
+                  let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.0)
+                  if deblock > 0.05 {
+                      let median = image.applyingFilter("CIMedianFilter")
+                      image = image.applyingFilter("CIDissolveTransition", parameters: [
+                          kCIInputTargetImageKey: median,
+                          "inputTime": min(deblock, 1.0) * 0.9
+                      ])
+                  }
+
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
-                  let useMFX = (UserDefaults.standard.object(forKey: "pxSharpMetalFX") as? Bool ?? false) && !pixelPerfect && !hdrActive
+                  let useMFX = false
                   if useMFX {
                       // Skalierung übernimmt MetalFX am Ende.
                   } else if pixelPerfect {
@@ -619,6 +671,9 @@ jobs:
                           "inputAmount": min(vib, 1.0)
                       ])
                   }
+
+                  // Kalibrierung zuletzt, damit sie auf dem fertigen Farbbild arbeitet.
+                  image = applyCalibration(image)
 
                   let outSpace: CGColorSpace
                   if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
@@ -745,6 +800,10 @@ jobs:
               @AppStorage("pxSharpTunedV1") private var tunedV1: Bool = false
               @AppStorage("pxSharpTunedV2") private var tunedV2: Bool = false
               @AppStorage("pxSharpHdrOff") private var hdrOff: Bool = false
+              @AppStorage("pxSharpDeblock") private var deblock: Double = 0.0
+              @AppStorage("pxSharpGammaR") private var gammaR: Double = 1.0
+              @AppStorage("pxSharpGammaG") private var gammaG: Double = 1.0
+              @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
 
               private func preset(_ title: String, _ action: @escaping () -> Void) -> some View {
                   Button(title, action: action)
@@ -761,6 +820,8 @@ jobs:
                   vibrance = 0.0; saturation = 0.5; contrast = 0.5; temp = 0.5
                   gamma = 1.0; black = 0.0; rangeMode = 0; hdrPeak = 600
                   wbR = 1.0; wbG = 1.0; wbB = 1.0
+                  gammaR = 1.0; gammaG = 1.0; gammaB = 1.0
+                  deblock = 0.0
                   metalFX = false; pixelPerfect = false
               }
 
@@ -769,7 +830,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 33").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 34").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -842,6 +903,19 @@ jobs:
                       }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
+                              Text("MPEG-Blöcke entfernen (Median)")
+                              Spacer()
+                              Text(String(format: "%.0f %%", deblock * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $deblock, in: 0...1, step: 0.05)
+                          Text("Entfernt 8×8-Blockkanten bei niedriger Bitrate, ohne das Bild weichzuzeichnen. Anders als der Rauschfilter bleibt Textur erhalten.")
+                              .font(.caption)
+                              .foregroundColor(.secondary)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
                               Text("Farbdynamik")
                               Spacer()
                               Text(String(format: "%.0f %%", vibrance * 100))
@@ -911,6 +985,37 @@ jobs:
                                   .foregroundColor(.secondary)
                           }
                       }
+                      DisclosureGroup("Kalibrierung (Gamma pro Kanal)") {
+                          VStack(alignment: .leading, spacing: 8) {
+                              HStack {
+                                  Text("Rot")
+                                  Slider(value: $gammaR, in: 0.85...1.15, step: 0.005)
+                                  Text(String(format: "%.3f", gammaR))
+                                      .font(.caption2)
+                                      .foregroundColor(.secondary)
+                                      .monospacedDigit()
+                              }
+                              HStack {
+                                  Text("Grün")
+                                  Slider(value: $gammaG, in: 0.85...1.15, step: 0.005)
+                                  Text(String(format: "%.3f", gammaG))
+                                      .font(.caption2)
+                                      .foregroundColor(.secondary)
+                                      .monospacedDigit()
+                              }
+                              HStack {
+                                  Text("Blau")
+                                  Slider(value: $gammaB, in: 0.85...1.15, step: 0.005)
+                                  Text(String(format: "%.3f", gammaB))
+                                      .font(.caption2)
+                                      .foregroundColor(.secondary)
+                                      .monospacedDigit()
+                              }
+                              Text("1,000 = neutral. Korrigiert den Farbstich in den Mitteltönen, den der Weißabgleich nicht trifft. Läuft als echte 3D-LUT (32³) — dieselbe Technik wie in der CMS-Ebene eines kalibrierten Fernsehers.")
+                                  .font(.caption)
+                                  .foregroundColor(.secondary)
+                          }
+                      }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
                               Text("Gamma")
@@ -971,7 +1076,6 @@ jobs:
                           .foregroundColor(.secondary)
                       }
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
-                      Toggle("MetalFX Upscaling (Apple)", isOn: $metalFX)
                       Button("Maximale Quelle: 1080p · 60 fps · 50 Mbit · H.265 (greift beim nächsten Verbinden)") {
                           onMaxQuality()
                       }
@@ -984,7 +1088,7 @@ jobs:
                               Text("Schärfe: Kanten (1 px). Ab etwa 85 % bekommen Konturen einen harten Saum.")
                               Text("Detail: Textur (2,5 px). Gras, Stoff, Metall — der Regler für „materialig“.")
                               Text("Für mehr Schärfe zuerst die Bitrate erhöhen, dann Detail, erst zuletzt Schärfe.")
-                              Text("MetalFX: Apples kantenbewusste Rekonstruktion statt Lanczos — die einzige echte Auflösungserhöhung ohne Informationsverlust.")
+                              Text("MetalFX ist entfernt: Apples Spatial Scaler hat auf dem iPad ein lila Bild erzeugt (undefinierter Texturspeicher). Lanczos + Panel-Schärfe ist die zuverlässige Variante.")
                           }
                           .font(.caption)
                           .foregroundColor(.secondary)
