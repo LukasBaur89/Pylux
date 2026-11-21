@@ -1366,7 +1366,7 @@ jobs:
                                                        NSNumber(value: min(clearImage, 1.0) * 0.45),
                                                        NSNumber(value: 0.25), NSNumber(value: lumaSharpen),
                                                        NSNumber(value: chromaSharpen),
-                                                       NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.5) * 0.020))] {
+                                                       NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.5) * 0.020)] {
                           image = out
                       } else {
                           image = image.applyingFilter("CIUnsharpMask", parameters: [
@@ -2443,7 +2443,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 70 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 73 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
