@@ -794,6 +794,71 @@ jobs:
                   return shadowKernel
               }
 
+              private var cas2Kernel: CIKernel?
+              private var cas2Tried = false
+
+              /// Wie pxCAS, aber nur zwei Radien (1,35 px und 2,7 px). Die Panel-Stufe
+              /// braucht den dritten Radius nicht — ein eigener Kernel garantiert, dass
+              /// die acht zusaetzlichen Samples auch wirklich nicht ausgefuehrt werden.
+              private func cas2KernelInstance() -> CIKernel? {
+                  if cas2Tried { return cas2Kernel }
+                  cas2Tried = true
+                  let src = """
+                  kernel vec4 pxCAS2(sampler src, float r1, float r2, float s1, float s2, float clampK, float lumaOnly) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(src, samplerTransform(src, p));
+                      vec2 d1 = vec2(r1, r1);
+                      vec4 a1 = sample(src, samplerTransform(src, p + vec2(-d1.x, -d1.y)));
+                      vec4 b1 = sample(src, samplerTransform(src, p + vec2( 0.0, -d1.y)));
+                      vec4 c1 = sample(src, samplerTransform(src, p + vec2( d1.x, -d1.y)));
+                      vec4 d1s = sample(src, samplerTransform(src, p + vec2(-d1.x,  0.0)));
+                      vec4 e1 = sample(src, samplerTransform(src, p + vec2( d1.x,  0.0)));
+                      vec4 f1 = sample(src, samplerTransform(src, p + vec2(-d1.x,  d1.y)));
+                      vec4 g1 = sample(src, samplerTransform(src, p + vec2( 0.0,  d1.y)));
+                      vec4 h1 = sample(src, samplerTransform(src, p + vec2( d1.x,  d1.y)));
+                      vec2 d2 = vec2(r2, r2);
+                      vec4 a2 = sample(src, samplerTransform(src, p + vec2(-d2.x, -d2.y)));
+                      vec4 b2 = sample(src, samplerTransform(src, p + vec2( 0.0, -d2.y)));
+                      vec4 c2 = sample(src, samplerTransform(src, p + vec2( d2.x, -d2.y)));
+                      vec4 d2s = sample(src, samplerTransform(src, p + vec2(-d2.x,  0.0)));
+                      vec4 e2 = sample(src, samplerTransform(src, p + vec2( d2.x,  0.0)));
+                      vec4 f2 = sample(src, samplerTransform(src, p + vec2(-d2.x,  d2.y)));
+                      vec4 g2 = sample(src, samplerTransform(src, p + vec2( 0.0,  d2.y)));
+                      vec4 h2 = sample(src, samplerTransform(src, p + vec2( d2.x,  d2.y)));
+
+                      vec3 mn = min(min(min(b1.rgb, d1s.rgb), min(e1.rgb, g1.rgb)),
+                                    min(min(a1.rgb, c1.rgb), min(f1.rgb, h1.rgb)));
+                      vec3 mx = max(max(max(b1.rgb, d1s.rgb), max(e1.rgb, g1.rgb)),
+                                    max(max(a1.rgb, c1.rgb), max(f1.rgb, h1.rgb)));
+                      vec3 avg1 = (b1.rgb + d1s.rgb + e1.rgb + g1.rgb
+                                 + a1.rgb + c1.rgb + f1.rgb + h1.rgb) * 0.125;
+                      vec3 avg2 = (b2.rgb + d2s.rgb + e2.rgb + g2.rgb
+                                 + a2.rgb + c2.rgb + f2.rgb + h2.rgb) * 0.125;
+                      vec3 range = mx - mn;
+                      vec3 adapt = vec3(1.0) - clamp(range * 4.0, vec3(0.0), vec3(1.0));
+                      vec3 edge;
+                      vec3 tex;
+                      if (lumaOnly > 0.5) {
+                          vec3 L = vec3(0.299, 0.587, 0.114);
+                          float lc2 = dot(c.rgb, L);
+                          float a = dot(adapt, vec3(0.333333));
+                          edge = vec3((lc2 - dot(avg1, L)) * (s1 * (0.45 + 0.55 * a)));
+                          tex  = vec3((lc2 - dot(avg2, L)) * s2);
+                      } else {
+                          edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
+                          tex  = (c.rgb - avg2) * s2;
+                      }
+                      vec3 outv = c.rgb + edge + tex;
+                      vec3 lim  = range * clampK + 0.003;
+                      outv = clamp(outv, mn - lim, mx + lim);
+                      return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  cas2Kernel = CIKernel(source: src)
+                  if cas2Kernel == nil { os_log(.error, log: videoViewLog, "[px] cas2 kernel compile failed") }
+                  return cas2Kernel
+              }
+
               /// Lokales Dimming (Mini-LED-Emulation). Ein echter Mini-LED-Fernseher dimmt
               /// die Hintergrundbeleuchtung zonenweise: dunkle Bildbereiche bekommen weniger
               /// Licht, helle bleiben stehen. Ergebnis sind tiefe Schwärzen und ein deutlich
@@ -860,11 +925,12 @@ jobs:
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
                   if s1 > 0.02 || s2 > 0.02 {
-                      if engineNew, let k = casKernelInstance() {
+                      if engineNew, let k = cas2KernelInstance() {
                           let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -6, dy: -6) }
                           if let out = k.apply(extent: image.extent, roiCallback: roi,
-                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7), NSNumber(value: 4.5), NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.0), NSNumber(value: 0.30),
-                                          NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true)]) {
+                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7),
+                                                           NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.30),
+                                                           NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true)]) {
                               image = out
                           } else {
                               // Fallback: falls der Kernel zur Laufzeit nicht durchlaeuft
@@ -890,27 +956,6 @@ jobs:
                       }
                   }
 
-                  // Klarheit: lokaler Kontrast mit begrenzter Amplitude (kein Halo).
-                  if clarity > 0.02 {
-                      if engineNew, let lc = diffKernelInstance() {
-                          let ext = image.extent
-                          let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
-                          let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
-                              kCIInputRadiusKey: 2.2
-                          ]).cropped(to: small.extent)
-                          let up = blurred.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
-                          if let out = lc.apply(extent: ext, arguments: [
-                              image, up, NSNumber(value: min(clarity, 1.0) * 0.85), NSNumber(value: 0.055)
-                          ]) {
-                              image = out
-                          }
-                      } else {
-                          image = image.applyingFilter("CIUnsharpMask", parameters: [
-                              kCIInputRadiusKey: 8.0,
-                              kCIInputIntensityKey: min(clarity, 1.0) * 0.50
-                          ])
-                      }
-                  }
                   return image
               }
 
@@ -1149,6 +1194,23 @@ jobs:
                               kCIInputRadiusKey: 1.2,
                               kCIInputIntensityKey: min(clearImage, 1.0) * 0.55
                           ])
+                      }
+                  }
+
+                  // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
+                  // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
+                  // ein Drittel der Pixel.
+                  let clarityAmt = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0)
+                  if clarityAmt > 0.02, let lc = diffKernelInstance() {
+                      let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
+                      let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
+                          kCIInputRadiusKey: 2.2
+                      ]).cropped(to: small.extent)
+                      let up = blurred.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+                      if let out = lc.apply(extent: image.extent, arguments: [
+                          image, up, NSNumber(value: min(clarityAmt, 1.0) * 0.85), NSNumber(value: 0.055)
+                      ]) {
+                          image = out
                       }
                   }
 
@@ -2108,7 +2170,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 54 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 55 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
