@@ -1034,7 +1034,15 @@ jobs:
                   let autoFlag = (UserDefaults.standard.object(forKey: "pxSharpAuto") as? NSNumber)?.boolValue ?? true
                   let autoStr = Float(UserDefaults.standard.object(forKey: "pxSharpAutoStrength") as? Double ?? 0.65)
                   let autoNoise: Float = autoFlag ? Float(PXScene.shared.noise) * autoStr : 0
-                  let sharpDamp = 1.0 - min(autoNoise * 0.45, 0.45)
+                  // Zusaetzlich: bei niedriger Bitrate weniger Schaerfe (Blockkanten).
+                  // Die Bitrate wird hier separat gelesen (die Funktion hat keinen Zugriff
+                  // auf die lokale Variable aus draw()).
+                  let mbpsD = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
+                  var bfD: Float = 1.0
+                  if mbpsD > 0.1 {
+                      bfD = Float(min(max((mbpsD - 7.0) / 15.0, 0.0), 1.0))
+                  }
+                  let sharpDamp = (1.0 - min(autoNoise * 0.45, 0.45)) * (0.55 + 0.45 * bfD)
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
                   if s1 > 0.02 || s2 > 0.02 {
@@ -1247,9 +1255,22 @@ jobs:
                   let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.0)
                   let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
 
+                  // ---- Bitraten-Adaption -------------------------------------------
+                  // Bei 8 Mbit ist ein 1080p60-Bild stark komprimiert (Blockkanten,
+                  // ausgewaschene Textur), bei 22 Mbit kaum. Ein Fernseher regelt seine
+                  // MPEG-Rauschunterdrueckung genauso: mehr Filter, weniger Schaerfe,
+                  // wenn die Leitung schwach ist. Sonst verstaerkt die Schaerfe Bloecke.
+                  let mbps = scene.streamMbps
+                  var bitrateFactor: Float = 1.0
+                  if mbps > 0.1 {
+                      bitrateFactor = Float(min(max((mbps - 7.0) / 15.0, 0.0), 1.0))
+                  }
+                  let filterBoost = 1.0 + (1.0 - bitrateFactor) * 1.10   // bis +110 % Filter
+                  denoise = min(1.0, denoise * filterBoost)
+
                   let aD = denoise > 0.02 ? min(denoise, 1.0) * 0.85 : 0.0
-                  let aB = deblock > 0.02 ? min(max(deblock, 0), 1) * 0.90 : 0.0
-                  let aG = (dbn > 0.02 && scene.perfLevel == 0) ? min(dbn, 1.0) * 0.65 : 0.0
+                  let aB = deblock > 0.02 ? min(max(deblock, 0), 1) * 0.90 * filterBoost : 0.0
+                  let aG = (dbn > 0.02 && scene.perfLevel == 0) ? min(dbn, 1.0) * 0.65 * filterBoost : 0.0
 
                   if (aD + aB + aG) > 0.02, let k = cleanKernelInstance(),
                      let out = k.apply(extent: image.extent,
@@ -1568,6 +1589,9 @@ jobs:
               private(set) var mean: Double = 0.5
               private(set) var p90: Double = 0.85
               private(set) var darkFrac: Double = 0.0
+              /// Gemessene Stream-Bitrate in Mbit/s (0 = unbekannt). Wird von StreamView
+              /// einmal pro Sekunde geschrieben.
+              private(set) var streamMbps: Double = 0.0
 
               /// Gemessene GPU-Zeit pro Bild in Millisekunden (gleitender Mittelwert).
               /// 16,6 ms = 60 fps. Alles darunter ist Reserve, alles darueber kostet Bilder.
@@ -1583,10 +1607,10 @@ jobs:
                   // Lastregel: wenn die GPU ueber das Budget kommt, werden zuerst die
                   // beiden unsichtbarsten Stufen abgeschaltet (Deband, Klarheit).
                   // 10 s Sperre, damit es nicht hin- und herschaltet.
-                  if perfLevelStore == 0 && renderMsEma > 20.5 {
+                  if perfLevelStore == 0 && renderMsEma > 22.0 {
                       perfLevelStore = 1
                       perfCooldown = CACurrentMediaTime() + 10.0
-                  } else if perfLevelStore == 1 && CACurrentMediaTime() > perfCooldown && renderMsEma < 16.2 {
+                  } else if perfLevelStore == 1 && CACurrentMediaTime() > perfCooldown && renderMsEma < 18.5 {
                       perfLevelStore = 0
                   }
                   lock.unlock()
@@ -1685,7 +1709,12 @@ jobs:
                   let darkFrac = n > 0 ? Double(darkN) / Double(n) : 0.0
                   _ = darkSum
 
+                  // Bitrate der Leitung mitlesen: bestimmt, wie stark komprimiert das
+                  // Bild ist — und damit, wie viel Filter bzw. Schaerfe sinnvoll ist.
+                  let mb = UserDefaults.standard.string(forKey: "pxSharpStreamMbps").flatMap { Double($0) } ?? 0.0
+
                   lock.lock()
+                  streamMbps = mb
                   // Asymmetrische Glaettung: schnell runter (nicht ueberbelichten),
                   // langsam hoch. Verhindert Pumpen bei Szenenwechseln.
                   let a = g < gainEma ? 0.18 : 0.07
@@ -2000,6 +2029,7 @@ jobs:
                       o["pxRenderMs"] = String(format: "%.2f", PXScene.shared.renderMs)
                       o["pxScreenBrightness"] = String(format: "%.2f", Double(UIScreen.main.brightness))
                       o["pxPerfLevel"] = String(PXScene.shared.perfLevel)
+                      o["pxBitrateFactor"] = String(format: "%.2f", min(max((PXScene.shared.streamMbps - 7.0) / 15.0, 0.0), 1.0))
                       o["pxSceneDark"] = String(format: "%.3f", PXScene.shared.darkFrac)
                       if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
                           return String(data: data, encoding: .utf8) ?? "{}"
@@ -2326,7 +2356,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 65 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 66 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
