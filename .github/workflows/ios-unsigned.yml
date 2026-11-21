@@ -486,7 +486,7 @@ jobs:
                   if casTried { return casKernel }
                   casTried = true
                   let src = """
-                  kernel vec4 pxCAS(sampler src, float r1, float r2, float r3, float s1, float s2, float s3, float clampK, float lumaOnly, float chromaS) {
+                  kernel vec4 pxCAS(sampler src, float r1, float r2, float r3, float s1, float s2, float s3, float clampK, float lumaOnly, float chromaS, float coring) {
                       vec2 p = destCoord();
                       vec4 c = sample(src, samplerTransform(src, p));
                       vec2 d1 = vec2(r1, r1);
@@ -546,9 +546,15 @@ jobs:
                           float la1 = dot(avg1, L);
                           float la2 = dot(avg2, L);
                           float a = dot(adapt, vec3(0.333333));
-                          float de = (lc2 - la1) * (s1 * (0.45 + 0.55 * a));
-                          float dt = (lc2 - la2) * s2;
-                          float dc = (lc2 - dot(avg3, L)) * s3;
+                          float q1 = lc2 - la1;
+                          float q2 = lc2 - la2;
+                          float q3 = lc2 - dot(avg3, L);
+                          q1 = sign(q1) * max(0.0, abs(q1) - coring);
+                          q2 = sign(q2) * max(0.0, abs(q2) - coring);
+                          q3 = sign(q3) * max(0.0, abs(q3) - coring);
+                          float de = q1 * (s1 * (0.45 + 0.55 * a));
+                          float dt = q2 * s2;
+                          float dc = q3 * s3;
                           edge = vec3(de);
                           tex = vec3(dt + dc);
                           if (chromaS > 0.001) {
@@ -933,7 +939,7 @@ jobs:
                   if cas2Tried { return cas2Kernel }
                   cas2Tried = true
                   let src = """
-                  kernel vec4 pxCAS2(sampler src, float r1, float r2, float s1, float s2, float clampK, float lumaOnly, float chromaS) {
+                  kernel vec4 pxCAS2(sampler src, float r1, float r2, float s1, float s2, float clampK, float lumaOnly, float chromaS, float coring) {
                       vec2 p = destCoord();
                       vec4 c = sample(src, samplerTransform(src, p));
                       vec2 d1 = vec2(r1, r1);
@@ -971,16 +977,26 @@ jobs:
                           vec3 L = vec3(0.299, 0.587, 0.114);
                           float lc2 = dot(c.rgb, L);
                           float a = dot(adapt, vec3(0.333333));
-                          edge = vec3((lc2 - dot(avg1, L)) * (s1 * (0.45 + 0.55 * a)));
-                          tex  = vec3((lc2 - dot(avg2, L)) * s2);
+                          // CORING: alles unter dem Rauschpegel wird auf Null gesetzt,
+                          // echte Textur bleibt — Schaerfe ohne Rauschverstaerkung.
+                          float v1 = lc2 - dot(avg1, L);
+                          float v2 = lc2 - dot(avg2, L);
+                          v1 = sign(v1) * max(0.0, abs(v1) - coring);
+                          v2 = sign(v2) * max(0.0, abs(v2) - coring);
+                          edge = vec3(v1 * (s1 * (0.45 + 0.55 * a)));
+                          tex  = vec3(v2 * s2);
                           if (chromaS > 0.001) {
                               vec3 cc = c.rgb - vec3(lc2);
                               vec3 ca = avg2 - vec3(dot(avg2, L));
                               tex += (cc - ca) * chromaS;
                           }
                       } else {
-                          edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
-                          tex  = (c.rgb - avg2) * s2;
+                          vec3 w1 = c.rgb - avg1;
+                          vec3 w2 = c.rgb - avg2;
+                          w1 = sign(w1) * max(vec3(0.0), abs(w1) - coring);
+                          w2 = sign(w2) * max(vec3(0.0), abs(w2) - coring);
+                          edge = w1 * (s1 * (0.45 + 0.55 * adapt));
+                          tex  = w2 * s2;
                       }
                       // Banding-Schutz: Treppenstufen sind Kanten mit 1-4 Stufen Amplitude.
                       // smoothstep blendet die Schaerfung dort aus, laesst Textur stehen.
@@ -1067,6 +1083,9 @@ jobs:
                       bfD = Float(min(max((mbpsD - 7.0) / 15.0, 0.0), 1.0))
                   }
                   let sharpDamp = (1.0 - min(autoNoise * 0.45, 0.45)) * (0.55 + 0.45 * bfD)
+                  // Coring-Schwelle: Regler + gemessenes Rauschen der Szene.
+                  let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.5)
+                  let coringVal = Float(min(0.045, coringBase * 0.016 + Double(min(autoNoise, 1.0)) * 0.013))
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
                   if s1 > 0.02 || s2 > 0.02 {
@@ -1076,7 +1095,8 @@ jobs:
                                                arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7),
                                                            NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.30),
                                                            NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true),
-                                                           NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.30))]) {
+                                                           NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.30)),
+                                                           NSNumber(value: coringVal)]) {
                               image = out
                           } else {
                               // Fallback: falls der Kernel zur Laufzeit nicht durchlaeuft
@@ -1345,7 +1365,8 @@ jobs:
                                                        NSNumber(value: min(clearImage, 1.0) * 0.55),
                                                        NSNumber(value: min(clearImage, 1.0) * 0.45),
                                                        NSNumber(value: 0.25), NSNumber(value: lumaSharpen),
-                                                       NSNumber(value: chromaSharpen)]) {
+                                                       NSNumber(value: chromaSharpen),
+                                                       NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.5) * 0.020))] {
                           image = out
                       } else {
                           image = image.applyingFilter("CIUnsharpMask", parameters: [
