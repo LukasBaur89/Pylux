@@ -999,7 +999,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 37 (Tuner)").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 38 (Tuner)").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -1346,6 +1346,9 @@ jobs:
           python3 - <<'PATCH_EOF'
           p = 'ios/Pylux/App/PyluxAppDelegate.swift'
           s = open(p, encoding='utf-8').read()
+          anchor = '    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {\n'
+          if 'PXTuner.shared.start()' not in s and anchor in s:
+              s = s.replace(anchor, anchor + '        PXTuner.shared.start()\n', 1)
           old = '                AppReviewHelper.shared.requestReviewIfEligible(in: scene)\n'
           if old in s:
               s = s.replace(old, '                // pxsharp: App-Store-Bewertung deaktiviert\n', 1)
@@ -1398,7 +1401,7 @@ jobs:
             -sdk iphoneos -configuration Release \
             -derivedDataPath build-derived \
             MARKETING_VERSION=1.0.0 \
-            CURRENT_PROJECT_VERSION=1 \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
