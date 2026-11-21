@@ -585,6 +585,16 @@ jobs:
                       ])
                   }
 
+                  // Clear Image / AI-Super-Upscaling (Näherung): leichte Kantenvorverstärkung
+                  // bei Quellauflösung, damit der Upscaler echte Kanten statt weicher Pixel bekommt.
+                  let clearImage = Float(UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0)
+                  if clearImage > 0.05 {
+                      image = image.applyingFilter("CIUnsharpMask", parameters: [
+                          kCIInputRadiusKey: 1.2,
+                          kCIInputIntensityKey: min(clearImage, 1.0) * 0.55
+                      ])
+                  }
+
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
@@ -635,10 +645,11 @@ jobs:
                   // Farbtemperatur: 0 = warm (5500K), 50 = neutral (6500K), 100 = kühl (7500K)
                   let tempRaw = Float(UserDefaults.standard.object(forKey: "pxSharpTemp") as? Double ?? 0.5)
                   if abs(tempRaw - 0.5) > 0.01 {
-                      let target = 6500.0 + Double(tempRaw - 0.5) * 2000.0
+                      let target = 6500.0 + Double(tempRaw - 0.5) * 8000.0
+                      let clamped = min(max(target, 2500.0), 10500.0)
                       image = image.applyingFilter("CITemperatureAndTint", parameters: [
                           "inputNeutral": CIVector(x: 6500, y: 0),
-                          "inputTargetNeutral": CIVector(x: target, y: 0)
+                          "inputTargetNeutral": CIVector(x: clamped, y: 0)
                       ])
                   }
 
@@ -804,15 +815,90 @@ jobs:
               @AppStorage("pxSharpGammaR") private var gammaR: Double = 1.0
               @AppStorage("pxSharpGammaG") private var gammaG: Double = 1.0
               @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
+              @AppStorage("pxSharpMode") private var mode: Int = 5
+              @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.0
+              @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
 
-              private func preset(_ title: String, _ action: @escaping () -> Void) -> some View {
-                  Button(title, action: action)
-                      .font(.caption)
-                      .buttonStyle(.borderless)
-                      .padding(.horizontal, 8)
-                      .padding(.vertical, 5)
-                      .background(Color(.tertiarySystemFill))
-                      .clipShape(Capsule())
+              /// Bildmodi, abgeleitet aus den echten Feature-Listen der beiden Geräte:
+              /// Sony BRAVIA 7 II: XR Clear Image, XR Contrast Booster 20, RGB Triluminos Max, Live Colour.
+              /// LG QNED93: Precision Dimming Ultra, Dynamic QNED Color Pro, alpha8 AI Super Upscaling.
+              /// Farbtemperaturen aus kalibrierten Messreihen: Cinema 6500 K, Standard 6300-7600 K, Vivid 9300-10000 K.
+              private func applyMode(_ m: Int) {
+                  switch m {
+                  case 0: // Kino / Filmmaker (D65, BT.1886)
+                      level = 0.30; detail = 0.10; clarity = 0.05
+                      deblock = 0.15; denoise = 0.0; vibrance = 0.05
+                      saturation = 0.50; contrast = 0.50; temp = 0.50
+                      gamma = 1.00; black = 0.0; hdrPeak = 600
+                      clearImage = 0.00
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 1: // Sony BRAVIA 7 II
+                      level = 0.55; detail = 0.40; clarity = 0.28
+                      deblock = 0.25; denoise = 0.0; vibrance = 0.30
+                      saturation = 0.60; contrast = 0.62; temp = 0.475
+                      gamma = 1.00; black = 0.0; hdrPeak = 800
+                      clearImage = 0.50
+                      wbR = 1.020; wbG = 1.000; wbB = 0.980
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 2: // Sony Vivid / Live Colour
+                      level = 0.75; detail = 0.55; clarity = 0.38
+                      deblock = 0.20; denoise = 0.0; vibrance = 0.45
+                      saturation = 0.68; contrast = 0.68; temp = 0.850
+                      gamma = 1.00; black = 0.0; hdrPeak = 900
+                      clearImage = 0.70
+                      wbR = 0.990; wbG = 1.000; wbB = 1.030
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 3: // LG QNED93
+                      level = 0.60; detail = 0.45; clarity = 0.25
+                      deblock = 0.25; denoise = 0.0; vibrance = 0.35
+                      saturation = 0.62; contrast = 0.60; temp = 0.6375
+                      gamma = 1.00; black = 0.0; hdrPeak = 850
+                      clearImage = 0.45
+                      wbR = 0.990; wbG = 1.000; wbB = 1.020
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 4: // LG Vivid
+                      level = 0.80; detail = 0.60; clarity = 0.35
+                      deblock = 0.20; denoise = 0.0; vibrance = 0.50
+                      saturation = 0.70; contrast = 0.70; temp = 0.9375
+                      gamma = 1.00; black = 0.0; hdrPeak = 950
+                      clearImage = 0.65
+                      wbR = 0.980; wbG = 1.000; wbB = 1.040
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 6: // Game (minimal)
+                      level = 0.50; detail = 0.25; clarity = 0.05
+                      deblock = 0.20; denoise = 0.0; vibrance = 0.10
+                      saturation = 0.50; contrast = 0.50; temp = 0.50
+                      gamma = 1.00; black = 0.0; hdrPeak = 600
+                      clearImage = 0.00
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  default: // Ultra
+                      level = 0.90; detail = 0.55; clarity = 0.30
+                      deblock = 0.25; denoise = 0.0; vibrance = 0.10
+                      saturation = 0.50; contrast = 0.55; temp = 0.50
+                      gamma = 1.00; black = 0.0; hdrPeak = 600
+                      clearImage = 0.55
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  }
+                  wbPreset = 3
+                  pacing = true
+              }
+
+              private func applyWB(_ p: Int) {
+                  switch p {
+                  case 0: // Neutral / D65
+                      wbR = 1.000; wbG = 1.000; wbB = 1.000
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 1: // Warm (Kino / Sony Standard)
+                      wbR = 1.020; wbG = 1.000; wbB = 0.980
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 2: // Kühl (LG / Vivid)
+                      wbR = 0.985; wbG = 1.000; wbB = 1.030
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  default: break
+                  }
               }
 
               private func resetAll() {
@@ -822,6 +908,7 @@ jobs:
                   wbR = 1.0; wbG = 1.0; wbB = 1.0
                   gammaR = 1.0; gammaG = 1.0; gammaB = 1.0
                   deblock = 0.0
+                  clearImage = 0.0
                   metalFX = false; pixelPerfect = false
               }
 
@@ -830,7 +917,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 34").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 35").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -838,28 +925,19 @@ jobs:
                               .buttonStyle(.borderless)
                               .foregroundColor(.red)
                       }
-                      HStack(spacing: 6) {
-                          preset("Kino") {
-                              level = 0.40; detail = 0.15; clarity = 0.08
-                              gamma = 1.0; temp = 0.45; saturation = 0.5; contrast = 0.5
-                              denoise = 0.30; pacing = true
-                          }
-                          preset("Standard") {
-                              level = 0.65; detail = 0.30; clarity = 0.15
-                              gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.5
-                              denoise = 0.25; pacing = true
-                          }
-                          preset("Ultra") {
-                              level = 0.90; detail = 0.55; clarity = 0.30
-                              gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.55
-                              denoise = 0.20; pacing = true
-                          }
-                          preset("Motion") {
-                              level = 0.55; detail = 0.25; clarity = 0.05
-                              gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.5
-                              denoise = 0.35; pacing = true
-                          }
+                      Picker("Bildmodus", selection: $mode) {
+                          Text("Kino / Filmmaker (D65)").tag(0)
+                          Text("Sony BRAVIA 7 II").tag(1)
+                          Text("Sony Vivid (Live Colour)").tag(2)
+                          Text("LG QNED93").tag(3)
+                          Text("LG Vivid").tag(4)
+                          Text("Ultra (max. Detail)").tag(5)
+                          Text("Game (minimal)").tag(6)
                       }
+                      .onChange(of: mode) { m in applyMode(m) }
+                      Text("Abgeleitet aus den Gerätedaten: Sony = XR Clear Image + XR Contrast Booster 20 + RGB Triluminos Max + Live Colour. LG = Precision Dimming Ultra + Dynamic QNED Color Pro + α8 AI Super Upscaling. Farbtemperaturen nach Messwerten: Filmmaker 6500 K, Standard 6300–7600 K, Vivid 9300–10000 K.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
                       Text("Bildschärfe").font(.headline)
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
@@ -880,6 +958,19 @@ jobs:
                                   .monospacedDigit()
                           }
                           Slider(value: $detail, in: 0...1, step: 0.05)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Clear Image (Vor-Schärfung bei 1080p)")
+                              Spacer()
+                              Text(String(format: "%.0f %%", clearImage * 100))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $clearImage, in: 0...1, step: 0.05)
+                          Text("Näherung an XR Clear Image bzw. AI Super Upscaling: verstärkt Kanten bei Quellauflösung, bevor skaliert wird. Der Upscaler bekommt dadurch echte Kanten statt weicher Pixel.")
+                              .font(.caption)
+                              .foregroundColor(.secondary)
                       }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
@@ -948,7 +1039,7 @@ jobs:
                           HStack {
                               Text("Farbtemperatur")
                               Spacer()
-                              Text(String(format: "%.0f K", 6500 + (temp - 0.5) * 2000))
+                              Text(String(format: "%.0f K", 6500 + (temp - 0.5) * 8000))
                                   .foregroundColor(.secondary)
                                   .monospacedDigit()
                           }
@@ -956,6 +1047,13 @@ jobs:
                       }
                       DisclosureGroup("Weißabgleich RGB (Feinschliff)") {
                           VStack(alignment: .leading, spacing: 8) {
+                              Picker("Preset", selection: $wbPreset) {
+                                  Text("Neutral (D65)").tag(0)
+                                  Text("Warm (Kino / Sony)").tag(1)
+                                  Text("Kühl (LG / Vivid)").tag(2)
+                                  Text("Eigene").tag(3)
+                              }
+                              .onChange(of: wbPreset) { p in if p < 3 { applyWB(p) } }
                               HStack {
                                   Text("Rot")
                                   Slider(value: $wbR, in: 0.85...1.15, step: 0.005)
@@ -1088,7 +1186,7 @@ jobs:
                               Text("Schärfe: Kanten (1 px). Ab etwa 85 % bekommen Konturen einen harten Saum.")
                               Text("Detail: Textur (2,5 px). Gras, Stoff, Metall — der Regler für „materialig“.")
                               Text("Für mehr Schärfe zuerst die Bitrate erhöhen, dann Detail, erst zuletzt Schärfe.")
-                              Text("MetalFX ist entfernt: Apples Spatial Scaler hat auf dem iPad ein lila Bild erzeugt (undefinierter Texturspeicher). Lanczos + Panel-Schärfe ist die zuverlässige Variante.")
+                              Text("HDR bleibt unabhängig davon aktiv: Sobald der Stream PQ/BT.2020 meldet, wird er als HDR10 mit EDR-Metadaten ausgegeben (Diagnose zeigt hdr=1). MetalFX war im HDR-Pfad ohnehin nie aktiv und ist jetzt entfernt.")
                           }
                           .font(.caption)
                           .foregroundColor(.secondary)
