@@ -2169,6 +2169,7 @@ jobs:
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.35
               @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = true
               @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
+              @AppStorage("pxSharpCoring") private var coring: Double = 0.55
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -2233,7 +2234,7 @@ jobs:
                       saturation = 0.60; contrast = 0.50; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
                       clearImage = 0.88; toneMap = 2; localDim = 0.30; deband = 0.18
-                      brightness = 0.45; shadow = 0.40; chroma = 0.60
+                      brightness = 0.45; shadow = 0.40; chroma = 0.60; coring = 0.60
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -2253,7 +2254,7 @@ jobs:
                       saturation = 0.58; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.82; toneMap = 0; localDim = 0.15; deband = 0.15
-                      brightness = 0.47; shadow = 0.50; chroma = 0.62
+                      brightness = 0.47; shadow = 0.50; chroma = 0.62; coring = 0.60
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 7: // Realistisch / kalibriert (BT.709, D65, +4 % Sättigung)
@@ -2272,7 +2273,7 @@ jobs:
                       saturation = 0.56; contrast = 0.48; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.90; toneMap = 0; localDim = 0.25; deband = 0.18
-                      brightness = 0.45; shadow = 0.35; chroma = 0.60
+                      brightness = 0.45; shadow = 0.35; chroma = 0.60; coring = 0.60
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   }
@@ -2516,6 +2517,9 @@ jobs:
                       sliderRow("Farbschärfe (Chroma)", value: $chroma, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", chroma * 100),
                                 rule: "Je höher, desto schärfer werden FARBkanten (Schildtext, Zierleisten, Lichter). Der Stream liefert Farbe nur mit halber Auflösung (4:2:0) — dieser Regler holt die Präzision zurück, ohne Helligkeitsrauschen zu erzeugen.")
+                      sliderRow("Detail-Klarheit (Coring)", value: $coring, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", coring * 100),
+                                rule: "Je höher, desto konsequenter wird Rauschen von echter Textur getrennt: alles unter dem Rauschpegel wird verworfen, Struktur darüber verstärkt. Das ist der Unterschied zwischen verrauscht-scharf und kristallklar.")
                       sliderRow("Clear Image (Vor-Schärfung 1080p)", value: $clearImage, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", clearImage * 100),
                                 rule: "Je höher, desto mehr echte Kanten bekommt der Upscaler zu sehen. Über 75 % werden feine Linien unruhig.")
