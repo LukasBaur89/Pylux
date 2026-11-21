@@ -130,6 +130,7 @@ jobs:
               private var mfxIn: MTLTexture?
               private var mfxOut: MTLTexture?
               private var mfxKey = ""
+              private var appliedPeak: Double = 0
               private let diagLabel = UILabel()
 
               override init(frame: CGRect) {
@@ -246,8 +247,7 @@ jobs:
                   latestBuffer = pixelBuffer
                   bufferLock.unlock()
                   let hdr = pixelBufferIsHDR(pixelBuffer)
-                  if hdr != hdrActive {
-                      // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
+                  if hdr != hdrActive {            // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
                       // das Bild bei einzelnen Ausreißern (hell/dunkel).
                       hdrStreak += 1
                       if hdrStreak >= 8 {
@@ -391,8 +391,9 @@ jobs:
                       caml.wantsExtendedDynamicRangeContent = true
                       caml.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
                       caml.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005,
-                                                           maxLuminance: 1200,
+                                                           maxLuminance: Float(UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600),
                                                            opticalOutputScale: 100)
+                      appliedPeak = UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] HDR/EDR an")
                   } else {
                       mv.colorPixelFormat = .bgra8Unorm
@@ -412,6 +413,17 @@ jobs:
               }
 
               func draw(in view: MTKView) {
+                  // HDR-Peak live nachziehen (Panel-Headroom ändert sich mit der Display-Helligkeit)
+                  if hdrActive {
+                      let peak = UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600
+                      if abs(peak - appliedPeak) > 0.5, let caml = view.layer as? CAMetalLayer {
+                          caml.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005,
+                                                                 maxLuminance: Float(peak),
+                                                                 opticalOutputScale: 100)
+                          appliedPeak = peak
+                      }
+                  }
+
                   guard let drawable = view.currentDrawable,
                         let cb = commandQueue?.makeCommandBuffer() else { return }
 
@@ -671,6 +683,7 @@ jobs:
               @AppStorage("pxSharpRange") private var rangeMode: Int = 0
               @AppStorage("pxSharpDiag") private var diag: String = "—"
               @AppStorage("pxSharpShowDiag") private var showDiag: Bool = true
+              @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 600
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
@@ -762,6 +775,16 @@ jobs:
                           Text("Auto").tag(0)
                           Text("Limited → Full").tag(1)
                           Text("Full → Limited").tag(2)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("HDR-Peak (Nits)")
+                              Spacer()
+                              Text(String(format: "%.0f", hdrPeak))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $hdrPeak, in: 300...1600, step: 50)
                       }
                       Text(diag)
                           .font(.caption2)
