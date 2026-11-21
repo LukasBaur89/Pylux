@@ -2155,6 +2155,11 @@ jobs:
               @AppStorage("pxAudioEQ3") private var eq3: Double = 0.5
               @AppStorage("pxAudioEQ4") private var eq4: Double = 0.0
               @AppStorage("pxAudioPreset") private var audioPreset: Int = 0
+              @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
+              @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
+              @AppStorage("pxRenderMs") private var liveRender: String = "—"
+              @AppStorage("pxPerfLevel") private var perfLevel: String = "0"
+              @AppStorage("pxSharpDiag") private var liveDiag: String = "—"
 
               // MARK: - Bildmodi
 
@@ -2291,6 +2296,28 @@ jobs:
               }
 
               /// Klangprofile wie bei einem Fernseher (Sony-Klangmodi).
+              private var mbpsValue: Double {
+                  Double(streamMbps.replacingOccurrences(of: ",", with: ".")) ?? 0
+              }
+
+              private var linkVerdict: String {
+                  let mb = mbpsValue
+                  if mb <= 0 { return "unbekannt" }
+                  if mb < 6 { return "sehr schwach — Bild wird weich" }
+                  if mb < 12 { return "schwach — Filter aktiv" }
+                  if mb < 20 { return "gut" }
+                  return "sehr gut"
+              }
+
+              private var linkColor: Color {
+                  let mb = mbpsValue
+                  if mb <= 0 { return .secondary }
+                  if mb < 6 { return .red }
+                  if mb < 12 { return .orange }
+                  if mb < 20 { return .yellow }
+                  return .green
+              }
+
               private func applyAudioPreset(_ p: Int) {
                   switch p {
                   case 0: // Standard (voller Bass)
@@ -2394,7 +2421,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 69 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 70 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2404,6 +2431,21 @@ jobs:
                       }
 
                       // ---------------------------------------------------------------- 1
+                      // ---------------------------------------------------------------- 0
+                      VStack(alignment: .leading, spacing: 3) {
+                          HStack {
+                              Text("Leitung").font(.caption).foregroundColor(.secondary)
+                              Spacer()
+                              Text(linkVerdict).font(.caption).bold()
+                                  .foregroundColor(linkColor)
+                          }
+                          Text("\(streamMbps) Mbit/s · \(liveFPS) fps · Render \(liveRender) ms · " +
+                               (liveDiag.isEmpty ? "" : liveDiag))
+                              .font(.caption2)
+                              .foregroundColor(.secondary)
+                      }
+                      .padding(.vertical, 2)
+
                       Text("1 · Bildmodus").font(.headline)
                       Picker("Bildmodus", selection: $mode) {
                           Text("Kino / Filmmaker (D65)").tag(0)
@@ -2419,6 +2461,11 @@ jobs:
                       Text(modeTitle + ": " + modeInfo)
                           .font(.caption)
                           .foregroundColor(.secondary)
+                      if mbpsValue > 0 && mbpsValue < 10 {
+                          Text("Die Verbindung liefert gerade nur \(streamMbps) Mbit/s. Bei 1080p braucht ein sauberes Bild 20–30 Mbit. Das ist die Ursache für weiche Kanten und Blockbildung — kein Regler kann das ausgleichen. Nächster Router oder 5-GHz-Band prüfen, dann neu verbinden.")
+                              .font(.caption)
+                              .foregroundColor(.orange)
+                      }
                       Text("Der Bildmodus setzt alle Regler darunter auf gemessene Werte. Ändere zuerst ihn, nicht die Einzelregler.")
                           .font(.caption2)
                           .foregroundColor(.secondary)
