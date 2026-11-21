@@ -134,7 +134,15 @@ jobs:
               private var appliedPeak: Double = 0
               private var lutData: Data?
               private var lutKey: String = ""
+              private var casKernel: CIKernel?
+              private var casTried = false
+              private var dbKernel: CIKernel?
+              private var dbTried = false
+              private var diffKernel: CIColorKernel?
+              private var diffTried = false
               private let diagLabel = UILabel()
+              private var frameCount = 0
+              private var fpsWindowStart = CACurrentMediaTime()
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -194,6 +202,13 @@ jobs:
                   metalView = mv
                   bringSubviewToFront(diagLabel)
                   PXTuner.shared.start()
+                  // Kernelstatus sichtbar machen (per Tuner /state abrufbar), damit ein
+                  // Compile-Fehler nicht unbemerkt im Fallback haengt.
+                  let casOK = casKernelInstance() != nil
+                  let dbOK = deblockKernelInstance() != nil
+                  let lcOK = diffKernelInstance() != nil
+                  UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0)",
+                                            forKey: "pxSharpKernels")
                   os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
               }
 
@@ -456,6 +471,122 @@ jobs:
                   ])
               }
 
+              /// CAS = Contrast Adaptive Sharpening (nach AMD FidelityFX). Der Unterschied zu
+              /// CIUnsharpMask: die Verstärkung wird pro Pixel an den lokalen Kontrast angepasst
+              /// und das Ergebnis hart auf den lokalen Wertebereich begrenzt. Dadurch entstehen
+              /// keine hellen/dunklen Säume (Halos) an Kanten — das ist der Grund, warum
+              /// UnsharpMask künstlich aussieht.
+              private func casKernelInstance() -> CIKernel? {
+                  if casTried { return casKernel }
+                  casTried = true
+                  let src = """
+                  kernel vec4 pxCAS(sampler src, float r1, float r2, float s1, float s2, float clampK) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(src, samplerTransform(src, p));
+                      vec2 d1 = vec2(r1, r1);
+                      vec4 a1 = sample(src, samplerTransform(src, p + vec2(-d1.x, -d1.y)));
+                      vec4 b1 = sample(src, samplerTransform(src, p + vec2( 0.0, -d1.y)));
+                      vec4 c1 = sample(src, samplerTransform(src, p + vec2( d1.x, -d1.y)));
+                      vec4 d1s = sample(src, samplerTransform(src, p + vec2(-d1.x,  0.0)));
+                      vec4 e1 = sample(src, samplerTransform(src, p + vec2( d1.x,  0.0)));
+                      vec4 f1 = sample(src, samplerTransform(src, p + vec2(-d1.x,  d1.y)));
+                      vec4 g1 = sample(src, samplerTransform(src, p + vec2( 0.0,  d1.y)));
+                      vec4 h1 = sample(src, samplerTransform(src, p + vec2( d1.x,  d1.y)));
+                      vec2 d2 = vec2(r2, r2);
+                      vec4 a2 = sample(src, samplerTransform(src, p + vec2(-d2.x, -d2.y)));
+                      vec4 b2 = sample(src, samplerTransform(src, p + vec2( 0.0, -d2.y)));
+                      vec4 c2 = sample(src, samplerTransform(src, p + vec2( d2.x, -d2.y)));
+                      vec4 d2s = sample(src, samplerTransform(src, p + vec2(-d2.x,  0.0)));
+                      vec4 e2 = sample(src, samplerTransform(src, p + vec2( d2.x,  0.0)));
+                      vec4 f2 = sample(src, samplerTransform(src, p + vec2(-d2.x,  d2.y)));
+                      vec4 g2 = sample(src, samplerTransform(src, p + vec2( 0.0,  d2.y)));
+                      vec4 h2 = sample(src, samplerTransform(src, p + vec2( d2.x,  d2.y)));
+
+                      vec3 mn = min(min(min(b1.rgb, d1s.rgb), min(e1.rgb, g1.rgb)),
+                                    min(min(a1.rgb, c1.rgb), min(f1.rgb, h1.rgb)));
+                      vec3 mx = max(max(max(b1.rgb, d1s.rgb), max(e1.rgb, g1.rgb)),
+                                    max(max(a1.rgb, c1.rgb), max(f1.rgb, h1.rgb)));
+
+                      vec3 avg1 = (b1.rgb + d1s.rgb + e1.rgb + g1.rgb
+                                 + a1.rgb + c1.rgb + f1.rgb + h1.rgb) * 0.125;
+                      vec3 avg2 = (b2.rgb + d2s.rgb + e2.rgb + g2.rgb
+                                 + a2.rgb + c2.rgb + f2.rgb + h2.rgb) * 0.125;
+
+                      vec3 range = mx - mn;
+                      // Echte Kante (hoher Kontrast) -> kaum Verstärkung, Textur -> volle.
+                      vec3 adapt = 1.0 - clamp(range * 4.0, 0.0, 1.0);
+                      vec3 edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
+                      vec3 tex  = (c.rgb - avg2) * s2;
+                      vec3 outv = c.rgb + edge + tex;
+                      vec3 lim  = range * clampK + 0.003;
+                      outv = clamp(outv, mn - lim, mx + lim);
+                      return vec4(clamp(outv, 0.0, 1.0), c.a);
+                  }
+                  """
+                  casKernel = CIKernel(source: src)
+                  if casKernel == nil { os_log(.error, log: videoViewLog, "[px] CAS kernel compile failed") }
+                  return casKernel
+              }
+
+              /// Kantenerhaltendes Deblocking: mittelt nur Nachbarn, die innerhalb einer
+              /// Schwelle liegen. Blockkanten (kleine Sprünge) werden geglättet, echte Kanten
+              /// (große Sprünge) bleiben stehen. CIMedianFilter hat vorher 19 % Schärfe gekostet.
+              private func deblockKernelInstance() -> CIKernel? {
+                  if dbTried { return dbKernel }
+                  dbTried = true
+                  let src = """
+                  kernel vec4 pxDeblock(sampler src, float r, float thr, float amount) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(src, samplerTransform(src, p));
+                      float lc = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+                      vec4 s0 = sample(src, samplerTransform(src, p + vec2(-r, -r)));
+                      vec4 s1 = sample(src, samplerTransform(src, p + vec2( 0.0, -r)));
+                      vec4 s2 = sample(src, samplerTransform(src, p + vec2( r, -r)));
+                      vec4 s3 = sample(src, samplerTransform(src, p + vec2(-r,  0.0)));
+                      vec4 s4 = sample(src, samplerTransform(src, p + vec2( r,  0.0)));
+                      vec4 s5 = sample(src, samplerTransform(src, p + vec2(-r,  r)));
+                      vec4 s6 = sample(src, samplerTransform(src, p + vec2( 0.0, r)));
+                      vec4 s7 = sample(src, samplerTransform(src, p + vec2( r,  r)));
+                      float w0 = clamp(1.0 - abs(dot(s0.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      float w1 = clamp(1.0 - abs(dot(s1.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      float w2 = clamp(1.0 - abs(dot(s2.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      float w3 = clamp(1.0 - abs(dot(s3.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      float w4 = clamp(1.0 - abs(dot(s4.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      float w5 = clamp(1.0 - abs(dot(s5.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      float w6 = clamp(1.0 - abs(dot(s6.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      float w7 = clamp(1.0 - abs(dot(s7.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+                      vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3
+                               + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+                      float wsum = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+                      vec3 avg = wsum > 0.0001 ? sum / wsum : c.rgb;
+                      vec3 outp = mix(c.rgb, avg, clamp(amount, 0.0, 1.0));
+                      return vec4(outp, c.a);
+                  }
+                  """
+                  dbKernel = CIKernel(source: src)
+                  if dbKernel == nil { os_log(.error, log: videoViewLog, "[px] deblock kernel compile failed") }
+                  return dbKernel
+              }
+
+              /// Bild + k * (Bild - Weichzeichner). Wird fuer "Klarheit" benutzt: der
+              /// Weichzeichner laeuft auf 1/8 Aufloesung (billig), die Differenz wird in
+              /// einem einzigen 1:1-Durchgang addiert.
+              private func diffKernelInstance() -> CIColorKernel? {
+                  if diffTried { return diffKernel }
+                  diffTried = true
+                  let src = """
+                  kernel vec4 pxLocalContrast(__sample a, __sample blur, float k, float limit) {
+                      vec3 d = (a.rgb - blur.rgb) * k;
+                      vec3 lo = a.rgb - vec3(limit);
+                      vec3 hi = a.rgb + vec3(limit);
+                      vec3 o = clamp(a.rgb + d, lo, hi);
+                      return vec4(clamp(o, 0.0, 1.0), a.a);
+                  }
+                  """
+                  diffKernel = CIColorKernel(source: src)
+                  return diffKernel
+              }
+
               /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
               /// Panel-Auflösung, nie auf dem 1080p-Signal.
               private func applyDetailStage(_ input: CIImage) -> CIImage {
@@ -464,27 +595,59 @@ jobs:
                   let detail = Float(UserDefaults.standard.object(forKey: "pxSharpDetail") as? Double ?? 0.2)
                   let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.15)
 
-                  if level > 0.02 {
-                      // Kanten: radius 1.4 statt 1.0, Intensität bis 1.25. Das ist der Bereich,
-                      // in dem ein 1080p-Bild auf 2732 px tatsächlich knackig wird.
-                      image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 1.4,
-                          kCIInputIntensityKey: min(level, 1.0) * 1.25
-                      ])
+                  let engineNew = (UserDefaults.standard.object(forKey: "pxSharpEngine") as? Int ?? 1) != 0
+                  let s1 = min(max(level, 0), 1) * 1.30          // Kanten
+                  let s2 = min(max(detail, 0), 1) * 0.95         // Textur
+                  if s1 > 0.02 || s2 > 0.02 {
+                      if engineNew, let k = casKernelInstance() {
+                          let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -6, dy: -6) }
+                          if let out = k.apply(extent: image.extent, roiCallback: roi,
+                                               arguments: [image, CGFloat(1.35), CGFloat(2.7), s1, s2, CGFloat(0.30)]) {
+                              image = out
+                          } else {
+                              // Fallback: falls der Kernel zur Laufzeit nicht durchlaeuft
+                              image = image.applyingFilter("CIUnsharpMask", parameters: [
+                                  kCIInputRadiusKey: 1.4,
+                                  kCIInputIntensityKey: min(level, 1.0) * 1.25
+                              ])
+                          }
+                      } else {
+                          // Altpfad (pxSharpEngine=0): exakt die Kette aus Build 39.
+                          if level > 0.02 {
+                              image = image.applyingFilter("CIUnsharpMask", parameters: [
+                                  kCIInputRadiusKey: 1.4,
+                                  kCIInputIntensityKey: min(level, 1.0) * 1.25
+                              ])
+                          }
+                          if detail > 0.02 {
+                              image = image.applyingFilter("CIUnsharpMask", parameters: [
+                                  kCIInputRadiusKey: 2.2,
+                                  kCIInputIntensityKey: min(detail, 1.0) * 0.58
+                              ])
+                          }
+                      }
                   }
-                  // Textur (Gras, Stoff, Metall)
-                  if detail > 0.02 {
-                      image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 2.2,
-                          kCIInputIntensityKey: min(detail, 1.0) * 0.58
-                      ])
-                  }
-                  // Lokaler Detailkontrast ("3D-Pop")
+
+                  // Klarheit: lokaler Kontrast mit begrenzter Amplitude (kein Halo).
                   if clarity > 0.02 {
-                      image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 8.0,
-                          kCIInputIntensityKey: min(clarity, 1.0) * 0.50
-                      ])
+                      if engineNew, let lc = diffKernelInstance() {
+                          let ext = image.extent
+                          let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
+                          let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
+                              kCIInputRadiusKey: 2.2
+                          ]).cropped(to: small.extent)
+                          let up = blurred.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+                          if let out = lc.apply(extent: ext, arguments: [
+                              image, up, min(clarity, 1.0) * 0.85, 0.055
+                          ]) {
+                              image = out
+                          }
+                      } else {
+                          image = image.applyingFilter("CIUnsharpMask", parameters: [
+                              kCIInputRadiusKey: 8.0,
+                              kCIInputIntensityKey: min(clarity, 1.0) * 0.50
+                          ])
+                      }
                   }
                   return image
               }
@@ -593,26 +756,46 @@ jobs:
                       ])
                   }
 
-                  // MPEG-Blöcke: Median entfernt Blockkanten und Impulsrauschen, ohne
-                  // Kanten zu zerstören (Gauß würde das ganze Bild weichzeichnen).
+                  // MPEG-Blöcke: kantenerhaltend, nicht Median. Median hat bei 0,25 bereits
+                  // 19 % der Schärfe vernichtet (gemessen). Der Kernel mittelt nur Nachbarn
+                  // innerhalb einer Luma-Schwelle -> Blockkante weg, echte Kante bleibt.
                   // Bewusst VOR der Skalierung, damit bei 1080p geglättet wird.
                   let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.0)
-                  if deblock > 0.05 {
-                      let median = image.applyingFilter("CIMedianFilter")
-                      image = image.applyingFilter("CIDissolveTransition", parameters: [
-                          kCIInputTargetImageKey: median,
-                          "inputTime": min(deblock, 1.0) * 0.9
-                      ])
+                  let dbMode = (UserDefaults.standard.object(forKey: "pxSharpDeblockMode") as? Int ?? 1) != 0
+                  if deblock > 0.02 {
+                      if dbMode, let k = deblockKernelInstance(),
+                         let out = k.apply(extent: image.extent,
+                                           roiCallback: { _, rect in rect.insetBy(dx: -6, dy: -6) },
+                                           arguments: [image, CGFloat(1.7), CGFloat(0.042),
+                                                       min(max(deblock, 0), 1) * 0.90]) {
+                          image = out
+                      } else {
+                          let median = image.applyingFilter("CIMedianFilter")
+                          image = image.applyingFilter("CIDissolveTransition", parameters: [
+                              kCIInputTargetImageKey: median,
+                              "inputTime": min(deblock, 1.0) * 0.9
+                          ])
+                      }
                   }
 
-                  // Clear Image / AI-Super-Upscaling (Näherung): leichte Kantenvorverstärkung
-                  // bei Quellauflösung, damit der Upscaler echte Kanten statt weicher Pixel bekommt.
+                  // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
+                  // echte Kanten statt weicher Pixel bekommt — ebenfalls CAS, damit die
+                  // Vorverstärkung keine Halos in die Skalierung schickt.
                   let clearImage = Float(UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0)
                   if clearImage > 0.05 {
-                      image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 1.2,
-                          kCIInputIntensityKey: min(clearImage, 1.0) * 0.55
-                      ])
+                      if let k = casKernelInstance(),
+                         let out = k.apply(extent: image.extent,
+                                           roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
+                                           arguments: [image, CGFloat(0.85), CGFloat(1.7),
+                                                       min(clearImage, 1.0) * 0.95,
+                                                       min(clearImage, 1.0) * 0.55, CGFloat(0.25)]) {
+                          image = out
+                      } else {
+                          image = image.applyingFilter("CIUnsharpMask", parameters: [
+                              kCIInputRadiusKey: 1.2,
+                              kCIInputIntensityKey: min(clearImage, 1.0) * 0.55
+                          ])
+                      }
                   }
 
                   let sx = target.width / src.width
@@ -777,6 +960,10 @@ jobs:
                   let composited = image.composited(over: canvas)
 
                   let ctx = ciContext
+                  if let c = ctx {
+                      PXProbe.shared.set(composited, context: c, space: outSpace,
+                                         width: Int(target.width), height: Int(target.height))
+                  }
                   ctx?.render(composited,
                               to: drawable.texture,
                               commandBuffer: cb,
@@ -785,6 +972,154 @@ jobs:
 
                   cb.present(drawable)
                   cb.commit()
+
+                  // Renderrate messen: /state liefert pxSharpFPS. Nur so ist belegbar, ob ein
+                  // Bildblock (z. B. CAS) noch mit 60 Bildern/s laeuft oder Frames kostet.
+                  frameCount += 1
+                  let now = CACurrentMediaTime()
+                  if now - fpsWindowStart >= 1.0 {
+                      let fps = Double(frameCount) / (now - fpsWindowStart)
+                      UserDefaults.standard.set(String(format: "%.0f", fps), forKey: "pxSharpFPS")
+                      frameCount = 0
+                      fpsWindowStart = now
+                  }
+              }
+          }
+
+          // MARK: - PXProbe: Messung direkt in der App
+          /// Rendert das zuletzt angezeigte Bild und berechnet Bildkennzahlen auf dem
+          /// Gerät. Damit ist eine Messung in ~100 ms möglich, exakt auf demselben Bild,
+          /// ohne Screenshot-Umweg. Zusätzlich wird die Bewegung zwischen zwei Probes
+          /// gemeldet, damit man weiß, ob ein Vergleich überhaupt gültig ist.
+          final class PXProbe {
+              static let shared = PXProbe()
+              private let lock = NSLock()
+              private var image: CIImage?
+              private var ctx: CIContext?
+              private var space: CGColorSpace?
+              private var w = 0
+              private var h = 0
+              private var prevLuma: [Float]?
+
+              func set(_ img: CIImage, context: CIContext, space: CGColorSpace, width: Int, height: Int) {
+                  lock.lock()
+                  image = img
+                  ctx = context
+                  self.space = space
+                  w = width
+                  h = height
+                  lock.unlock()
+              }
+
+              func probe() -> String {
+                  lock.lock()
+                  guard let img = image, let ctx = ctx, let sp = space, w > 8, h > 8 else {
+                      lock.unlock()
+                      return "{\"ok\":false}"
+                  }
+                  let W = w, H = h
+                  lock.unlock()
+
+                  var buf = [UInt8](repeating: 0, count: W * H * 4)
+                  let rect = CGRect(x: 0, y: 0, width: W, height: H)
+                  buf.withUnsafeMutableBytes { raw in
+                      ctx.render(img, toBitmap: raw.baseAddress!, rowBytes: W * 4,
+                                 bounds: rect, format: .RGBA8, colorSpace: sp)
+                  }
+
+                  // Luma + Zeilensummen in einem Durchgang
+                  var luma = [Float](repeating: 0, count: W * H)
+                  var rowSum = [Double](repeating: 0, count: H)
+                  buf.withUnsafeBufferPointer { p in
+                      let b = p.baseAddress!
+                      for y in 0..<H {
+                          var rs: Double = 0
+                          let row = y * W * 4
+                          for x in 0..<W {
+                              let i = row + x * 4
+                              let l = 0.299 * Float(b[i]) + 0.587 * Float(b[i + 1]) + 0.114 * Float(b[i + 2])
+                              luma[y * W + x] = l
+                              rs += Double(l)
+                          }
+                          rowSum[y] = rs / Double(W)
+                      }
+                  }
+
+                  var r0 = 0, r1 = H - 1
+                  while r0 < H && rowSum[r0] <= 6 { r0 += 1 }
+                  while r1 > r0 && rowSum[r1] <= 6 { r1 -= 1 }
+                  if r1 - r0 < 16 { r0 = 0; r1 = H - 1 }
+
+                  var sR = 0.0, sG = 0.0, sB = 0.0, sL = 0.0, sL2 = 0.0
+                  var clip = 0, black = 0, n = 0
+                  var lapSum = 0.0, lapSq = 0.0, lapN = 0
+                  var flatSum = 0.0, flatN = 0
+
+                  buf.withUnsafeBufferPointer { p in
+                      let b = p.baseAddress!
+                      for y in r0...r1 {
+                          let row = y * W * 4
+                          for x in 0..<W {
+                              let i = row + x * 4
+                              let r = Double(b[i]), g = Double(b[i + 1]), bl = Double(b[i + 2])
+                              sR += r; sG += g; sB += bl
+                              let l = 0.299 * r + 0.587 * g + 0.114 * bl
+                              sL += l; sL2 += l * l
+                              let mx = max(r, max(g, bl))
+                              if mx >= 254 { clip += 1 }
+                              if mx <= 1 { black += 1 }
+                              n += 1
+                              if x > 0 && x < W - 1 && y > r0 && y < r1 {
+                                  let li = y * W + x
+                                  let lp = luma[li]
+                                  let lap = abs(4 * lp - luma[li - 1] - luma[li + 1] - luma[li - W] - luma[li + W])
+                                  lapSum += Double(lap); lapSq += Double(lap * lap); lapN += 1
+                                  let grad = abs(luma[li - 1] - luma[li + 1]) + abs(luma[li - W] - luma[li + W])
+                                  if grad < 12 {
+                                      flatSum += Double(lap); flatN += 1
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  if n == 0 { return "{\"ok\":false}" }
+                  let mean = sL / Double(n)
+                  let std = max(0, sL2 / Double(n) - mean * mean).squareRoot()
+                  let lapVar = lapN > 0 ? (lapSq / Double(lapN) - (lapSum / Double(lapN)) * (lapSum / Double(lapN))) : 0
+                  let flatNoise = flatN > 0 ? flatSum / Double(flatN) : 0
+
+                  // Bewegung gegenüber der letzten Messung: nur gültig, wenn Bild steht
+                  var motion = -1.0
+                  lock.lock()
+                  if let prev = prevLuma, prev.count == luma.count {
+                      var d: Double = 0
+                      var cn = 0
+                      var i = 0
+                      let step = 7
+                      while i < luma.count {
+                          d += Double(abs(luma[i] - prev[i])); cn += 1
+                          i += step
+                      }
+                      motion = cn > 0 ? d / Double(cn) : 0
+                  }
+                  prevLuma = luma
+                  lock.unlock()
+
+                  let o: [String: Any] = [
+                      "ok": true,
+                      "w": W, "h": H, "rows": r1 - r0 + 1,
+                      "r": sR / Double(n), "g": sG / Double(n), "b": sB / Double(n),
+                      "mean": mean, "std": std,
+                      "lap": lapVar, "acu": lapVar / max(std * std, 0.0001),
+                      "clip": Double(clip) / Double(n) * 100.0,
+                      "black": Double(black) / Double(n) * 100.0,
+                      "noise": flatNoise,
+                      "motion": motion
+                  ]
+                  if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
+                      return String(data: data, encoding: .utf8) ?? "{\"ok\":false}"
+                  }
+                  return "{\"ok\":false}"
               }
           }
 
@@ -834,6 +1169,9 @@ jobs:
                       else if let f = Double(v) { d.set(f, forKey: k) }
                       else { d.set(v, forKey: k) }
                       return "{\"ok\":true,\"key\":\"\(k)\"}"
+                  }
+                  if path.hasPrefix("/probe") {
+                      return PXProbe.shared.probe()
                   }
                   if path.hasPrefix("/state") {
                       var o: [String: Any] = [:]
@@ -1008,7 +1346,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 39").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 40").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
