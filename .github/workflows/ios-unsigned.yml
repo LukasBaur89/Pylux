@@ -690,10 +690,15 @@ jobs:
                                       // Linearer sRGB -> Display P3. Das ist exakt das, was
                                       // ein Fernseher mit "Farbumfang: Nativ" macht: er nutzt
                                       // seine echten Primaries statt auf BT.709 zu begrenzen.
+                                      // Display-P3 -> sRGB. Das ist die Richtung, die ein
+                                      // Fernseher mit "Farbumfang: Nativ" macht: dieselben
+                                      // Zahlen auf weiteren Primaries = kraeftigere Farbe.
+                                      // (Die umgekehrte Matrix wuerde ENTsaettigen.)
                                       let r0 = r, g0 = gg2, b0 = b
-                                      r  =  0.822462 * r0 + 0.177538 * g0
-                                      gg2 = 0.033194 * r0 + 0.966806 * g0
-                                      b  =  0.017083 * r0 + 0.072397 * g0 + 0.910520 * b0
+                                      r  =  1.224940 * r0 - 0.224940 * g0
+                                      gg2 = -0.042056 * r0 + 1.042056 * g0
+                                      b  = -0.019638 * r0 - 0.078636 * g0 + 1.098274 * b0
+                                      r = max(r, 0); gg2 = max(gg2, 0); b = max(b, 0)
                                   }
 
                                   let y = 0.2126 * r + 0.7152 * gg2 + 0.0722 * b
@@ -1042,10 +1047,12 @@ jobs:
                   // Manueller Regler + Automatik. Die Automatik greift umso staerker,
                   // je dunkler die Szene ist (Szenenmedian), und nie bei Tageslicht.
                   let shadowManual = Float(UserDefaults.standard.object(forKey: "pxSharpShadow") as? Double ?? 0.35)
-                  var shadowAmt = Double(shadowManual)
+                  // Black Stabilizer wirkt NUR in dunklen Szenen. In einer hellen Szene
+                  // wuerde er nur den Kontrast flachdruecken (gemessen: std -3 %).
+                  let darkFactor = min(max((0.34 - scene.mean) / 0.24, 0.0), 1.0)
+                  var shadowAmt = Double(shadowManual) * (0.22 + 0.78 * darkFactor)
                   if autoOn && autoStrength > 0.01 {
-                      let dark = min(max((0.32 - scene.mean) / 0.32, 0.0), 1.0)
-                      shadowAmt = min(1.0, shadowAmt + dark * Double(autoStrength) * 0.9)
+                      shadowAmt = min(1.0, shadowAmt + darkFactor * Double(autoStrength) * 0.85)
                   }
                   if shadowAmt > 0.02, let sk = shadowKernelInstance(),
                      let out = sk.apply(extent: image.extent,
@@ -1454,8 +1461,8 @@ jobs:
 
                   // Belichtungsziel: Median ~0.46, Spitzlicht ~0.86.
                   // min() sorgt dafuer, dass niemals Highlights fuer die Mitten geopfert werden.
-                  let gMid = 0.43 / max(p50, 0.06)
-                  let gHigh = 0.88 / max(p90, 0.12)
+                  let gMid = 0.40 / max(p50, 0.06)
+                  let gHigh = 0.78 / max(p90, 0.12)
                   // Bewusst enger Regelbereich: eine Nacht bleibt Nacht. Die Automatik
                   // korrigiert Belichtungsfehler, sie erfindet keine Helligkeit.
                   var g = min(gMid, gHigh, 1.12)
@@ -1861,10 +1868,10 @@ jobs:
               @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.35
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
-              @AppStorage("pxAudioEQ0") private var eq0: Double = 0.0
-              @AppStorage("pxAudioEQ1") private var eq1: Double = 0.0
+              @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
+              @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
               @AppStorage("pxAudioEQ2") private var eq2: Double = 0.0
-              @AppStorage("pxAudioEQ3") private var eq3: Double = 0.0
+              @AppStorage("pxAudioEQ3") private var eq3: Double = 0.5
               @AppStorage("pxAudioEQ4") private var eq4: Double = 0.0
               @AppStorage("pxAudioPreset") private var audioPreset: Int = 0
 
@@ -1884,66 +1891,66 @@ jobs:
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
                       level = 0.35; detail = 0.15; clarity = 0.08
-                      deblock = 0.30; denoise = 0.20; vibrance = 0.05
-                      saturation = 0.50; contrast = 0.50; temp = 0.50
+                      deblock = 0.30; denoise = 0.20; vibrance = 0.12
+                      saturation = 0.52; contrast = 0.48; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.00; localDim = 0.15; toneMap = 0; deband = 0.35
                       brightness = 0.48; shadow = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 1: // Sony BRAVIA 7 II (XR Clear Image, Contrast Booster)
-                      level = 0.90; detail = 0.55; clarity = 0.20
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.22
-                      saturation = 0.58; contrast = 0.55; temp = 0.475
+                      level = 0.90; detail = 0.62; clarity = 0.20
+                      deblock = 0.45; denoise = 0.30; vibrance = 0.40
+                      saturation = 0.60; contrast = 0.50; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
-                      clearImage = 0.65; toneMap = 1; localDim = 0.30; deband = 0.30
+                      clearImage = 0.70; toneMap = 1; localDim = 0.30; deband = 0.30
                       brightness = 0.45; shadow = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
                       gamut = 1
-                      level = 0.95; detail = 0.60; clarity = 0.24
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.30
-                      saturation = 0.62; contrast = 0.58; temp = 0.545
+                      level = 0.95; detail = 0.68; clarity = 0.24
+                      deblock = 0.45; denoise = 0.30; vibrance = 0.50
+                      saturation = 0.64; contrast = 0.54; temp = 0.545
                       gamma = 1.00; black = 0.0; hdrPeak = 900
                       clearImage = 0.72; toneMap = 2; localDim = 0.40; deband = 0.30
                       brightness = 0.50; shadow = 0.40
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
-                      level = 0.95; detail = 0.62; clarity = 0.22
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.25
-                      saturation = 0.60; contrast = 0.56; temp = 0.500
+                      level = 0.95; detail = 0.70; clarity = 0.22
+                      deblock = 0.45; denoise = 0.30; vibrance = 0.45
+                      saturation = 0.62; contrast = 0.50; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 0.70; toneMap = 2; localDim = 0.30; deband = 0.30
+                      clearImage = 0.75; toneMap = 2; localDim = 0.30; deband = 0.30
                       brightness = 0.45; shadow = 0.40
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
                       gamut = 1
-                      level = 1.00; detail = 0.65; clarity = 0.28
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.35
-                      saturation = 0.62; contrast = 0.58; temp = 0.555
+                      level = 1.00; detail = 0.72; clarity = 0.28
+                      deblock = 0.45; denoise = 0.30; vibrance = 0.55
+                      saturation = 0.64; contrast = 0.54; temp = 0.555
                       gamma = 1.00; black = 0.0; hdrPeak = 950
                       clearImage = 0.72; toneMap = 2; localDim = 0.45; deband = 0.30
                       brightness = 0.50; shadow = 0.45
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 6: // Game (scharf, Schatten lesbar, wenig Filter)
-                      level = 0.90; detail = 0.60; clarity = 0.18
-                      deblock = 0.35; denoise = 0.15; vibrance = 0.12
-                      saturation = 0.52; contrast = 0.52; temp = 0.50
+                      level = 0.92; detail = 0.66; clarity = 0.18
+                      deblock = 0.35; denoise = 0.15; vibrance = 0.30
+                      saturation = 0.58; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.50; toneMap = 0; localDim = 0.15; deband = 0.20
+                      clearImage = 0.58; toneMap = 0; localDim = 0.15; deband = 0.20
                       brightness = 0.47; shadow = 0.50
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
-                      level = 1.00; detail = 0.65; clarity = 0.25
-                      deblock = 0.50; denoise = 0.35; vibrance = 0.18
-                      saturation = 0.54; contrast = 0.52; temp = 0.50
+                      level = 1.00; detail = 0.72; clarity = 0.25
+                      deblock = 0.50; denoise = 0.35; vibrance = 0.35
+                      saturation = 0.56; contrast = 0.48; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.70; toneMap = 0; localDim = 0.25; deband = 0.30
+                      clearImage = 0.75; toneMap = 0; localDim = 0.25; deband = 0.30
                       brightness = 0.45; shadow = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -1988,16 +1995,16 @@ jobs:
               /// Klangprofile wie bei einem Fernseher (Sony-Klangmodi).
               private func applyAudioPreset(_ p: Int) {
                   switch p {
-                  case 0: // Standard
-                      eq0 = 0; eq1 = 0; eq2 = 0; eq3 = 0; eq4 = 0; audio3D = 0.0
+                  case 0: // Standard (voller Bass)
+                      eq0 = 3.0; eq1 = 1.5; eq2 = 0; eq3 = 0.5; eq4 = 0; audio3D = 0.0
                   case 1: // Sony Kino
-                      eq0 = 2; eq1 = 1; eq2 = 0; eq3 = 2; eq4 = 1; audio3D = 0.20
+                      eq0 = 3.5; eq1 = 1.5; eq2 = 0; eq3 = 2; eq4 = 1.5; audio3D = 0.20
                   case 2: // Sony Musik
-                      eq0 = 3; eq1 = 0; eq2 = -1; eq3 = 1; eq4 = 3; audio3D = 0.45
+                      eq0 = 4.0; eq1 = 0; eq2 = -1; eq3 = 1; eq4 = 3; audio3D = 0.45
                   case 3: // Sony Spiel
-                      eq0 = 4; eq1 = 2; eq2 = 0; eq3 = 3; eq4 = 1; audio3D = 0.30
+                      eq0 = 5.5; eq1 = 3.0; eq2 = 0; eq3 = 3; eq4 = 1; audio3D = 0.30
                   case 4: // Nacht
-                      eq0 = 5; eq1 = 2; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
+                      eq0 = 6.0; eq1 = 2.5; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
                   default: break
                   }
               }
@@ -2081,7 +2088,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 50 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 51 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2364,6 +2371,9 @@ jobs:
                   .onAppear {
                       if UserDefaults.standard.object(forKey: "pxSharpLocalDim") == nil {
                           applyMode(mode)
+                      }
+                      if UserDefaults.standard.object(forKey: "pxAudioEQ0") == nil {
+                          applyAudioPreset(audioPreset)
                       }
                       if !tunedV2 {
                           if abs(denoise - 0.30) < 0.001 { denoise = 0.0 }
