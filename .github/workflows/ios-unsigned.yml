@@ -560,7 +560,11 @@ jobs:
                           edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
                           tex  = (c.rgb - avg2) * s2 + (c.rgb - avg3) * s3;
                       }
-                      vec3 outv = c.rgb + edge + tex;
+                      // Banding-Schutz: Treppenstufen sind Kanten mit 1-4 Stufen Amplitude.
+                      // smoothstep blendet die Schaerfung dort aus, laesst Textur stehen.
+                      float bandC = dot(range, vec3(0.299, 0.587, 0.114));
+                      float bandGuard = smoothstep(0.0025, 0.020, bandC);
+                      vec3 outv = c.rgb + (edge + tex) * bandGuard;
                       vec3 lim  = range * clampK + 0.003;
                       outv = clamp(outv, mn - lim, mx + lim);
                       return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
@@ -861,7 +865,11 @@ jobs:
                           edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
                           tex  = (c.rgb - avg2) * s2;
                       }
-                      vec3 outv = c.rgb + edge + tex;
+                      // Banding-Schutz: Treppenstufen sind Kanten mit 1-4 Stufen Amplitude.
+                      // smoothstep blendet die Schaerfung dort aus, laesst Textur stehen.
+                      float bandC = dot(range, vec3(0.299, 0.587, 0.114));
+                      float bandGuard = smoothstep(0.0025, 0.020, bandC);
+                      vec3 outv = c.rgb + (edge + tex) * bandGuard;
                       vec3 lim  = range * clampK + 0.003;
                       outv = clamp(outv, mn - lim, mx + lim);
                       return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
@@ -1181,7 +1189,10 @@ jobs:
                   // Deblocking, aber mit groesserem Radius und sehr kleiner Luma-Schwelle.
                   // Sie fasst nur Pixel an, die sich fast nicht unterscheiden, und glaettet
                   // damit Treppenstufen in Himmeln/Verlaeufen, ohne Textur zu kosten.
-                  let dbn = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.0)
+                  let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.0)
+                  // In dunklen Szenen bis zu 2,4x staerker: dort sind die 8-Bit-Stufen
+                  // sichtbar und die Augen empfindlich.
+                  let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
                   if dbn > 0.02, let k = deblockKernelInstance(),
                      let out = k.apply(extent: image.extent,
                                        roiCallback: { _, rect in rect.insetBy(dx: -8, dy: -8) },
@@ -2192,7 +2203,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 57 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 58 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
