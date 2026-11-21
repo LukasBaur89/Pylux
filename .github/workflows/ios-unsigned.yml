@@ -671,7 +671,7 @@ jobs:
           ICON_EOF
 
           # --- Bundle-ID / Name / Entitlements --------------------------------------
-          sed -i '' 's/PRODUCT_BUNDLE_IDENTIFIER = com\.pylux\.stream;/PRODUCT_BUNDLE_IDENTIFIER = com.pxsharp.remote;/g' \
+          sed -i '' 's/PRODUCT_BUNDLE_IDENTIFIER = com\.pylux\.stream;/PRODUCT_BUNDLE_IDENTIFIER = com.pylux.stream.sharp;/g' \
             ios/Pylux.xcodeproj/project.pbxproj
           /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string PXSharp" ios/Pylux/Info.plist \
             || /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName PXSharp" ios/Pylux/Info.plist
