@@ -396,10 +396,10 @@ jobs:
                       // 10-Bit-Buffer sind PQ-kodiert — explizit taggen, sonst nimmt CoreImage sRGB an
                       // und die PQ-Ausgabe wirkt weiß/ausgewaschen.
                       image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: pq])
-                  } else if let hd = CGColorSpace(name: CGColorSpace.itur_709) {
-                      // SDR explizit als BT.709 taggen — garantiert die richtige Matrix und Range.
-                      image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: hd])
                   } else {
+                      // WICHTIG: SDR NICHT selbst taggen. VideoToolbox legt Matrix, Primaries und
+                      // Range (16-235 vs 0-255) als Attachments an den Buffer. Ein hartes BT.709-Tag
+                      // überschreibt die Range und drückt das Bild zusammen -> Schatten laufen zu.
                       image = CIImage(cvPixelBuffer: pixelBuffer)
                   }
                   let src = image.extent.size
