@@ -1089,6 +1089,7 @@ jobs:
                   // einer verrauschten wird nur der Rauschteppich weggeschnitten.
                   let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.55)
                   let coringVal = Float(min(0.040, coringBase * 0.004 + Double(min(autoNoise, 1.0)) * 0.024))
+                  let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.30)
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
                   if s1 > 0.02 || s2 > 0.02 {
@@ -1096,7 +1097,7 @@ jobs:
                           let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -6, dy: -6) }
                           if let out = k.apply(extent: image.extent, roiCallback: roi,
                                                arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7),
-                                                           NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.30),
+                                                           NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: haloLimitD),
                                                            NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true),
                                                            NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.30)),
                                                            NSNumber(value: coringVal)]) {
@@ -1199,6 +1200,10 @@ jobs:
                   // 1 = nur Luma schaerfen (keine Farbsaeume), 0 = pro Kanal (alt)
                   let lumaSharpen = (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true
                   let chromaSharpen = Float(UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.30)
+                  // Halo-Grenze: wie viel Ueberschwinger an Kanten erlaubt ist, in
+                  // Anteilen des lokalen Kontrasts. 0,30 = keine sichtbaren Halos,
+                  // 0,45 = mehr Textur, sichtbare Hoefe.
+                  let haloLimit = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.30)
                   let gamma = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
                   if !colorEngine && abs(gamma - 1.0) > 0.01 {
                       image = image.applyingFilter("CIGammaAdjust", parameters: ["inputPower": gamma])
@@ -1367,7 +1372,7 @@ jobs:
                                                        NSNumber(value: min(clearImage, 1.0) * 0.95),
                                                        NSNumber(value: min(clearImage, 1.0) * 0.55),
                                                        NSNumber(value: min(clearImage, 1.0) * 0.45),
-                                                       NSNumber(value: 0.25), NSNumber(value: lumaSharpen),
+                                                       NSNumber(value: haloLimit * 0.85), NSNumber(value: lumaSharpen),
                                                        NSNumber(value: chromaSharpen),
                                                        NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.5) * 0.020)]) {
                           image = out
@@ -2129,6 +2134,7 @@ jobs:
           cat > /tmp/SharpnessRow.swift <<'ROW_EOF'
           struct SharpnessRow: View {
               var onMaxQuality: () -> Void = {}
+              var onStableLink: () -> Void = {}
 
               @AppStorage("pxSharpLevel") private var level: Double = 0.6
               @AppStorage("pxSharpClarity") private var clarity: Double = 0.15
@@ -2446,7 +2452,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 75 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 76 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2523,6 +2529,9 @@ jobs:
                       sliderRow("Detail-Klarheit (Coring)", value: $coring, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", coring * 100),
                                 rule: "Je höher, desto konsequenter wird Rauschen von echter Textur getrennt: alles unter dem Rauschpegel wird verworfen, Struktur darüber verstärkt. Das ist der Unterschied zwischen verrauscht-scharf und kristallklar.")
+                      sliderRow("Halo-Grenze (Textur gegen Höfe)", value: $halo, range: 0.15...0.55, step: 0.01,
+                                display: String(format: "%.0f %%", halo * 100),
+                                rule: "Je höher, desto mehr Überschwinger an Kanten sind erlaubt — das gibt mehr Textur, aber sichtbare helle Höfe an harten Konturen. Gemessen: 30 % = 0 % Halos, 45 % = 5–8 % Halos.")
                       sliderRow("Clear Image (Vor-Schärfung 1080p)", value: $clearImage, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", clearImage * 100),
                                 rule: "Je höher, desto mehr echte Kanten bekommt der Upscaler zu sehen. Über 75 % werden feine Linien unruhig.")
@@ -2756,6 +2765,9 @@ jobs:
                           .font(.caption)
                           .foregroundColor(.secondary)
                       }
+                      Button("Stabile Leitung: 1080p · 60 fps · 18 Mbit · H.265 (bei WLAN empfohlen)") {
+                          onStableLink()
+                      }
                       Button("Maximale Quelle: 1080p · 60 fps · 50 Mbit · H.265 (greift beim nächsten Verbinden)") {
                           onMaxQuality()
                       }
@@ -2812,7 +2824,7 @@ jobs:
 
           anchor = '            .onChange(of: prefs.codec) { _ in prefs.save() }\n'
           if 'SharpnessRow' not in s and anchor in s:
-              call = '\n            SharpnessRow(onMaxQuality: { prefs.resolutionIndex = 3; prefs.fps = 60; prefs.bitrate = 50000; prefs.codec = 1; prefs.save() })\n'
+              call = '\n            SharpnessRow(onMaxQuality: { prefs.resolutionIndex = 3; prefs.fps = 60; prefs.bitrate = 50000; prefs.codec = 1; prefs.save() }, onStableLink: { prefs.resolutionIndex = 3; prefs.fps = 60; prefs.bitrate = 18000; prefs.codec = 1; prefs.save() })\n'
               s = s.replace(anchor, anchor + call, 1)
               s = s.rstrip('\n') + '\n\n' + open('/tmp/SharpnessRow.swift', encoding='utf-8').read()
               changed.append('sharpness-row')
