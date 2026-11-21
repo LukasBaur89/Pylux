@@ -246,6 +246,23 @@ jobs:
                   }
                   if !loggedFrame {
                       loggedFrame = true
+                      var parts: [String] = []
+                      let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                      let chars = [UInt8((fmt >> 24) & 255), UInt8((fmt >> 16) & 255), UInt8((fmt >> 8) & 255), UInt8(fmt & 255)]
+                      let fmtStr = String(bytes: chars.filter { $0 >= 32 && $0 < 127 }, encoding: .ascii) ?? "?"
+                      parts.append("fmt=\(fmtStr)")
+                      parts.append("\(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))")
+                      if let p = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) {
+                          parts.append("prim=\(String(describing: p))")
+                      }
+                      if let t = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) {
+                          parts.append("tf=\(String(describing: t))")
+                      }
+                      if let m = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) {
+                          parts.append("mtx=\(String(describing: m))")
+                      }
+                      parts.append("hdr=\(hdr ? 1 : 0)")
+                      UserDefaults.standard.set(parts.joined(separator: " · "), forKey: "pxSharpDiag")
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
                              CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), hdr ? 1 : 0)
                   }
@@ -404,6 +421,31 @@ jobs:
                   }
                   let src = image.extent.size
                   guard src.width > 0, src.height > 0 else { return }
+
+                  // Range: PS5 liefert Limited (16-235). Wenn die Kette das nicht macht, wird
+                  // das Bild zu dunkel und die Schatten laufen zu.
+                  let rangeMode = UserDefaults.standard.integer(forKey: "pxSharpRange") // 0 auto, 1 expand, 2 compress
+                  if rangeMode == 1 {
+                      let s: CGFloat = 255.0 / 219.0
+                      let b: CGFloat = -16.0 / 219.0
+                      image = image.applyingFilter("CIColorMatrix", parameters: [
+                          "inputRVector": CIVector(x: s, y: 0, z: 0, w: 0),
+                          "inputGVector": CIVector(x: 0, y: s, z: 0, w: 0),
+                          "inputBVector": CIVector(x: 0, y: 0, z: s, w: 0),
+                          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                          "inputBiasVector": CIVector(x: b, y: b, z: b, w: 0)
+                      ])
+                  } else if rangeMode == 2 {
+                      let s: CGFloat = 219.0 / 255.0
+                      let b: CGFloat = 16.0 / 255.0
+                      image = image.applyingFilter("CIColorMatrix", parameters: [
+                          "inputRVector": CIVector(x: s, y: 0, z: 0, w: 0),
+                          "inputGVector": CIVector(x: 0, y: s, z: 0, w: 0),
+                          "inputBVector": CIVector(x: 0, y: 0, z: s, w: 0),
+                          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                          "inputBiasVector": CIVector(x: b, y: b, z: b, w: 0)
+                      ])
+                  }
 
                   // Gamma: hebt oder senkt die Mitteltöne (dunkle Szenen durchzeichnen)
                   let gamma = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
@@ -611,6 +653,8 @@ jobs:
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
               @AppStorage("pxSharpGamma") private var gamma: Double = 1.0
               @AppStorage("pxSharpBlack") private var black: Double = 0.0
+              @AppStorage("pxSharpRange") private var rangeMode: Int = 0
+              @AppStorage("pxSharpDiag") private var diag: String = "—"
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
@@ -698,6 +742,14 @@ jobs:
                           Slider(value: $black, in: -0.10...0.10, step: 0.005)
                       }
                       Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
+                      Picker("Farbbereich (HDMI-Level)", selection: $rangeMode) {
+                          Text("Auto").tag(0)
+                          Text("Limited → Full").tag(1)
+                          Text("Full → Limited").tag(2)
+                      }
+                      Text(diag)
+                          .font(.caption2)
+                          .foregroundColor(.secondary)
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Toggle("MetalFX Upscaling (Apple)", isOn: $metalFX)
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
