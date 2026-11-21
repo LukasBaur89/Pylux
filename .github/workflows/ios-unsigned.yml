@@ -647,8 +647,13 @@ jobs:
                           rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
                           cb.makeRenderCommandEncoder(descriptor: rp)?.endEncoding()
 
+                          // WICHTIG: bounds müssen den tatsächlichen Bildbereich abdecken.
+                          // Das Bild wurde vorher auf die Drawable-Mitte verschoben (extent
+                          // beginnt z.B. bei x=406,y=255). Mit bounds=(0,0,1920,1080) wurde
+                          // nur eine Ecke gerendert; der Rest der Textur blieb undefinierter
+                          // Speicher — genau das war das lila Bild bei MetalFX.
                           ciContext?.render(image, to: inTex, commandBuffer: cb,
-                                            bounds: CGRect(origin: .zero, size: src),
+                                            bounds: image.extent,
                                             colorSpace: outSpace)
 
                           scaler.colorTexture = inTex
@@ -764,7 +769,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 32").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 33").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
