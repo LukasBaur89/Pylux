@@ -2229,7 +2229,7 @@ jobs:
               @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
               @AppStorage("pxSharpCoring") private var coring: Double = 0.60
               @AppStorage("pxSharpHalo") private var halo: Double = 0.30
-              @AppStorage("pxSharpDeconv") private var deconv: Double = 0.35
+              @AppStorage("pxSharpDeconv") private var deconv: Double = 0.65
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -2503,7 +2503,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 78 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 79 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
