@@ -784,13 +784,16 @@ jobs:
                   if shadowTried { return shadowKernel }
                   shadowTried = true
                   let src = """
-                  kernel vec4 pxShadow(__sample c, float amount, float knee) {
+                  kernel vec4 pxShadow(__sample c, float amount, float knee, float lift) {
                       float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
                       float w = 1.0 - smoothstep(0.0, knee, l);
-                      // quadratische Gewichtung: ganz nah an Schwarz fast nichts,
-                      // ab 10 % volle Wirkung -> kein Grauschleier
                       float ww = w * w;
+                      // Multiplikativ fuer die Schattenzeichnung ...
                       vec3 o = c.rgb * (1.0 + amount * ww);
+                      // ... plus ein kleiner additiver Anteil, damit auch reines Schwarz
+                      // in dunklen Szenen Information bekommt (ein Fernseher hebt dort
+                      // die Hintergrundbeleuchtung an, nicht die Verstaerkung).
+                      o += vec3(lift * ww);
                       return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
                   }
                   """
@@ -1129,7 +1132,8 @@ jobs:
                   if shadowAmt > 0.02, let sk = shadowKernelInstance(),
                      let out = sk.apply(extent: image.extent,
                                         roiCallback: { _, rect in rect },
-                                        arguments: [image, NSNumber(value: shadowAmt), NSNumber(value: 0.45)]) {
+                                        arguments: [image, NSNumber(value: shadowAmt), NSNumber(value: 0.45),
+                                                    NSNumber(value: shadowAmt * 0.035)]) {
                       image = out
                   }
 
@@ -1555,7 +1559,10 @@ jobs:
                   let gHigh = 0.78 / max(p90, 0.12)
                   // Bewusst enger Regelbereich: eine Nacht bleibt Nacht. Die Automatik
                   // korrigiert Belichtungsfehler, sie erfindet keine Helligkeit.
-                  var g = min(gMid, gHigh, 1.12)
+                  // Grenze nach oben szenenabhaengig: eine sehr dunkle Szene (Median < 0,18)
+                  // darf bis +30 % aufgehellt werden, eine normale nur bis +12 %.
+                  let capHigh = min(1.32, 1.12 + max(0.0, 0.18 - p50) * 1.6)
+                  var g = min(gMid, gHigh, capHigh)
                   g = max(g, 0.64)
 
                   // Rauschen: mittlerer Gradient in flachen Stellen. Sauber ~0.3-1.0,
@@ -1982,7 +1989,7 @@ jobs:
                   autoStrength = 0.65
                   shadow = 0.35
                   tvBrightness = true
-                  chroma = 0.30
+                  chroma = 0.50
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
                       level = 0.35; detail = 0.15; clarity = 0.08
@@ -2018,7 +2025,7 @@ jobs:
                       saturation = 0.62; contrast = 0.50; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
                       clearImage = 0.82; toneMap = 2; localDim = 0.30; deband = 0.18
-                      brightness = 0.45; shadow = 0.40; chroma = 0.35
+                      brightness = 0.45; shadow = 0.40; chroma = 0.50
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -2037,7 +2044,7 @@ jobs:
                       saturation = 0.58; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.75; toneMap = 0; localDim = 0.15; deband = 0.15
-                      brightness = 0.47; shadow = 0.50; chroma = 0.40
+                      brightness = 0.47; shadow = 0.50; chroma = 0.50
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
@@ -2046,7 +2053,7 @@ jobs:
                       saturation = 0.56; contrast = 0.48; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.85; toneMap = 0; localDim = 0.25; deband = 0.18
-                      brightness = 0.45; shadow = 0.35; chroma = 0.35
+                      brightness = 0.45; shadow = 0.35; chroma = 0.50
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   }
@@ -2138,7 +2145,7 @@ jobs:
                   autoStrength = 0.65
                   shadow = 0.35
                   tvBrightness = true
-                  chroma = 0.30
+                  chroma = 0.50
                   audio3D = 0.0
                   eq0 = 0; eq1 = 0; eq2 = 0; eq3 = 0; eq4 = 0
                   audioPreset = 0
@@ -2185,7 +2192,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 56 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 57 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
