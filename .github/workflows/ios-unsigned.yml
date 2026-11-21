@@ -667,6 +667,7 @@ jobs:
           import base64
           data = "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O/ffG0dNiOnsNwTCsH6FZnFp9aF/+cennzn+m79+y6zt/N5Lr7eilLans8suveTGX7jpyJH7xuPN0WhhmNuuqqrJZHtrc2PfgYuqui5ZA/QaYCXnqq73HTi0tbkxmWxXVeVYQACABtAAGkAD9NYAhzSABgABABoADYAGQAOAAAANgAZAA6ABQACABtAAGgANgAYAAQAaQANoAA2gAdAAIABAA2gADaABNAAaAAQAaAANoAE0gAbQABoABABoAA2gATSABtAAgAAADaABNIAG0AAaAASAU0ADaAANoAE0gAbQACAAQAOgATSABtAAGgAEAGgANIAG0AAaQAOAAAANgAZAA2gADQACADQAGgANoAE0AAgA0ABoADQAGgAEAGgADaAB0ABoABAAoAE0gAZAA6ABQACABtAAGkADaAA0AAgA0AAaQANoAA2ABgABABpAA2gADaABNIAGAAEAGkADaAANoAE0AAgAQANoAA2gATSABgABABpAA2gADaABNIAGAAEAGgANoAE0gAbQACAAQAOgATSABtAAGgAEAGgANAAaQANoABAAoAHQAGgADaABQACABkADoAHQACAAQANoAA2ABkADgAAADaABNAAaAA0AAgA0gAbQABpAA6ABQACABtAAGkADaAA0AAIA0AAaQANoAA2gATQAAgDQABpAA2gADaABQAAAGkADaAANoAE0AAgA0AAaQANoAA2gATQACADQAGgADaABNIAGAAEAGgANoAE0gAbQACAAQAOgAdAAGkADgAAADYAGQAN4nmgAEACgAdAAaAA0AAgA0AAaQAOgAdAAIABAA2gADYAGQAMgAAANoAE0gAbQAGgABACgATSABtAAGgANgAAANIAG0AAaQANoAA2AAAA0gAbQABpAA2gAEACABtAAGkADaAANAAIANIAG0AAaQANoAA0AAgA0ABpAA2gADaABQACABkADaAANoAE0AAgA0ABoADSABtAAIABAA6AB0ACeJxoABABoADQAGgANgAAANIAG0ABoADQAAgDQABpAA6AB0AAIAEADaAANoAE0ABoAAQBoAA2gATSABkADIAAADaABNIAG0AAaQAMgAAANoAE0gAbQABoABACgATSABtAAGkADgAAADaABNIAG0AAaQAOAAAANgAbQABpAA2gAEACgAdAAtp0G0AAaAAQAaAA0ABpAA2gABIAAAA2ABkADoAEQAIAGQAOgAdAACABAA2gADYAGQAMgAAANoAE0ABoADYAAADSABtAAGkADoAEQAIAG0AAaQANoADQAAgDQABpAA2gADaABNAACANAAGkADaAANoAFAAAAaQANoAA2gATQACADQABpAA2gADaABNAAIANAAaAANoAE0gAYAAQAaAA1g22kADaABEACABkADoAE0gAZAAAAaAA2ABkADIAAADYAGQAOgARAAgAbQAGcbYIiDSQNoAA2gARAAwHnZAJcuvvsaDTDPBvibe+NoIYQ90AC7szaEaNv13wDv/YWb7jty3/b2Vl2P9kADVFUpxfNkPg1wemM62UkaAAEAvEADbN//hfpVb15459Vlsw2VBui9AW64ttr32u2//XxcXA6DHHbfb4Bnjp36jV87PN1tk1bsvQEuv/SS99540+c+91ftbFZV9XAbYGd7a3Nj/6FXxpQ0wDwaoNp/4UWnT53YnU40AAIAeJ4GSCmkavLAlxev++Xmja8uYw0wjwZ497Xdd09P//Uf4tJqyHmYDbCwuPLgPz9w0cWvfff1b9+ZzjRA3w0w2b389Zdc/OpL7rv383WzEAf5vZEQQlXVk52tdjbbf/DQMIP2fG+AUtXNytr6qePHctf5O0UAAM+ZACVWTdmdbN9/7+J1v6gB5nLTLpNu+ZZfyc+cmB59YLANEEJoFha/dN+Ri1/z2nddpwHm8OL6znR23Tuuufg1r/vikXvrUTPUBihVVW+d3mhnu/sOHioaoPcGyDmPFhfX1vedOqEBEADACzRAMyrbm9v3H9EAc7ljhxDDLC//6uH8nYE3QKxHoy8euVcDhPm8XZR2prN3Xff2i1/z2mE3QKiqanz6ZDubaYB5NcDi4vLqBRoAAQC8cAOMFjTAPBsg740GiDHVo0YDaIAX81kgDTDXBugWlzQAAgDQABrg5XiiaAANoAE0AAIA0ABoAM8TDaABNAACANAAaAA0gAbQAAgAQAOgAdAAaAAEAKAB0ABoADQAAgDQABpAA6AB0AAIAEADaAANgAZAAyAAAA2gATSABtAAaAAEAKABNIAG0AAaAA2AAAA0gAbQABpAA2gAf6cIAEADaAANoAE0gAZAAAgAQANoAA2gATSABkAAABpAA2gADaABNIAGQAAAGgANoAE0gAbQAAgAQAOgAdAAGkADIAAADYAGQANoAA2AAAA0ABoADYAGQAAAGgANgAZAAyAAAA2gATQAGgANgAAANIAG0ABoADQAAgDQABpAA2gADYAGQAAAGkADaAANoAHQAAgAQANoAA2gATSABvB3KgAANIAG0AAaQANoAAQAoAE0gAbQABpAA2gABACgAdwzNIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAaAANoAEQAIAGQAOgATSABkAAABoADYAGQAMgAAANgAZAA6ABEACABtAAGgANgAZAAAAaQANoADQAGgABAGgADaABNIAGQAMIAAANoAE0gAbQAK4oGkAAAGgADaABNIAG0AAIAAANoAE0gAbQABoAAQBoAA2gATSABtAAGgABAGgANIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAaAANoAEQAIAGQAOgATSABkAAABoADYAGQAMgAAANgAZAA6ABEACABtAAGgANgAYQAAAaQANoADQAGkAAAGgADaABNIAGQAMIAAANoAE0gAbQABpAAwgAAA2gATSABtAAGgABAKABNIAG0AAaQAMgAAANoAE0gAbQABpAAyAAAA2ABtAAGkADaAAEAKAB0AAaQANoAA2AAAA0ABoADaABNAACANAAaAA0gAbQAAgAQAOgAdAAaAABAKAB0ABoADSAAADQABpAA6AB0AACAEADaAANoAE0ABpAAABoAA2gATSABkADCAAADaABNIAG0AAaQAMIAAANoAE0gAbQABoAAQCgATSABtAAGkADIAAADaABNIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAGkADaAANgAAANAAaAA2gATQAAgDQAGgANIAG0AACAEADoAHQAGgAAQCgAdyxNQAaAA0gAAA0gAbQAGgANIAAANAAGkADaAANgAYQAAAaQANoAA2gAdAAAgBAA2gADaABNIAG0AACAEADaAANoAE0gAZAAABoAA2gATSABtAACABAA2gADaABNIAG0AAIAEADoAE0gAbQABoAAQBoADSABtAAGkADCAAADYAGQANoAA0gAAA0ABoADaABNIAAABh6A1z/S82bX1W2ckjRwcylASZHH0gLy2GIs+lHG2A662L0PJlXA3whVlVK1UAH07MNsP/gRcOslJ+JBljfd/L4sa7rogYQAADP2wA74+37j4ze8vbmskvDrATbrs8GKDHM8vIth8vmdHr0n2IzGnID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AAAEAAAAIAAAAAABAAAACAAAAEAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAA0Lf/Ayehbpa0f6QCAAAAAElFTkSuQmCC"
           open("ios/Pylux/Assets.xcassets/AppIcon.appiconset/AppIcon.png", "wb").write(base64.b64decode(data))
+          open("ios/Pylux/Assets.xcassets/PyluxLogo.imageset/pylux-logo.png", "wb").write(base64.b64decode(data))
           print("icon bytes", len(base64.b64decode(data)))
           ICON_EOF
 
@@ -707,8 +708,35 @@ jobs:
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
 
+              private func preset(_ title: String, _ action: @escaping () -> Void) -> some View {
+                  Button(title, action: action)
+                      .font(.caption)
+                      .padding(.horizontal, 8)
+                      .padding(.vertical, 5)
+                      .background(Color(.tertiarySystemFill))
+                      .clipShape(Capsule())
+              }
+
               var body: some View {
                   VStack(alignment: .leading, spacing: 10) {
+                      HStack(spacing: 6) {
+                          preset("Kino") {
+                              level = 0.35; detail = 0.10; clarity = 0.10
+                              gamma = 1.0; temp = 0.45; saturation = 0.5; contrast = 0.5
+                          }
+                          preset("Standard") {
+                              level = 0.60; detail = 0.20; clarity = 0.15
+                              gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.5
+                          }
+                          preset("Ultra") {
+                              level = 0.85; detail = 0.55; clarity = 0.30
+                              gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.55
+                          }
+                          preset("Spiel") {
+                              level = 0.55; detail = 0.25; clarity = 0.05
+                              gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.5
+                          }
+                      }
                       Text("Bildschärfe").font(.headline)
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
@@ -830,6 +858,24 @@ jobs:
                           .font(.caption2)
                           .foregroundColor(.secondary)
                       Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
+                      DisclosureGroup("Was macht welcher Regler?") {
+                          VStack(alignment: .leading, spacing: 6) {
+                              Text("Schärfe — Kanten (1 px). Zu hoch: harte Höfe an Konturen.")
+                              Text("Detail — Textur (2,5 px). Gras, Stoff, Metall. Der Regler für „materialig“.")
+                              Text("Klarheit — lokaler Kontrast (8 px). Tiefe und Pop, zu hoch wirkt es künstlich.")
+                              Text("Rauschfilter — glättet MPEG-Blöcke. Ab 25 % aktiv, kostet Leistung.")
+                              Text("Sättigung — 50 % = neutral.")
+                              Text("Kontrast — 1,00 = neutral. Darüber mehr Punch, darunter flacher.")
+                              Text("Farbtemperatur — 6500 K = neutral, darunter wärmer, darüber kühler.")
+                              Text("Gamma — hebt Schatten, 1,00 = neutral.")
+                              Text("Schwarzwert — Offset der Schwärze, sparsam einsetzen.")
+                              Text("HDR-Peak — kleiner = heller. Sagt dem System, wie hell dein Inhalt ist.")
+                              Text("MetalFX — Apples Kantenrekonstruktion statt Lanczos.")
+                              Text("1:1 — kein Scaling, zeigt die echte Quelle (kleiner).")
+                          }
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      }
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Toggle("MetalFX Upscaling (Apple)", isOn: $metalFX)
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
@@ -866,6 +912,33 @@ jobs:
           s = open(p, encoding='utf-8').read()
           changed = []
 
+          old_support = '''    private var supportSection: some View {
+                  Section {
+                      Button {
+                          showDonationPaywall = true
+                      } label: {
+                          VStack(alignment: .leading, spacing: 2) {
+                              Text("Support Pylux")
+                                  .foregroundColor(.primary)
+                              Text("Donate to support development. Thank you for using Pylux.")
+                                  .font(.caption)
+                                  .foregroundColor(.secondary)
+                          }
+                      }
+                      .sheet(isPresented: $showDonationPaywall) {
+                          DonationPaywallView()
+                      }
+                  } header: {
+                      Text("Support")
+                  }
+              }'''
+          new_support = '''    private var supportSection: some View {
+                  EmptyView()
+              }'''
+          if old_support in s:
+              s = s.replace(old_support, new_support, 1)
+              changed.append('donation-section')
+
           anchor = '            .onChange(of: prefs.codec) { _ in prefs.save() }\n'
           if 'SharpnessRow' not in s and anchor in s:
               call = '\n            SharpnessRow(onMaxQuality: { prefs.resolutionIndex = 3; prefs.bitrate = 45000; prefs.save() })\n'
@@ -881,6 +954,18 @@ jobs:
           if changed:
               open(p, 'w', encoding='utf-8').write(s)
           print('settings changed:', changed)
+          PATCH_EOF
+
+          python3 - <<'PATCH_EOF'
+          p = 'ios/Pylux/Services/AppReviewHelper.swift'
+          s = open(p, encoding='utf-8').read()
+          if 'pxsharp-disabled' not in s:
+              s = s.replace('    func requestReviewIfEligible(in scene: UIWindowScene?) {\n',
+                            '    func requestReviewIfEligible(in scene: UIWindowScene?) {\n        // pxsharp-disabled\n        return\n', 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('review: disabled')
+          else:
+              print('review: already disabled')
           PATCH_EOF
 
           git --no-pager diff --stat | tail -8
