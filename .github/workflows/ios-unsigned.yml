@@ -560,7 +560,24 @@ jobs:
                       ])
                   }
 
-                  // Farbe: 50 % = neutral, 0 % = 70 %, 100 % = 130 %
+                  // Kontrast: 50 % = neutral
+                  let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
+                  if abs(contrastRaw - 0.5) > 0.01 {
+                      image = image.applyingFilter("CIColorControls", parameters: [
+                          kCIInputContrastKey: 0.8 + min(max(contrastRaw, 0), 1) * 0.4
+                      ])
+                  }
+
+                  // Farbtemperatur: 0 = warm (5500K), 50 = neutral (6500K), 100 = kühl (7500K)
+                  let tempRaw = Float(UserDefaults.standard.object(forKey: "pxSharpTemp") as? Double ?? 0.5)
+                  if abs(tempRaw - 0.5) > 0.01 {
+                      let target = 6500.0 + Double(tempRaw - 0.5) * 2000.0
+                      image = image.applyingFilter("CITemperatureAndTint", parameters: [
+                          "inputNeutral": CIVector(x: 6500, y: 0),
+                          "inputTargetNeutral": CIVector(x: target, y: 0)
+                      ])
+                  }
+
                   let satRaw = Float(UserDefaults.standard.object(forKey: "pxSharpSaturation") as? Double ?? 0.5)
                   let sat = 0.7 + min(max(satRaw, 0), 1) * 0.6
                   if abs(sat - 1.0) > 0.01 {
@@ -654,7 +671,7 @@ jobs:
           ICON_EOF
 
           # --- Bundle-ID / Name / Entitlements --------------------------------------
-          sed -i '' 's/PRODUCT_BUNDLE_IDENTIFIER = com\.pylux\.stream;/PRODUCT_BUNDLE_IDENTIFIER = com.pylux.stream.sharp;/g' \
+          sed -i '' 's/PRODUCT_BUNDLE_IDENTIFIER = com\.pylux\.stream;/PRODUCT_BUNDLE_IDENTIFIER = com.pxsharp.remote;/g' \
             ios/Pylux.xcodeproj/project.pbxproj
           /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string PXSharp" ios/Pylux/Info.plist \
             || /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName PXSharp" ios/Pylux/Info.plist
@@ -678,6 +695,8 @@ jobs:
               @AppStorage("pxSharpDenoise") private var denoise: Double = 0.0
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
+              @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
+              @AppStorage("pxSharpTemp") private var temp: Double = 0.5
               @AppStorage("pxSharpGamma") private var gamma: Double = 1.0
               @AppStorage("pxSharpBlack") private var black: Double = 0.0
               @AppStorage("pxSharpRange") private var rangeMode: Int = 0
@@ -690,6 +709,7 @@ jobs:
 
               var body: some View {
                   VStack(alignment: .leading, spacing: 10) {
+                      Text("Bildschärfe").font(.headline)
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
                               Text("Bildschärfe")
@@ -749,6 +769,26 @@ jobs:
                                   .monospacedDigit()
                           }
                           Slider(value: $saturation, in: 0...1, step: 0.05)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Kontrast")
+                              Spacer()
+                              Text(String(format: "%.2f", 0.8 + contrast * 0.4))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $contrast, in: 0...1, step: 0.05)
+                      }
+                      VStack(alignment: .leading, spacing: 4) {
+                          HStack {
+                              Text("Farbtemperatur")
+                              Spacer()
+                              Text(String(format: "%.0f K", 6500 + (temp - 0.5) * 2000))
+                                  .foregroundColor(.secondary)
+                                  .monospacedDigit()
+                          }
+                          Slider(value: $temp, in: 0...1, step: 0.05)
                       }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
