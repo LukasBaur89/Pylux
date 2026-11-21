@@ -2203,7 +2203,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 59 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 60 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2676,6 +2676,27 @@ jobs:
           }
           // ---- ENDE PXSHARP_AUDIO_DSP ------------------------------------------------
           PX_AUDIO_EOF
+
+          python3 - <<'METRICS_PATCH_EOF'
+          # Stream-Messwerte (Bitrate, Paketverlust) bereitstellen.
+          p = 'ios/Pylux/Views/StreamView.swift'
+          s = open(p, encoding='utf-8').read()
+          anchor = '    private func updateStats() {\n'
+          add = (
+              '        // pxsharp: Messwerte der Leitung bereitstellen (auch ohne Overlay)\n'
+              '        if isConnected, let pxm = session.metrics() {\n'
+              '            UserDefaults.standard.set(String(format: "%.1f", pxm.bitrateMbps), forKey: "pxSharpStreamMbps")\n'
+              '            UserDefaults.standard.set(String(format: "%.2f", pxm.packetLoss * 100.0), forKey: "pxSharpStreamLoss")\n'
+              '            UserDefaults.standard.set("\\(pxm.width)x\\(pxm.height)", forKey: "pxSharpStreamRes")\n'
+              '        }\n'
+          )
+          if anchor in s and 'pxSharpStreamMbps' not in s:
+              s = s.replace(anchor, anchor + add, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('stream-metrics: eingebaut')
+          else:
+              print('stream-metrics: uebersprungen')
+          METRICS_PATCH_EOF
 
           python3 - <<'AUDIO_PATCH_EOF'
           p = 'ios/Pylux/Bridge/ChiakiAudioOutputIOS.m'
