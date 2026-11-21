@@ -2115,8 +2115,8 @@ jobs:
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 1: // Sony BRAVIA 7 II (XR Clear Image, Contrast Booster)
                       level = 0.95; detail = 0.85; clarity = 0.26
-                      deblock = 0.35; denoise = 0.20; vibrance = 0.48
-                      saturation = 0.62; contrast = 0.50; temp = 0.475
+                      deblock = 0.35; denoise = 0.20; vibrance = 0.30
+                      saturation = 0.58; contrast = 0.50; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
                       clearImage = 0.85; toneMap = 1; localDim = 0.30; deband = 0.30
                       brightness = 0.45; shadow = 0.35; chroma = 0.55
@@ -2133,10 +2133,10 @@ jobs:
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
-                      gamut = 1
+                      gamut = 0
                       level = 1.00; detail = 0.88; clarity = 0.28
-                      deblock = 0.30; denoise = 0.12; vibrance = 0.55
-                      saturation = 0.64; contrast = 0.50; temp = 0.500
+                      deblock = 0.30; denoise = 0.12; vibrance = 0.35
+                      saturation = 0.60; contrast = 0.50; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
                       clearImage = 0.88; toneMap = 2; localDim = 0.30; deband = 0.18
                       brightness = 0.45; shadow = 0.40; chroma = 0.60
@@ -2153,19 +2153,29 @@ jobs:
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 6: // Game (scharf, Schatten lesbar, wenig Filter)
-                      gamut = 1
+                      gamut = 0
                       level = 1.00; detail = 0.88; clarity = 0.26
-                      deblock = 0.25; denoise = 0.08; vibrance = 0.50
-                      saturation = 0.62; contrast = 0.50; temp = 0.50
+                      deblock = 0.25; denoise = 0.08; vibrance = 0.30
+                      saturation = 0.58; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.82; toneMap = 0; localDim = 0.15; deband = 0.15
                       brightness = 0.47; shadow = 0.50; chroma = 0.62
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 7: // Realistisch / kalibriert (BT.709, D65, +4 % Sättigung)
+                      gamut = 0
+                      level = 0.80; detail = 0.70; clarity = 0.22
+                      deblock = 0.35; denoise = 0.18; vibrance = 0.15
+                      saturation = 0.52; contrast = 0.48; temp = 0.500
+                      gamma = 1.00; black = 0.0; hdrPeak = 700
+                      clearImage = 0.75; toneMap = 1; localDim = 0.10; deband = 0.25
+                      brightness = 0.45; shadow = 0.25; chroma = 0.45
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
                       level = 1.00; detail = 0.90; clarity = 0.30
-                      deblock = 0.30; denoise = 0.12; vibrance = 0.45
-                      saturation = 0.60; contrast = 0.48; temp = 0.50
+                      deblock = 0.30; denoise = 0.12; vibrance = 0.25
+                      saturation = 0.56; contrast = 0.48; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.90; toneMap = 0; localDim = 0.25; deband = 0.18
                       brightness = 0.45; shadow = 0.35; chroma = 0.60
@@ -2184,6 +2194,7 @@ jobs:
                   case 3: return "LG QNED93"
                   case 4: return "LG Vivid"
                   case 6: return "Game"
+                  case 7: return "Realistisch"
                   default: return "Ultra"
                   }
               }
@@ -2204,6 +2215,8 @@ jobs:
                       return "LG Vivid: maximale Schärfe, nativer Farbraum, stärkstes Dimming. Nimm ihn für Sport und helle Räume."
                   case 6:
                       return "Minimal: kaum Schärfung, kein Tone-Mapping, kleinste Latenz. Nimm ihn für Shooter und Online-Spiele."
+                  case 7:
+                      return "Kalibriert: BT.709 (kein Nativ-Farbraum), D65, nur +4 % Sättigung, weiches Dimming. So sieht ein abgeglichener Fernseher im Cinema-Modus aus — wenn dir alles andere zu bunt ist, nimm den."
                   default:
                       return "Maximale Detail-Schärfung (Textur 2,7 px) bei neutraler Farbe. Nimm ihn, wenn du die PS5-Oberfläche oder Text scharf sehen willst."
                   }
@@ -2222,6 +2235,12 @@ jobs:
                       eq0 = 5.5; eq1 = 3.0; eq2 = 0; eq3 = 3; eq4 = 1; audio3D = 0.30
                   case 4: // Nacht
                       eq0 = 6.0; eq1 = 2.5; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
+                  case 5: // Sony Bass Boost
+                      eq0 = 9.0; eq1 = 5.0; eq2 = 0; eq3 = 2.0; eq4 = 1.0; audio3D = 0.20
+                  case 6: // Dolby Atmos (weite Bühne)
+                      eq0 = 3.0; eq1 = 1.0; eq2 = 0; eq3 = 4.0; eq4 = 2.0; audio3D = 0.70
+                  case 7: // Bose (warm, bassbetont)
+                      eq0 = 6.5; eq1 = 5.5; eq2 = -1.0; eq3 = 1.0; eq4 = 2.5; audio3D = 0.35
                   default: break
                   }
               }
@@ -2307,7 +2326,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 64 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 65 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2326,6 +2345,7 @@ jobs:
                           Text("LG Vivid").tag(4)
                           Text("Ultra (max. Detail)").tag(5)
                           Text("Game (minimal)").tag(6)
+                          Text("Realistisch (kalibriert)").tag(7)
                       }
                       .onChange(of: mode) { m in applyMode(m) }
                       Text(modeTitle + ": " + modeInfo)
@@ -2531,9 +2551,12 @@ jobs:
                           Text("Sony Musik").tag(2)
                           Text("Sony Spiel").tag(3)
                           Text("Nacht").tag(4)
-                          Text("Eigene").tag(5)
+                          Text("Sony Bass Boost").tag(5)
+                          Text("Dolby Atmos (weit)").tag(6)
+                          Text("Bose (warm)").tag(7)
+                          Text("Eigene").tag(8)
                       }
-                      .onChange(of: audioPreset) { p in if p < 5 { applyAudioPreset(p) } }
+                      .onChange(of: audioPreset) { p in if p < 8 { applyAudioPreset(p) } }
                       Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. „Sony Spiel“ hebt Tiefbass und Präsenz an, damit Schritte und Schüsse ortbar sind.")
                           .font(.caption)
                           .foregroundColor(.secondary)
