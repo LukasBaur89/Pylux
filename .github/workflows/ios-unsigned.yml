@@ -806,6 +806,99 @@ jobs:
                   return shadowKernel
               }
 
+              private var cleanKernel: CIKernel?
+              private var cleanTried = false
+
+              /// Rauschfilter + Deblocking + Deband in EINEM Durchgang.
+              /// Drei getrennte Paesse kosteten drei Vollbild-Zwischenbilder (je 8,3 MB
+              /// bei 1080p). Ein Durchgang mit drei Ringen spart zwei davon.
+              private func cleanKernelInstance() -> CIKernel? {
+                  if cleanTried { return cleanKernel }
+                  cleanTried = true
+                  let src = """
+                  kernel vec4 pxClean(sampler src,
+                                      float r1, float t1, float a1,
+                                      float r2, float t2, float a2,
+                                      float r3, float t3, float a3) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(src, samplerTransform(src, p));
+                      vec3 L = vec3(0.299, 0.587, 0.114);
+                      float lc = dot(c.rgb, L);
+                      vec3 o = c.rgb;
+                      if (a1 > 0.001) {
+                          vec4 s0 = sample(src, samplerTransform(src, p + vec2(r1*-1.0, r1*-1.0)));
+                          vec4 s1 = sample(src, samplerTransform(src, p + vec2(r1*0.0, r1*-1.0)));
+                          vec4 s2 = sample(src, samplerTransform(src, p + vec2(r1*1.0, r1*-1.0)));
+                          vec4 s3 = sample(src, samplerTransform(src, p + vec2(r1*-1.0, r1*0.0)));
+                          vec4 s4 = sample(src, samplerTransform(src, p + vec2(r1*1.0, r1*0.0)));
+                          vec4 s5 = sample(src, samplerTransform(src, p + vec2(r1*-1.0, r1*1.0)));
+                          vec4 s6 = sample(src, samplerTransform(src, p + vec2(r1*0.0, r1*1.0)));
+                          vec4 s7 = sample(src, samplerTransform(src, p + vec2(r1*1.0, r1*1.0)));
+                          float w0 = clamp(1.0 - abs(dot(s0.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float w1 = clamp(1.0 - abs(dot(s1.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float w2 = clamp(1.0 - abs(dot(s2.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float w3 = clamp(1.0 - abs(dot(s3.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float w4 = clamp(1.0 - abs(dot(s4.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float w5 = clamp(1.0 - abs(dot(s5.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float w6 = clamp(1.0 - abs(dot(s6.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float w7 = clamp(1.0 - abs(dot(s7.rgb, L) - lc) / t1, 0.0, 1.0);
+                          float ws = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+                          vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3 + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+                          vec3 avg = ws > 0.0001 ? sum / ws : c.rgb;
+                          o = mix(o, avg, clamp(a1, 0.0, 1.0));
+                      }
+                      if (a2 > 0.001) {
+                          vec4 s0 = sample(src, samplerTransform(src, p + vec2(r2*-1.0, r2*-1.0)));
+                          vec4 s1 = sample(src, samplerTransform(src, p + vec2(r2*0.0, r2*-1.0)));
+                          vec4 s2 = sample(src, samplerTransform(src, p + vec2(r2*1.0, r2*-1.0)));
+                          vec4 s3 = sample(src, samplerTransform(src, p + vec2(r2*-1.0, r2*0.0)));
+                          vec4 s4 = sample(src, samplerTransform(src, p + vec2(r2*1.0, r2*0.0)));
+                          vec4 s5 = sample(src, samplerTransform(src, p + vec2(r2*-1.0, r2*1.0)));
+                          vec4 s6 = sample(src, samplerTransform(src, p + vec2(r2*0.0, r2*1.0)));
+                          vec4 s7 = sample(src, samplerTransform(src, p + vec2(r2*1.0, r2*1.0)));
+                          float w0 = clamp(1.0 - abs(dot(s0.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float w1 = clamp(1.0 - abs(dot(s1.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float w2 = clamp(1.0 - abs(dot(s2.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float w3 = clamp(1.0 - abs(dot(s3.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float w4 = clamp(1.0 - abs(dot(s4.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float w5 = clamp(1.0 - abs(dot(s5.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float w6 = clamp(1.0 - abs(dot(s6.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float w7 = clamp(1.0 - abs(dot(s7.rgb, L) - lc) / t2, 0.0, 1.0);
+                          float ws = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+                          vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3 + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+                          vec3 avg = ws > 0.0001 ? sum / ws : c.rgb;
+                          o = mix(o, avg, clamp(a2, 0.0, 1.0));
+                      }
+                      if (a3 > 0.001) {
+                          vec4 s0 = sample(src, samplerTransform(src, p + vec2(r3*-1.0, r3*-1.0)));
+                          vec4 s1 = sample(src, samplerTransform(src, p + vec2(r3*0.0, r3*-1.0)));
+                          vec4 s2 = sample(src, samplerTransform(src, p + vec2(r3*1.0, r3*-1.0)));
+                          vec4 s3 = sample(src, samplerTransform(src, p + vec2(r3*-1.0, r3*0.0)));
+                          vec4 s4 = sample(src, samplerTransform(src, p + vec2(r3*1.0, r3*0.0)));
+                          vec4 s5 = sample(src, samplerTransform(src, p + vec2(r3*-1.0, r3*1.0)));
+                          vec4 s6 = sample(src, samplerTransform(src, p + vec2(r3*0.0, r3*1.0)));
+                          vec4 s7 = sample(src, samplerTransform(src, p + vec2(r3*1.0, r3*1.0)));
+                          float w0 = clamp(1.0 - abs(dot(s0.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float w1 = clamp(1.0 - abs(dot(s1.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float w2 = clamp(1.0 - abs(dot(s2.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float w3 = clamp(1.0 - abs(dot(s3.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float w4 = clamp(1.0 - abs(dot(s4.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float w5 = clamp(1.0 - abs(dot(s5.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float w6 = clamp(1.0 - abs(dot(s6.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float w7 = clamp(1.0 - abs(dot(s7.rgb, L) - lc) / t3, 0.0, 1.0);
+                          float ws = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+                          vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3 + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+                          vec3 avg = ws > 0.0001 ? sum / ws : c.rgb;
+                          o = mix(o, avg, clamp(a3, 0.0, 1.0));
+                      }
+                      return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  cleanKernel = CIKernel(source: src)
+                  if cleanKernel == nil { os_log(.error, log: videoViewLog, "[px] clean kernel compile failed") }
+                  return cleanKernel
+              }
+
               private var cas2Kernel: CIKernel?
               private var cas2Tried = false
 
@@ -1147,58 +1240,45 @@ jobs:
 
                   var denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0)
                   if autoOn {
-                      // Bis zu +80 % Filter in verrauschten Szenen
-                      // In dunklen Szenen mehr Filter: die Schattenstufe verstaerkt dort Rauschen.
                       let darkBoost = 1.0 + Float(scene.darkFrac) * 0.45
                       denoise = min(1.0, denoise * (1.0 + Float(scene.noise) * autoStrength * 1.2) * darkBoost)
                   }
-                  if denoise > 0.02 {
-                      // Kantenerhaltend: glaettet nur, was innerhalb der Luma-Schwelle liegt.
-                      if let k = deblockKernelInstance(),
-                         let out = k.apply(extent: image.extent,
-                                           roiCallback: { _, rect in rect.insetBy(dx: -6, dy: -6) },
-                                           arguments: [image, NSNumber(value: 2.4), NSNumber(value: 0.075),
-                                                       NSNumber(value: min(denoise, 1.0) * 0.85)]) {
-                          image = out
-                      }
-                  }
-
-                  // MPEG-Blöcke: kantenerhaltend, nicht Median. Median hat bei 0,25 bereits
-                  // 19 % der Schärfe vernichtet (gemessen). Der Kernel mittelt nur Nachbarn
-                  // innerhalb einer Luma-Schwelle -> Blockkante weg, echte Kante bleibt.
-                  // Bewusst VOR der Skalierung, damit bei 1080p geglättet wird.
                   let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.0)
-                  let dbMode = (UserDefaults.standard.object(forKey: "pxSharpDeblockMode") as? Int ?? 1) != 0
-                  if deblock > 0.02 {
-                      if dbMode, let k = deblockKernelInstance(),
+                  let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.0)
+                  let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
+
+                  let aD = denoise > 0.02 ? min(denoise, 1.0) * 0.85 : 0.0
+                  let aB = deblock > 0.02 ? min(max(deblock, 0), 1) * 0.90 : 0.0
+                  let aG = (dbn > 0.02 && scene.perfLevel == 0) ? min(dbn, 1.0) * 0.65 : 0.0
+
+                  if (aD + aB + aG) > 0.02, let k = cleanKernelInstance(),
+                     let out = k.apply(extent: image.extent,
+                                       roiCallback: { _, rect in rect.insetBy(dx: -9, dy: -9) },
+                                       arguments: [image,
+                                                   NSNumber(value: 2.4), NSNumber(value: 0.075), NSNumber(value: aD),
+                                                   NSNumber(value: 1.7), NSNumber(value: 0.042), NSNumber(value: aB),
+                                                   NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
+                      image = out
+                  } else {
+                      // Rueckfall, falls der Kernel nicht kompiliert: die drei Einzelstufen.
+                      if aD > 0.02, let k = deblockKernelInstance(),
                          let out = k.apply(extent: image.extent,
                                            roiCallback: { _, rect in rect.insetBy(dx: -6, dy: -6) },
-                                           arguments: [image, NSNumber(value: 1.7), NSNumber(value: 0.042),
-                                                       NSNumber(value: min(max(deblock, 0), 1) * 0.90)]) {
+                                           arguments: [image, NSNumber(value: 2.4), NSNumber(value: 0.075), NSNumber(value: aD)]) {
                           image = out
-                      } else {
-                          let median = image.applyingFilter("CIMedianFilter")
-                          image = image.applyingFilter("CIDissolveTransition", parameters: [
-                              kCIInputTargetImageKey: median,
-                              "inputTime": min(deblock, 1.0) * 0.9
-                          ])
                       }
-                  }
-
-                  // Sanfte Verlaeufe (Deband): dieselbe kantenfoermige Glaettung wie beim
-                  // Deblocking, aber mit groesserem Radius und sehr kleiner Luma-Schwelle.
-                  // Sie fasst nur Pixel an, die sich fast nicht unterscheiden, und glaettet
-                  // damit Treppenstufen in Himmeln/Verlaeufen, ohne Textur zu kosten.
-                  let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.0)
-                  // In dunklen Szenen bis zu 2,4x staerker: dort sind die 8-Bit-Stufen
-                  // sichtbar und die Augen empfindlich.
-                  let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
-                  if dbn > 0.02, scene.perfLevel == 0, let k = deblockKernelInstance(),
-                     let out = k.apply(extent: image.extent,
-                                       roiCallback: { _, rect in rect.insetBy(dx: -8, dy: -8) },
-                                       arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012),
-                                                   NSNumber(value: min(dbn, 1.0) * 0.65)]) {
-                      image = out
+                      if aB > 0.02, let k = deblockKernelInstance(),
+                         let out = k.apply(extent: image.extent,
+                                           roiCallback: { _, rect in rect.insetBy(dx: -6, dy: -6) },
+                                           arguments: [image, NSNumber(value: 1.7), NSNumber(value: 0.042), NSNumber(value: aB)]) {
+                          image = out
+                      }
+                      if aG > 0.02, let k = deblockKernelInstance(),
+                         let out = k.apply(extent: image.extent,
+                                           roiCallback: { _, rect in rect.insetBy(dx: -8, dy: -8) },
+                                           arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
+                          image = out
+                      }
                   }
 
                   // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
@@ -1228,7 +1308,7 @@ jobs:
                   // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
                   // ein Drittel der Pixel.
                   let clarityAmt = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0)
-                  if clarityAmt > 0.02, scene.perfLevel == 0, let lc = diffKernelInstance() {
+                  if clarityAmt > 0.02, let lc = diffKernelInstance() {
                       let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
                       let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
                           kCIInputRadiusKey: 2.2
@@ -1499,7 +1579,7 @@ jobs:
                   // Lastregel: wenn die GPU ueber das Budget kommt, werden zuerst die
                   // beiden unsichtbarsten Stufen abgeschaltet (Deband, Klarheit).
                   // 10 s Sperre, damit es nicht hin- und herschaltet.
-                  if perfLevelStore == 0 && renderMsEma > 19.0 {
+                  if perfLevelStore == 0 && renderMsEma > 20.5 {
                       perfLevelStore = 1
                       perfCooldown = CACurrentMediaTime() + 10.0
                   } else if perfLevelStore == 1 && CACurrentMediaTime() > perfCooldown && renderMsEma < 16.2 {
@@ -2221,7 +2301,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 61 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 62 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
