@@ -47,6 +47,7 @@ jobs:
           import Metal
           import MetalFX
           import MetalKit
+          import Network
           import os.log
 
           private let videoViewLog = OSLog(subsystem: "com.pylux.stream", category: "StreamVideoView")
@@ -191,6 +192,8 @@ jobs:
                   }
                   addSubview(mv)
                   metalView = mv
+                  bringSubviewToFront(diagLabel)
+                  PXTuner.shared.start()
                   os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
               }
 
@@ -775,6 +778,66 @@ jobs:
                   cb.commit()
               }
           }
+
+          // MARK: - PXTuner: Debug-Bruecke fuer automatisierte Bildtests
+          /// Kleiner HTTP-Server auf Port 8766. Erlaubt das Lesen und Setzen aller
+          /// pxSharp-*-Werte, waehrend der Stream laeuft. Der Renderer liest
+          /// UserDefaults in jedem Frame, Aenderungen wirken daher sofort.
+          final class PXTuner {
+              static let shared = PXTuner()
+              private var listener: NWListener?
+              private let queue = DispatchQueue(label: "px.tuner")
+
+              func start() {
+                  guard listener == nil else { return }
+                  let params = NWParameters.tcp
+                  params.allowLocalEndpointReuse = true
+                  guard let port = NWEndpoint.Port(rawValue: 8766),
+                        let l = try? NWListener(using: params, on: port) else { return }
+                  l.newConnectionHandler = { conn in
+                      conn.start(queue: self.queue)
+                      conn.receive(minimumIncompleteLength: 1, maximumLength: 16384) { data, _, _, _ in
+                          let req = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                          let body = PXTuner.handle(req)
+                          let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
+                          conn.send(content: (head + body).data(using: .utf8),
+                                    completion: .contentProcessed { _ in conn.cancel() })
+                      }
+                  }
+                  l.start(queue: queue)
+                  listener = l
+                  os_log(.default, log: videoViewLog, "[PXTuner] listening on 8766")
+              }
+
+              private static func handle(_ req: String) -> String {
+                  let line = req.split(separator: "\r\n").first.map(String.init) ?? ""
+                  let parts = line.split(separator: " ")
+                  guard parts.count >= 2 else { return "{\"error\":\"bad request\"}" }
+                  let path = String(parts[1])
+                  let comps = URLComponents(string: "http://x" + path)
+                  let items = comps?.queryItems ?? []
+                  func val(_ n: String) -> String? { items.first(where: { $0.name == n })?.value }
+                  let d = UserDefaults.standard
+
+                  if path.hasPrefix("/set"), let k = val("key"), k.hasPrefix("pxSharp"), let v = val("value") {
+                      if v == "true" || v == "false" { d.set(v == "true", forKey: k) }
+                      else if let i = Int(v) { d.set(i, forKey: k) }
+                      else if let f = Double(v) { d.set(f, forKey: k) }
+                      else { d.set(v, forKey: k) }
+                      return "{\"ok\":true,\"key\":\"\(k)\"}"
+                  }
+                  if path.hasPrefix("/state") {
+                      var o: [String: Any] = [:]
+                      for (k, v) in d.dictionaryRepresentation() where k.hasPrefix("pxSharp") { o[k] = "\(v)" }
+                      o["_bundle"] = Bundle.main.bundleIdentifier ?? "?"
+                      o["_version"] = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+                      if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
+                          return String(data: data, encoding: .utf8) ?? "{}"
+                      }
+                  }
+                  return "{\"ok\":false}"
+              }
+          }
           SWIFT_SOURCE_EOF
 
           # --- Icon -----------------------------------------------------------------
@@ -936,7 +999,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 36").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 37 (Tuner)").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
