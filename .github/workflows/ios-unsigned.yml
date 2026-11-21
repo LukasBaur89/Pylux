@@ -499,6 +499,16 @@ jobs:
                       ])
                   }
 
+                  // DETAIL-VORSTUFE: bei Quellauflösung (1080p) schärfen, BEVOR skaliert wird.
+                  // Der Upscaler bekommt dadurch echte Kanten statt weicher Pixel — das ist der
+                  // Unterschied zwischen "hochgerechnet" und "detailreich". Luma-only, daher kein Saum.
+                  let detailPre = Float(UserDefaults.standard.object(forKey: "pxSharpDetail") as? Double ?? 0.2)
+                  if detailPre > 0.05 {
+                      image = image.applyingFilter("CISharpenLuminance", parameters: [
+                          "inputSharpness": min(detailPre, 1.0) * 0.9
+                      ])
+                  }
+
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
@@ -536,9 +546,12 @@ jobs:
                   image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
 
                   if level > 0.02 {
-                      image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 1.0,
-                          kCIInputIntensityKey: min(level, 1.0)
+                      // LUMA-ONLY. CAS/UnsharpMask schärfen alle drei Kanäle und erzeugen dadurch
+                      // rote/grüne Säume an Kanten — das ist der Grund, warum hohe Werte "künstlich"
+                      // aussehen. CISharpenLuminance fasst nur die Helligkeit an: dieselbe Schärfe,
+                      // aber ohne Farbsaum. Deshalb kann der Regler deutlich höher stehen.
+                      image = image.applyingFilter("CISharpenLuminance", parameters: [
+                          "inputSharpness": min(level, 1.0) * 1.6
                       ])
                   }
 
@@ -547,7 +560,7 @@ jobs:
                   if detail > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
                           kCIInputRadiusKey: 2.5,
-                          kCIInputIntensityKey: min(detail, 1.0) * 0.5
+                          kCIInputIntensityKey: min(detail, 1.0) * 0.40
                       ])
                   }
 
@@ -556,7 +569,7 @@ jobs:
                   if clarity > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
                           kCIInputRadiusKey: 8.0,
-                          kCIInputIntensityKey: min(clarity, 1.0) * 0.45
+                          kCIInputIntensityKey: min(clarity, 1.0) * 0.40
                       ])
                   }
 
@@ -575,6 +588,21 @@ jobs:
                       image = image.applyingFilter("CITemperatureAndTint", parameters: [
                           "inputNeutral": CIVector(x: 6500, y: 0),
                           "inputTargetNeutral": CIVector(x: target, y: 0)
+                      ])
+                  }
+
+                  // Weißabgleich RGB (Feinschliff): 1.00 = neutral. Damit lässt sich der letzte
+                  // Farbstich rausnehmen, den ein einzelner Kelvin-Regler nicht trifft.
+                  let wbR = Float(UserDefaults.standard.object(forKey: "pxSharpWB_R") as? Double ?? 1.0)
+                  let wbG = Float(UserDefaults.standard.object(forKey: "pxSharpWB_G") as? Double ?? 1.0)
+                  let wbB = Float(UserDefaults.standard.object(forKey: "pxSharpWB_B") as? Double ?? 1.0)
+                  if abs(wbR - 1.0) > 0.002 || abs(wbG - 1.0) > 0.002 || abs(wbB - 1.0) > 0.002 {
+                      image = image.applyingFilter("CIColorMatrix", parameters: [
+                          "inputRVector": CIVector(x: CGFloat(wbR), y: 0, z: 0, w: 0),
+                          "inputGVector": CIVector(x: 0, y: CGFloat(wbG), z: 0, w: 0),
+                          "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(wbB), w: 0),
+                          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                          "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
                       ])
                   }
 
@@ -707,6 +735,10 @@ jobs:
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
+              @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
+              @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
+              @AppStorage("pxSharpWB_B") private var wbB: Double = 1.0
+              @AppStorage("pxSharpTunedV1") private var tunedV1: Bool = false
 
               private func preset(_ title: String, _ action: @escaping () -> Void) -> some View {
                   Button(title, action: action)
@@ -721,20 +753,24 @@ jobs:
                   VStack(alignment: .leading, spacing: 10) {
                       HStack(spacing: 6) {
                           preset("Kino") {
-                              level = 0.35; detail = 0.10; clarity = 0.10
+                              level = 0.40; detail = 0.15; clarity = 0.08
                               gamma = 1.0; temp = 0.45; saturation = 0.5; contrast = 0.5
+                              denoise = 0.30; metalFX = true; pacing = true
                           }
                           preset("Standard") {
-                              level = 0.60; detail = 0.20; clarity = 0.15
+                              level = 0.65; detail = 0.30; clarity = 0.15
                               gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.5
+                              denoise = 0.25; metalFX = true; pacing = true
                           }
                           preset("Ultra") {
-                              level = 0.85; detail = 0.55; clarity = 0.30
+                              level = 0.90; detail = 0.55; clarity = 0.30
                               gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.55
+                              denoise = 0.20; metalFX = true; pacing = true
                           }
-                          preset("Spiel") {
+                          preset("Motion") {
                               level = 0.55; detail = 0.25; clarity = 0.05
                               gamma = 1.0; temp = 0.5; saturation = 0.5; contrast = 0.5
+                              denoise = 0.35; metalFX = true; pacing = true
                           }
                       }
                       Text("Bildschärfe").font(.headline)
@@ -818,6 +854,37 @@ jobs:
                           }
                           Slider(value: $temp, in: 0...1, step: 0.05)
                       }
+                      DisclosureGroup("Weißabgleich RGB (Feinschliff)") {
+                          VStack(alignment: .leading, spacing: 8) {
+                              HStack {
+                                  Text("Rot")
+                                  Slider(value: $wbR, in: 0.85...1.15, step: 0.005)
+                                  Text(String(format: "%.3f", wbR))
+                                      .font(.caption2)
+                                      .foregroundColor(.secondary)
+                                      .monospacedDigit()
+                              }
+                              HStack {
+                                  Text("Grün")
+                                  Slider(value: $wbG, in: 0.85...1.15, step: 0.005)
+                                  Text(String(format: "%.3f", wbG))
+                                      .font(.caption2)
+                                      .foregroundColor(.secondary)
+                                      .monospacedDigit()
+                              }
+                              HStack {
+                                  Text("Blau")
+                                  Slider(value: $wbB, in: 0.85...1.15, step: 0.005)
+                                  Text(String(format: "%.3f", wbB))
+                                      .font(.caption2)
+                                      .foregroundColor(.secondary)
+                                      .monospacedDigit()
+                              }
+                              Text("1,000 = neutral. Gegen Gelbstich: Blau etwas hoch. Gegen Blaustich: Rot etwas hoch. Immer nur einen Kanal, in 0,01-Schritten.")
+                                  .font(.caption)
+                                  .foregroundColor(.secondary)
+                          }
+                      }
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
                               Text("Gamma")
@@ -878,30 +945,33 @@ jobs:
                       }
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Toggle("MetalFX Upscaling (Apple)", isOn: $metalFX)
-                      Button("Maximale Qualität: 1080p · 45 Mbit") {
+                      Button("Maximale Quelle: 1080p · 60 fps · 50 Mbit · H.265") {
                           onMaxQuality()
                       }
-                      HStack {
-                          Button("Ultra-Preset") {
-                              level = 0.8
-                              detail = 0.5
-                              clarity = 0.3
+                      DisclosureGroup("Was technisch möglich ist") {
+                          VStack(alignment: .leading, spacing: 6) {
+                              Text("Auflösung: 1080p ist das Maximum, das die PS5 über Remote Play herausgibt. 4K/120 gibt es nur am HDMI-Ausgang.")
+                              Text("Framerate: 60 ist das Protokoll-Maximum. Höher wäre nur lokal interpoliert und bringt keine Information.")
+                              Text("Bitrate: der echte Qualitätshebel. 50 statt 12 Mbit = weniger Blockbildung = mehr Detail, ganz ohne Schärfung.")
+                              Text("Codec: H.265 packt dieselbe Bitrate effizienter als H.264. Immer H.265 wählen.")
+                              Text("Schärfe ist jetzt luma-only (nur Helligkeit). Dadurch keine Farbsäume mehr — höhere Werte bleiben sauber.")
+                              Text("Detail wirkt zweistufig: einmal bei 1080p vor dem Skalieren, einmal am Panel. Das ist der Unterschied zwischen „hochgerechnet“ und „detailreich“.")
+                              Text("MetalFX: Apples kantenbewusste Rekonstruktion statt Lanczos — die einzige echte Auflösungserhöhung ohne Informationsverlust.")
                           }
-                          Spacer()
-                          Button("Zurücksetzen") {
-                              level = 0.6
-                              detail = 0.2
-                              clarity = 0.15
-                              denoise = 0.0
-                              vibrance = 0.0
-                              saturation = 0.5
-                              gamma = 1.0
-                              black = 0.0
-                          }
-                      }
-                      Text("Schärfe nutzt CAS (kantengeführt, keine Höfe). Rauschfilter greift ab 25 %. Farbe: 50 % = neutral.")
                           .font(.caption)
                           .foregroundColor(.secondary)
+                      }
+                  }
+                  .onAppear {
+                      guard !tunedV1 else { return }
+                      // Einmalige Grundoptimierung: sauberes Quellsignal VOR der Schärfung.
+                      // Ohne Deblocking verstärkt jede Schärfung MPEG-Rauschen — genau das
+                      // wirkt dann unnatürlich, egal wie fein der Regler arbeitet.
+                      if denoise < 0.25 { denoise = 0.30 }
+                      if vibrance < 0.10 { vibrance = 0.10 }
+                      metalFX = true
+                      pacing = true
+                      tunedV1 = true
                   }
               }
           }
@@ -941,15 +1011,10 @@ jobs:
 
           anchor = '            .onChange(of: prefs.codec) { _ in prefs.save() }\n'
           if 'SharpnessRow' not in s and anchor in s:
-              call = '\n            SharpnessRow(onMaxQuality: { prefs.resolutionIndex = 3; prefs.bitrate = 45000; prefs.save() })\n'
+              call = '\n            SharpnessRow(onMaxQuality: { prefs.resolutionIndex = 3; prefs.fps = 60; prefs.bitrate = 50000; prefs.codec = 1; prefs.save() })\n'
               s = s.replace(anchor, anchor + call, 1)
               s = s.rstrip('\n') + '\n\n' + open('/tmp/SharpnessRow.swift', encoding='utf-8').read()
               changed.append('sharpness-row')
-
-          codec_anchor = '                Text("H.265 (PS5 only)").tag(1)\n'
-          if 'H.265 HDR' not in s and codec_anchor in s:
-              s = s.replace(codec_anchor, codec_anchor + '                Text("H.265 HDR (PS5 + HDR-TV)").tag(2)\n', 1)
-              changed.append('hdr-codec')
 
           if changed:
               open(p, 'w', encoding='utf-8').write(s)
