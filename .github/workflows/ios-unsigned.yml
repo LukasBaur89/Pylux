@@ -1925,8 +1925,8 @@ jobs:
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 1: // Sony BRAVIA 7 II (XR Clear Image, Contrast Booster)
-                      level = 0.90; detail = 0.62; clarity = 0.20
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.40
+                      level = 0.90; detail = 0.70; clarity = 0.22
+                      deblock = 0.35; denoise = 0.20; vibrance = 0.40
                       saturation = 0.60; contrast = 0.50; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
                       clearImage = 0.70; toneMap = 1; localDim = 0.30; deband = 0.30
@@ -1935,8 +1935,8 @@ jobs:
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
                       gamut = 1
-                      level = 0.95; detail = 0.68; clarity = 0.24
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.50
+                      level = 0.95; detail = 0.78; clarity = 0.26
+                      deblock = 0.30; denoise = 0.12; vibrance = 0.50
                       saturation = 0.64; contrast = 0.54; temp = 0.545
                       gamma = 1.00; black = 0.0; hdrPeak = 900
                       clearImage = 0.72; toneMap = 2; localDim = 0.40; deband = 0.30
@@ -1944,18 +1944,18 @@ jobs:
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
-                      level = 0.95; detail = 0.70; clarity = 0.22
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.45
+                      level = 1.00; detail = 0.80; clarity = 0.24
+                      deblock = 0.30; denoise = 0.12; vibrance = 0.45
                       saturation = 0.62; contrast = 0.50; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 0.75; toneMap = 2; localDim = 0.30; deband = 0.30
+                      clearImage = 0.82; toneMap = 2; localDim = 0.30; deband = 0.18
                       brightness = 0.45; shadow = 0.40
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
                       gamut = 1
-                      level = 1.00; detail = 0.72; clarity = 0.28
-                      deblock = 0.45; denoise = 0.30; vibrance = 0.55
+                      level = 1.00; detail = 0.85; clarity = 0.28
+                      deblock = 0.28; denoise = 0.10; vibrance = 0.55
                       saturation = 0.64; contrast = 0.54; temp = 0.555
                       gamma = 1.00; black = 0.0; hdrPeak = 950
                       clearImage = 0.72; toneMap = 2; localDim = 0.45; deband = 0.30
@@ -1963,20 +1963,20 @@ jobs:
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 6: // Game (scharf, Schatten lesbar, wenig Filter)
-                      level = 0.92; detail = 0.66; clarity = 0.18
-                      deblock = 0.35; denoise = 0.15; vibrance = 0.30
+                      level = 1.00; detail = 0.82; clarity = 0.22
+                      deblock = 0.25; denoise = 0.08; vibrance = 0.30
                       saturation = 0.58; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.58; toneMap = 0; localDim = 0.15; deband = 0.20
+                      clearImage = 0.75; toneMap = 0; localDim = 0.15; deband = 0.15
                       brightness = 0.47; shadow = 0.50
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
-                      level = 1.00; detail = 0.72; clarity = 0.25
-                      deblock = 0.50; denoise = 0.35; vibrance = 0.35
+                      level = 1.00; detail = 0.85; clarity = 0.25
+                      deblock = 0.30; denoise = 0.12; vibrance = 0.35
                       saturation = 0.56; contrast = 0.48; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.75; toneMap = 0; localDim = 0.25; deband = 0.30
+                      clearImage = 0.85; toneMap = 0; localDim = 0.25; deband = 0.18
                       brightness = 0.45; shadow = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -2115,7 +2115,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 52 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 53 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
