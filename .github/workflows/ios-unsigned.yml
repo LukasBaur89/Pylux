@@ -372,6 +372,7 @@ jobs:
               /// HDR nur, wenn der Buffer wirklich PQ/BT.2020 meldet.
               /// 10 Bit allein reicht NICHT — sonst wird SDR-Inhalt als PQ gerendert und wirkt dunkel.
               private func pixelBufferIsHDR(_ pb: CVPixelBuffer) -> Bool {
+                  if UserDefaults.standard.bool(forKey: "pxSharpHdrOff") { return false }
                   if let prim = CVBufferCopyAttachment(pb, kCVImageBufferColorPrimariesKey, nil) {
                       if String(describing: prim).contains("2020") { return true }
                   }
@@ -568,11 +569,8 @@ jobs:
                   let dy = (target.height - placed.height) / 2 - placed.origin.y
                   image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
 
-                  if !useMFX {
-                      // Schärfe am Panel. Im MetalFX-Pfad läuft dieselbe Stufe NACH dem
-                      // Upscaling — sonst würde die Schärfe mit hochskaliert und weich.
-                      image = applyDetailStage(image)
-                  }
+                  // Immer schärfen — genau wie im bewährten Build 28. MetalFX skaliert danach.
+                  image = applyDetailStage(image)
 
                   // Kontrast: 50 % = neutral
                   let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
@@ -741,18 +739,39 @@ jobs:
               @AppStorage("pxSharpWB_B") private var wbB: Double = 1.0
               @AppStorage("pxSharpTunedV1") private var tunedV1: Bool = false
               @AppStorage("pxSharpTunedV2") private var tunedV2: Bool = false
+              @AppStorage("pxSharpHdrOff") private var hdrOff: Bool = false
 
               private func preset(_ title: String, _ action: @escaping () -> Void) -> some View {
                   Button(title, action: action)
                       .font(.caption)
+                      .buttonStyle(.borderless)
                       .padding(.horizontal, 8)
                       .padding(.vertical, 5)
                       .background(Color(.tertiarySystemFill))
                       .clipShape(Capsule())
               }
 
+              private func resetAll() {
+                  level = 0.0; detail = 0.0; clarity = 0.0; denoise = 0.0
+                  vibrance = 0.0; saturation = 0.5; contrast = 0.5; temp = 0.5
+                  gamma = 1.0; black = 0.0; rangeMode = 0; hdrPeak = 600
+                  wbR = 1.0; wbG = 1.0; wbB = 1.0
+                  metalFX = false; pixelPerfect = false
+              }
+
               var body: some View {
-                  VStack(alignment: .leading, spacing: 10) {
+                  Group {
+                      HStack {
+                          VStack(alignment: .leading, spacing: 1) {
+                              Text("PXSharp Bild").font(.headline)
+                              Text("Build 32").font(.caption2).foregroundColor(.secondary)
+                          }
+                          Spacer()
+                          Button("Notfall-Reset") { resetAll() }
+                              .font(.caption)
+                              .buttonStyle(.borderless)
+                              .foregroundColor(.red)
+                      }
                       HStack(spacing: 6) {
                           preset("Kino") {
                               level = 0.40; detail = 0.15; clarity = 0.08
@@ -927,6 +946,7 @@ jobs:
                           .font(.caption2)
                           .foregroundColor(.secondary)
                       Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
+                      Toggle("HDR deaktivieren (Test bei Farbfehlern)", isOn: $hdrOff)
                       DisclosureGroup("Was macht welcher Regler?") {
                           VStack(alignment: .leading, spacing: 6) {
                               Text("Schärfe — Kanten (1 px). Zu hoch: harte Höfe an Konturen.")
@@ -947,7 +967,7 @@ jobs:
                       }
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Toggle("MetalFX Upscaling (Apple)", isOn: $metalFX)
-                      Button("Maximale Quelle: 1080p · 60 fps · 50 Mbit · H.265") {
+                      Button("Maximale Quelle: 1080p · 60 fps · 50 Mbit · H.265 (greift beim nächsten Verbinden)") {
                           onMaxQuality()
                       }
                       DisclosureGroup("Was technisch möglich ist") {
