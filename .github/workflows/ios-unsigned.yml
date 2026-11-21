@@ -812,6 +812,56 @@ jobs:
                   return shadowKernel
               }
 
+              private var dirKernel: CIKernel?
+              private var dirTried = false
+
+              /// Kantengerichtete Schaerfung (1:1, nach der Skalierung).
+              /// Umweg um das Koordinatenproblem eines echten EASU-Skalierers: die
+              /// Geometrie kommt von Lanczos, die Kantenrichtung wird danach genutzt.
+              /// Abgetastet wird ENTLANG der Kante — dort, wo sich nichts aendert.
+              /// Das verstaerkt den Verlauf einer schraegen Kante, ohne quer dazu
+              /// Ueberschwinger zu erzeugen.
+              private func dirKernelInstance() -> CIKernel? {
+                  if dirTried { return dirKernel }
+                  dirTried = true
+                  let src = """
+                  kernel vec4 pxDir(sampler src, float amount, float radius, float clampK) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(src, samplerTransform(src, p));
+                      vec3 L = vec3(0.299, 0.587, 0.114);
+                      float lc = dot(c.rgb, L);
+                      vec4 lft = sample(src, samplerTransform(src, p + vec2(-1.0, 0.0)));
+                      vec4 rgt = sample(src, samplerTransform(src, p + vec2( 1.0, 0.0)));
+                      vec4 up  = sample(src, samplerTransform(src, p + vec2( 0.0,-1.0)));
+                      vec4 dn  = sample(src, samplerTransform(src, p + vec2( 0.0, 1.0)));
+                      float gx = dot(rgt.rgb, L) - dot(lft.rgb, L);
+                      float gy = dot(dn.rgb, L) - dot(up.rgb, L);
+                      float g = length(vec2(gx, gy));
+                      vec3 o = c.rgb;
+                      if (g > 0.003 && amount > 0.01) {
+                          vec2 dir = vec2(-gy, gx) / max(g, 0.0001);
+                          vec4 a = sample(src, samplerTransform(src, p + dir * radius));
+                          vec4 b = sample(src, samplerTransform(src, p - dir * radius));
+                          float la = dot(a.rgb, L);
+                          float lb = dot(b.rgb, L);
+                          float along = (la + lb) * 0.5;
+                          // Detail entlang der Kante: der zentrale Pixel soll sich vom
+                          // Mittel der Nachbarn ENTLANG unterscheiden -> verstaerken.
+                          float d = (lc - along) * clamp(g * 3.0, 0.0, 1.0);
+                          o = c.rgb + vec3(d * amount);
+                      }
+                      vec3 mn = min(min(lft.rgb, rgt.rgb), min(up.rgb, dn.rgb));
+                      vec3 mx = max(max(lft.rgb, rgt.rgb), max(up.rgb, dn.rgb));
+                      vec3 lim = (mx - mn) * clampK + 0.002;
+                      o = clamp(o, mn - lim, mx + lim);
+                      return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  dirKernel = CIKernel(source: src)
+                  if dirKernel == nil { os_log(.error, log: videoViewLog, "[px] dir kernel compile failed") }
+                  return dirKernel
+              }
+
               private var easuKernel: CIKernel?
               private var easuTried = false
 
@@ -1526,22 +1576,6 @@ jobs:
                   let useMFX = false
                   if useMFX {
                       // Skalierung übernimmt MetalFX am Ende.
-                  } else if (UserDefaults.standard.object(forKey: "pxSharpScaler") as? Int ?? 0) == 1,
-                            let ek = easuKernelInstance() {
-                      // Kantengerichteter Skalierer
-                      let sFit = min(sx, sy)
-                      let ow = (src.width * sFit).rounded(.down)
-                      let oh = (src.height * sFit).rounded(.down)
-                      let amt = NSNumber(value: UserDefaults.standard.object(forKey: "pxSharpEasu") as? Double ?? 0.6)
-                      if let out = ek.apply(extent: CGRect(x: 0, y: 0, width: ow, height: oh),
-                                            roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
-                                            arguments: [image, NSNumber(value: sFit), amt]) {
-                          image = out
-                      } else {
-                          image = image.applyingFilter("CILanczosScaleTransform", parameters: [
-                              kCIInputScaleKey: sFit, kCIInputAspectRatioKey: 1.0
-                          ])
-                      }
                   } else if pixelPerfect {
                       // 1:1: keine Skalierung, jeder Stream-Pixel sitzt auf genau einem Panel-Pixel.
                       image = image.transformed(by: CGAffineTransform(scaleX: 1, y: 1))
@@ -1571,6 +1605,19 @@ jobs:
                   let dx = (target.width - placed.width) / 2 - placed.origin.x
                   let dy = (target.height - placed.height) / 2 - placed.origin.y
                   image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+
+                  // Kantengerichtete Schärfung (Option): 1:1 nach der Skalierung.
+                  if (UserDefaults.standard.object(forKey: "pxSharpScaler") as? Int ?? 0) == 1,
+                     let dk = dirKernelInstance() {
+                      let amt = Float(UserDefaults.standard.object(forKey: "pxSharpEasu") as? Double ?? 0.6)
+                      let haloK = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.30)
+                      if let out = dk.apply(extent: image.extent,
+                                            roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
+                                            arguments: [image, NSNumber(value: amt * 0.55),
+                                                        NSNumber(value: 1.6), NSNumber(value: haloK)]) {
+                          image = out
+                      }
+                  }
 
                   // Immer schärfen — genau wie im bewährten Build 28. MetalFX skaliert danach.
                   image = applyDetailStage(image)
@@ -2575,7 +2622,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 80 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 81 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2638,7 +2685,7 @@ jobs:
                       Text("3 · Schärfe").font(.headline)
                       Picker("Skalierer (Upscaling)", selection: $scaler) {
                           Text("Lanczos (Standard)").tag(0)
-                          Text("Kantengerichtet (EASU)").tag(1)
+                          Text("Kantengerichtet (Richtungs-Schärfung)").tag(1)
                       }
                       Text("Lanczos interpoliert gleichmäßig. Der kantengerichtete Skalierer (EASU-Prinzip aus AMD FSR 1.0) schätzt die Kantenrichtung und tastet ENTLANG der Kante ab — schräge Konturen bleiben dadurch schärfer. Gemessen wird nach dem Install, welcher bei deinem Bild gewinnt.")
                           .font(.caption)
