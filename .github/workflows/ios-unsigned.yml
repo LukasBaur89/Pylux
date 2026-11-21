@@ -1019,8 +1019,14 @@ jobs:
                   }
                   let autoStrength = Float(UserDefaults.standard.object(forKey: "pxSharpAutoStrength") as? Double ?? 0.65)
                   let scene = PXScene.shared
-                  if tvComp < 0.999 {
-                      let f = CGFloat(pow(tvComp, 1.0 / 2.2))
+                  // TV-Leuchtdichte und Szenen-Automatik in EINEM Durchgang (spart eine
+                  // komplette Vollbild-Stufe).
+                  var expo = tvComp
+                  if autoOn && autoStrength > 0.01 {
+                      expo *= 1.0 + (scene.gain - 1.0) * Double(autoStrength)
+                  }
+                  if abs(expo - 1.0) > 0.002 {
+                      let f = CGFloat(pow(expo, 1.0 / 2.2))
                       image = image.applyingFilter("CIColorMatrix", parameters: [
                           "inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
                           "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
@@ -1028,19 +1034,6 @@ jobs:
                           "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
                           "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
                       ])
-                  }
-                  if autoOn && autoStrength > 0.01 {
-                      let g = 1.0 + (scene.gain - 1.0) * Double(autoStrength)
-                      if abs(g - 1.0) > 0.002 {
-                          let f = CGFloat(pow(g, 1.0 / 2.2))
-                          image = image.applyingFilter("CIColorMatrix", parameters: [
-                              "inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
-                              "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
-                              "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
-                              "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-                              "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
-                          ])
-                      }
                   }
 
                   // Tone Mapping als echte S-Kurve (CIToneCurve): kontrollierter Kontrast in
@@ -1159,6 +1152,18 @@ jobs:
                       }
                   }
 
+                  // Mini-LED-Dimming und Farb-LUT wirken bei QUELLAUFLÖSUNG (1080p) statt
+                  // auf dem Panel. Beides sind niederfrequente bzw. punktweise Operationen —
+                  // das Ergebnis ist identisch, kostet aber nur 2,1 statt 5,6 Mio Pixel.
+                  let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.25)
+                  if localDim > 0.02 && !hdrActive {
+                      let dimScale = 0.30 + 0.70 * Float(min(max(scene.mean / 0.40, 0.0), 1.0))
+                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * dimScale, zone: 36)
+                  }
+                  if colorEngine {
+                      image = applyColorEngine(image)
+                  }
+
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
@@ -1204,15 +1209,6 @@ jobs:
                       image = image.applyingFilter("CIColorControls", parameters: [
                           kCIInputContrastKey: 0.8 + min(max(contrastRaw, 0), 1) * 0.4
                       ])
-                  }
-
-                  // Mini-LED-Emulation: zonenweises Dimming auf der finalen Panel-Auflösung.
-                  let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.25)
-                  if localDim > 0.02 && !hdrActive {
-                      // In dunklen Szenen das Dimming zuruecknehmen: sonst laufen die
-                      // Schatten noch weiter zu (die Schattenstufe hat sie gerade geoeffnet).
-                      let dimScale = 0.30 + 0.70 * Float(min(max(scene.mean / 0.40, 0.0), 1.0))
-                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * dimScale, zone: 36)
                   }
 
                   // Farbtemperatur als NORMALISIERTE Matrix. CITemperatureAndTint hat die
@@ -1265,10 +1261,7 @@ jobs:
                       ])
                   }
 
-                  // Kalibrierung/Farbe zuletzt, damit sie auf dem fertigen Farbbild arbeitet.
-                  if colorEngine {
-                      image = applyColorEngine(image)
-                  } else {
+                  if !colorEngine {
                       image = applyCalibration(image)
                   }
 
@@ -2115,7 +2108,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 53 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 54 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
