@@ -486,7 +486,7 @@ jobs:
                   if casTried { return casKernel }
                   casTried = true
                   let src = """
-                  kernel vec4 pxCAS(sampler src, float r1, float r2, float r3, float s1, float s2, float s3, float clampK, float lumaOnly) {
+                  kernel vec4 pxCAS(sampler src, float r1, float r2, float r3, float s1, float s2, float s3, float clampK, float lumaOnly, float chromaS) {
                       vec2 p = destCoord();
                       vec4 c = sample(src, samplerTransform(src, p));
                       vec2 d1 = vec2(r1, r1);
@@ -551,6 +551,11 @@ jobs:
                           float dc = (lc2 - dot(avg3, L)) * s3;
                           edge = vec3(de);
                           tex = vec3(dt + dc);
+                          if (chromaS > 0.001) {
+                              vec3 cc = c.rgb - vec3(lc2);
+                              vec3 ca = avg2 - vec3(la2);
+                              tex += (cc - ca) * chromaS;
+                          }
                       } else {
                           edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
                           tex  = (c.rgb - avg2) * s2 + (c.rgb - avg3) * s3;
@@ -804,7 +809,7 @@ jobs:
                   if cas2Tried { return cas2Kernel }
                   cas2Tried = true
                   let src = """
-                  kernel vec4 pxCAS2(sampler src, float r1, float r2, float s1, float s2, float clampK, float lumaOnly) {
+                  kernel vec4 pxCAS2(sampler src, float r1, float r2, float s1, float s2, float clampK, float lumaOnly, float chromaS) {
                       vec2 p = destCoord();
                       vec4 c = sample(src, samplerTransform(src, p));
                       vec2 d1 = vec2(r1, r1);
@@ -844,6 +849,11 @@ jobs:
                           float a = dot(adapt, vec3(0.333333));
                           edge = vec3((lc2 - dot(avg1, L)) * (s1 * (0.45 + 0.55 * a)));
                           tex  = vec3((lc2 - dot(avg2, L)) * s2);
+                          if (chromaS > 0.001) {
+                              vec3 cc = c.rgb - vec3(lc2);
+                              vec3 ca = avg2 - vec3(dot(avg2, L));
+                              tex += (cc - ca) * chromaS;
+                          }
                       } else {
                           edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
                           tex  = (c.rgb - avg2) * s2;
@@ -913,7 +923,6 @@ jobs:
                   var image = input
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.6)
                   let detail = Float(UserDefaults.standard.object(forKey: "pxSharpDetail") as? Double ?? 0.2)
-                  let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.15)
 
                   let engineNew = (UserDefaults.standard.object(forKey: "pxSharpEngine") as? Int ?? 1) != 0
                   // In verrauschten Szenen weniger Schaerfe: sonst verstaerkt der CAS das
@@ -930,7 +939,8 @@ jobs:
                           if let out = k.apply(extent: image.extent, roiCallback: roi,
                                                arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7),
                                                            NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.30),
-                                                           NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true)]) {
+                                                           NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true),
+                                                           NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.30))]) {
                               image = out
                           } else {
                               // Fallback: falls der Kernel zur Laufzeit nicht durchlaeuft
@@ -1029,6 +1039,7 @@ jobs:
                   let colorEngine = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? NSNumber)?.boolValue ?? true
                   // 1 = nur Luma schaerfen (keine Farbsaeume), 0 = pro Kanal (alt)
                   let lumaSharpen = (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true
+                  let chromaSharpen = Float(UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.30)
                   let gamma = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
                   if !colorEngine && abs(gamma - 1.0) > 0.01 {
                       image = image.applyingFilter("CIGammaAdjust", parameters: ["inputPower": gamma])
@@ -1187,7 +1198,8 @@ jobs:
                                                        NSNumber(value: min(clearImage, 1.0) * 0.95),
                                                        NSNumber(value: min(clearImage, 1.0) * 0.55),
                                                        NSNumber(value: min(clearImage, 1.0) * 0.45),
-                                                       NSNumber(value: 0.25), NSNumber(value: lumaSharpen)]) {
+                                                       NSNumber(value: 0.25), NSNumber(value: lumaSharpen),
+                                                       NSNumber(value: chromaSharpen)]) {
                           image = out
                       } else {
                           image = image.applyingFilter("CIUnsharpMask", parameters: [
@@ -1947,6 +1959,7 @@ jobs:
               @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.35
               @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = true
+              @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -1969,6 +1982,7 @@ jobs:
                   autoStrength = 0.65
                   shadow = 0.35
                   tvBrightness = true
+                  chroma = 0.30
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
                       level = 0.35; detail = 0.15; clarity = 0.08
@@ -2004,7 +2018,7 @@ jobs:
                       saturation = 0.62; contrast = 0.50; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
                       clearImage = 0.82; toneMap = 2; localDim = 0.30; deband = 0.18
-                      brightness = 0.45; shadow = 0.40
+                      brightness = 0.45; shadow = 0.40; chroma = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -2023,7 +2037,7 @@ jobs:
                       saturation = 0.58; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.75; toneMap = 0; localDim = 0.15; deband = 0.15
-                      brightness = 0.47; shadow = 0.50
+                      brightness = 0.47; shadow = 0.50; chroma = 0.40
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
@@ -2032,7 +2046,7 @@ jobs:
                       saturation = 0.56; contrast = 0.48; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.85; toneMap = 0; localDim = 0.25; deband = 0.18
-                      brightness = 0.45; shadow = 0.35
+                      brightness = 0.45; shadow = 0.35; chroma = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   }
@@ -2124,6 +2138,7 @@ jobs:
                   autoStrength = 0.65
                   shadow = 0.35
                   tvBrightness = true
+                  chroma = 0.30
                   audio3D = 0.0
                   eq0 = 0; eq1 = 0; eq2 = 0; eq3 = 0; eq4 = 0
                   audioPreset = 0
@@ -2170,7 +2185,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 55 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 56 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2220,6 +2235,9 @@ jobs:
                       sliderRow("Detail (Textur, 2,7 px)", value: $detail, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", detail * 100),
                                 rule: "Je höher, desto mehr Struktur in Gras, Stoff, Metall. Der stärkste Hebel für „gestochen scharf“ — gemessen +155 % Detail bei +10 % Rauschen.")
+                      sliderRow("Farbschärfe (Chroma)", value: $chroma, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", chroma * 100),
+                                rule: "Je höher, desto schärfer werden FARBkanten (Schildtext, Zierleisten, Lichter). Der Stream liefert Farbe nur mit halber Auflösung (4:2:0) — dieser Regler holt die Präzision zurück, ohne Helligkeitsrauschen zu erzeugen.")
                       sliderRow("Clear Image (Vor-Schärfung 1080p)", value: $clearImage, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", clearImage * 100),
                                 rule: "Je höher, desto mehr echte Kanten bekommt der Upscaler zu sehen. Über 75 % werden feine Linien unruhig.")
