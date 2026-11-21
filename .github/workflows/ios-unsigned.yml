@@ -134,6 +134,8 @@ jobs:
               private var appliedPeak: Double = 0
               private var lutData: Data?
               private var lutKey: String = ""
+              private var colorLUTData: Data?
+              private var colorLUTKey: String = ""
               private var casKernel: CIKernel?
               private var casTried = false
               private var dbKernel: CIKernel?
@@ -514,13 +516,13 @@ jobs:
 
                       vec3 range = mx - mn;
                       // Echte Kante (hoher Kontrast) -> kaum Verstärkung, Textur -> volle.
-                      vec3 adapt = 1.0 - clamp(range * 4.0, 0.0, 1.0);
+                      vec3 adapt = vec3(1.0) - clamp(range * 4.0, vec3(0.0), vec3(1.0));
                       vec3 edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
                       vec3 tex  = (c.rgb - avg2) * s2;
                       vec3 outv = c.rgb + edge + tex;
                       vec3 lim  = range * clampK + 0.003;
                       outv = clamp(outv, mn - lim, mx + lim);
-                      return vec4(clamp(outv, 0.0, 1.0), c.a);
+                      return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
                   }
                   """
                   casKernel = CIKernel(source: src)
@@ -560,7 +562,7 @@ jobs:
                       float wsum = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
                       vec3 avg = wsum > 0.0001 ? sum / wsum : c.rgb;
                       vec3 outp = mix(c.rgb, avg, clamp(amount, 0.0, 1.0));
-                      return vec4(outp, c.a);
+                      return vec4(clamp(outp, vec3(0.0), vec3(1.0)), c.a);
                   }
                   """
                   dbKernel = CIKernel(source: src)
@@ -580,11 +582,63 @@ jobs:
                       vec3 lo = a.rgb - vec3(limit);
                       vec3 hi = a.rgb + vec3(limit);
                       vec3 o = clamp(a.rgb + d, lo, hi);
-                      return vec4(clamp(o, 0.0, 1.0), a.a);
+                      return vec4(clamp(o, vec3(0.0), vec3(1.0)), a.a);
                   }
                   """
                   diffKernel = CIColorKernel(source: src)
                   return diffKernel
+              }
+
+              /// Farb-Engine: Saettigung passiert in LINEAREM Licht um die Luma-Achse.
+              /// Das ist der Unterschied zwischen "Regler aufdrehen" und echtem Farbmanagement:
+              /// im Gamma-Raum verschiebt eine Saettigungserhoehung den Farbton und clippt
+              /// einzelne Kanaele, in linearer Rechnung bleibt der Farbton exakt und es kann
+              /// nur dort clippen, wo das Bild ohnehin am Anschlag ist.
+              /// Zusaetzlich: per-Kanal-Gamma (Kalibrierung) und Gesamt-Gamma in derselben LUT.
+              private func applyColorEngine(_ input: CIImage) -> CIImage {
+                  let gr = Float(UserDefaults.standard.object(forKey: "pxSharpGammaR") as? Double ?? 1.0)
+                  let gg = Float(UserDefaults.standard.object(forKey: "pxSharpGammaG") as? Double ?? 1.0)
+                  let gb = Float(UserDefaults.standard.object(forKey: "pxSharpGammaB") as? Double ?? 1.0)
+                  let g = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
+                  let satRaw = Float(UserDefaults.standard.object(forKey: "pxSharpSaturation") as? Double ?? 0.5)
+                  let k = max(0.0, 1.0 + (satRaw - 0.5) * 1.30)
+
+                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f", gr, gg, gb, k, g)
+                  if key != colorLUTKey || colorLUTData == nil {
+                      let n = 33
+                      var data = [Float](repeating: 0, count: n * n * n * 4)
+                      var idx = 0
+                      for bi in 0..<n {
+                          for gi in 0..<n {
+                              for ri in 0..<n {
+                                  let cr = pow(Float(ri) / Float(n - 1), gr)
+                                  let cg = pow(Float(gi) / Float(n - 1), gg)
+                                  let cb = pow(Float(bi) / Float(n - 1), gb)
+                                  // in lineares Licht
+                                  var lr = pow(cr, 2.2), lg = pow(cg, 2.2), lb = pow(cb, 2.2)
+                                  let y = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb
+                                  lr = y + (lr - y) * k
+                                  lg = y + (lg - y) * k
+                                  lb = y + (lb - y) * k
+                                  if abs(g - 1.0) > 0.001 {
+                                      lr = pow(max(lr, 0), g); lg = pow(max(lg, 0), g); lb = pow(max(lb, 0), g)
+                                  }
+                                  data[idx + 0] = min(max(pow(max(lr, 0), 1.0 / 2.2), 0), 1)
+                                  data[idx + 1] = min(max(pow(max(lg, 0), 1.0 / 2.2), 0), 1)
+                                  data[idx + 2] = min(max(pow(max(lb, 0), 1.0 / 2.2), 0), 1)
+                                  data[idx + 3] = 1
+                                  idx += 4
+                              }
+                          }
+                      }
+                      colorLUTData = data.withUnsafeBufferPointer { Data(buffer: $0) }
+                      colorLUTKey = key
+                  }
+                  guard let lut = colorLUTData else { return input }
+                  return input.applyingFilter("CIColorCube", parameters: [
+                      "inputCubeDimension": 33,
+                      "inputCubeData": lut
+                  ])
               }
 
               /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
@@ -602,7 +656,7 @@ jobs:
                       if engineNew, let k = casKernelInstance() {
                           let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -6, dy: -6) }
                           if let out = k.apply(extent: image.extent, roiCallback: roi,
-                                               arguments: [image, CGFloat(1.35), CGFloat(2.7), s1, s2, CGFloat(0.30)]) {
+                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7), NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.30)]) {
                               image = out
                           } else {
                               // Fallback: falls der Kernel zur Laufzeit nicht durchlaeuft
@@ -638,7 +692,7 @@ jobs:
                           ]).cropped(to: small.extent)
                           let up = blurred.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
                           if let out = lc.apply(extent: ext, arguments: [
-                              image, up, min(clarity, 1.0) * 0.85, 0.055
+                              image, up, NSNumber(value: min(clarity, 1.0) * 0.85), NSNumber(value: 0.055)
                           ]) {
                               image = out
                           }
@@ -670,7 +724,9 @@ jobs:
                   bufferLock.lock()
                   let pb = latestBuffer
                   bufferLock.unlock()
-                  guard let pixelBuffer = pb else { return }
+                  guard let pixelBuffer0 = pb else { return }
+                  PXProbe.shared.note(pixelBuffer0)
+                  let pixelBuffer = PXProbe.shared.frozenBuffer ?? pixelBuffer0
 
                   let target = CGSize(width: drawable.texture.width, height: drawable.texture.height)
                   guard target.width > 0, target.height > 0 else { return }
@@ -715,8 +771,9 @@ jobs:
                   }
 
                   // Gamma: hebt oder senkt die Mitteltöne (dunkle Szenen durchzeichnen)
+                  let colorEngine = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? Int ?? 0) != 0
                   let gamma = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
-                  if abs(gamma - 1.0) > 0.01 {
+                  if !colorEngine && abs(gamma - 1.0) > 0.01 {
                       image = image.applyingFilter("CIGammaAdjust", parameters: ["inputPower": gamma])
                   }
                   // Schwarzwert: Offset auf alle Kanäle
@@ -766,8 +823,8 @@ jobs:
                       if dbMode, let k = deblockKernelInstance(),
                          let out = k.apply(extent: image.extent,
                                            roiCallback: { _, rect in rect.insetBy(dx: -6, dy: -6) },
-                                           arguments: [image, CGFloat(1.7), CGFloat(0.042),
-                                                       min(max(deblock, 0), 1) * 0.90]) {
+                                           arguments: [image, NSNumber(value: 1.7), NSNumber(value: 0.042),
+                                                       NSNumber(value: min(max(deblock, 0), 1) * 0.90)]) {
                           image = out
                       } else {
                           let median = image.applyingFilter("CIMedianFilter")
@@ -786,9 +843,9 @@ jobs:
                       if let k = casKernelInstance(),
                          let out = k.apply(extent: image.extent,
                                            roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
-                                           arguments: [image, CGFloat(0.85), CGFloat(1.7),
-                                                       min(clearImage, 1.0) * 0.95,
-                                                       min(clearImage, 1.0) * 0.55, CGFloat(0.25)]) {
+                                           arguments: [image, NSNumber(value: 0.85), NSNumber(value: 1.7),
+                                                       NSNumber(value: min(clearImage, 1.0) * 0.95),
+                                                       NSNumber(value: min(clearImage, 1.0) * 0.55), NSNumber(value: 0.25)]) {
                           image = out
                       } else {
                           image = image.applyingFilter("CIUnsharpMask", parameters: [
@@ -882,7 +939,7 @@ jobs:
 
                   let satRaw = Float(UserDefaults.standard.object(forKey: "pxSharpSaturation") as? Double ?? 0.5)
                   let sat = 0.7 + min(max(satRaw, 0), 1) * 0.6
-                  if abs(sat - 1.0) > 0.01 {
+                  if !colorEngine && abs(sat - 1.0) > 0.01 {
                       image = image.applyingFilter("CIColorControls", parameters: [
                           kCIInputSaturationKey: sat
                       ])
@@ -895,8 +952,12 @@ jobs:
                       ])
                   }
 
-                  // Kalibrierung zuletzt, damit sie auf dem fertigen Farbbild arbeitet.
-                  image = applyCalibration(image)
+                  // Kalibrierung/Farbe zuletzt, damit sie auf dem fertigen Farbbild arbeitet.
+                  if colorEngine {
+                      image = applyColorEngine(image)
+                  } else {
+                      image = applyCalibration(image)
+                  }
 
                   let outSpace: CGColorSpace
                   if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
@@ -1000,6 +1061,63 @@ jobs:
               private var w = 0
               private var h = 0
               private var prevLuma: [Float]?
+              private var lastBuffer: CVPixelBuffer?
+              private(set) var frozenBuffer: CVPixelBuffer?
+
+              func note(_ pb: CVPixelBuffer) {
+                  lock.lock()
+                  lastBuffer = pb
+                  lock.unlock()
+              }
+
+              /// Friert das Quellbild ein, damit alle folgenden Messungen exakt dasselbe
+              /// Bild verarbeiten. Ohne das misst man bei laufendem Spiel Szenenwechsel
+              /// statt Einstellungsunterschiede.
+              func freeze(_ on: Bool) {
+                  lock.lock()
+                  if on {
+                      if let src = lastBuffer { frozenBuffer = PXProbe.copyBuffer(src) }
+                  } else {
+                      frozenBuffer = nil
+                  }
+                  lock.unlock()
+              }
+
+              static func copyBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+                  let w = CVPixelBufferGetWidth(src)
+                  let h = CVPixelBufferGetHeight(src)
+                  let fmt = CVPixelBufferGetPixelFormatType(src)
+                  var dst: CVPixelBuffer?
+                  let attrs: [String: Any] = [
+                      kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+                  ]
+                  CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt, attrs as CFDictionary, &dst)
+                  guard let d = dst else { return nil }
+                  CVBufferPropagateAttachments(src, d)
+                  CVPixelBufferLockBaseAddress(src, .readOnly)
+                  CVPixelBufferLockBaseAddress(d, [])
+                  let planes = CVPixelBufferIsPlanar(src) ? CVPixelBufferGetPlaneCount(src) : 1
+                  for i in 0..<max(1, planes) {
+                      if CVPixelBufferIsPlanar(src) {
+                          guard let sb = CVPixelBufferGetBaseAddressOfPlane(src, i),
+                                let db = CVPixelBufferGetBaseAddressOfPlane(d, i) else { continue }
+                          let bh = CVPixelBufferGetHeightOfPlane(src, i)
+                          let brs = CVPixelBufferGetBytesPerRowOfPlane(src, i)
+                          let brd = CVPixelBufferGetBytesPerRowOfPlane(d, i)
+                          let n = min(brs, brd)
+                          for y in 0..<bh {
+                              memcpy(db.advanced(by: y * brd), sb.advanced(by: y * brs), n)
+                          }
+                      } else {
+                          guard let sb = CVPixelBufferGetBaseAddress(src),
+                                let db = CVPixelBufferGetBaseAddress(d) else { continue }
+                          memcpy(db, sb, CVPixelBufferGetBytesPerRow(src) * h)
+                      }
+                  }
+                  CVPixelBufferUnlockBaseAddress(d, [])
+                  CVPixelBufferUnlockBaseAddress(src, .readOnly)
+                  return d
+              }
 
               func set(_ img: CIImage, context: CIContext, space: CGColorSpace, width: Int, height: Int) {
                   lock.lock()
@@ -1169,6 +1287,11 @@ jobs:
                       else if let f = Double(v) { d.set(f, forKey: k) }
                       else { d.set(v, forKey: k) }
                       return "{\"ok\":true,\"key\":\"\(k)\"}"
+                  }
+                  if path.hasPrefix("/freeze") {
+                      let on = val("on") == "1"
+                      PXProbe.shared.freeze(on)
+                      return "{\"ok\":true,\"frozen\":\(on)}"
                   }
                   if path.hasPrefix("/probe") {
                       return PXProbe.shared.probe()
@@ -1346,7 +1469,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 40").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 41").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
