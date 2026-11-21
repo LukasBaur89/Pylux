@@ -130,6 +130,7 @@ jobs:
               private var mfxIn: MTLTexture?
               private var mfxOut: MTLTexture?
               private var mfxKey = ""
+              private let diagLabel = UILabel()
 
               override init(frame: CGRect) {
                   super.init(frame: frame)
@@ -144,6 +145,13 @@ jobs:
               private func commonInit() {
                   clipsToBounds = true
                   backgroundColor = .black
+                  diagLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+                  diagLabel.textColor = .white
+                  diagLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+                  diagLabel.numberOfLines = 0
+                  diagLabel.isUserInteractionEnabled = false
+                  diagLabel.text = "diag: warte auf Frames …"
+                  addSubview(diagLabel)
                   setupMetal()
               }
 
@@ -192,6 +200,11 @@ jobs:
                   if size.width > 0, size.height > 0, mv.drawableSize != size {
                       mv.drawableSize = size
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] drawableSize=%.0fx%.0f", size.width, size.height)
+                  }
+                  let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
+                  diagLabel.isHidden = !showDiag
+                  if showDiag {
+                      diagLabel.frame = CGRect(x: 12, y: 12, width: max(200, bounds.width - 24), height: 48)
                   }
               }
 
@@ -262,7 +275,9 @@ jobs:
                           parts.append("mtx=\(String(describing: m))")
                       }
                       parts.append("hdr=\(hdr ? 1 : 0)")
-                      UserDefaults.standard.set(parts.joined(separator: " · "), forKey: "pxSharpDiag")
+                      let line = parts.joined(separator: "  ·  ")
+                      UserDefaults.standard.set(line, forKey: "pxSharpDiag")
+                      DispatchQueue.main.async { [weak self] in self?.diagLabel.text = line }
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
                              CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), hdr ? 1 : 0)
                   }
@@ -655,6 +670,7 @@ jobs:
               @AppStorage("pxSharpBlack") private var black: Double = 0.0
               @AppStorage("pxSharpRange") private var rangeMode: Int = 0
               @AppStorage("pxSharpDiag") private var diag: String = "—"
+              @AppStorage("pxSharpShowDiag") private var showDiag: Bool = true
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
@@ -750,6 +766,7 @@ jobs:
                       Text(diag)
                           .font(.caption2)
                           .foregroundColor(.secondary)
+                      Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Toggle("MetalFX Upscaling (Apple)", isOn: $metalFX)
                       Button("Maximale Qualität: 1080p · 45 Mbit") {
