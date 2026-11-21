@@ -600,7 +600,7 @@ jobs:
                   kernel vec4 pxLocalContrast(__sample a, __sample blur, float k, float limit) {
                       vec3 d = (a.rgb - blur.rgb) * k;
                       vec3 lo = a.rgb - vec3(limit) * (0.30 + 0.70 * a.rgb);
-                      vec3 hi = a.rgb + vec3(limit);
+                      vec3 hi = a.rgb + vec3(limit) * (0.35 + 0.65 * (1.0 - a.rgb));
                       vec3 o = clamp(a.rgb + d, lo, hi);
                       return vec4(clamp(o, vec3(0.0), vec3(1.0)), a.a);
                   }
@@ -634,6 +634,13 @@ jobs:
                   let wbBr = Float(UserDefaults.standard.object(forKey: "pxSharpWB_B") as? Double ?? 1.0)
                   let black = Float(UserDefaults.standard.object(forKey: "pxSharpBlack") as? Double ?? 0.0)
                   let brightRaw = Float(UserDefaults.standard.object(forKey: "pxSharpBrightness") as? Double ?? 0.5)
+                  // Farbumfang: 0 = BT.709 korrekt, 1 = auf Display P3 erweitert (TV "Nativ").
+                  let gamutNative = (UserDefaults.standard.object(forKey: "pxSharpGamut") as? Int ?? 0) != 0
+                  // Kontrast ebenfalls in der LUT rechnen, aber in der Anzeige-Domain und
+                  // mit weicher Schulter. CIColorControls schneidet bei 1.0 hart ab - in
+                  // hellen Szenen waren das gemessen 3,6 % ausgebrannte Pixel.
+                  let contrastRawL = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
+                  let contrastK = 0.8 + Double(min(max(contrastRawL, 0), 1)) * 0.4
                   // Backlight-Emulation: 0.5 = neutral, 0 = -0.8 Blenden, 1 = +0.8 Blenden.
                   let brightGain = pow(2.0, Double(brightRaw - 0.5) * 1.6)
 
@@ -646,11 +653,11 @@ jobs:
                   if kn > 0.0001 {
                       gainR /= kn; gainG /= kn; gainB /= kn
                   }
-                  let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.60
-                  let kVib = Double(vib) * 0.80
+                  let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75
+                  let kVib = Double(vib) * 1.10
 
-                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f",
-                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain)
+                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f",
+                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK)
                   if key != colorLUTKey || colorLUTData == nil {
                       let n = 33
                       var data = [Float](repeating: 0, count: n * n * n * 4)
@@ -662,6 +669,16 @@ jobs:
                                   var r = pow(Double(ri) / Double(n - 1), 2.2) * gainR * brightGain
                                   var gg2 = pow(Double(gi) / Double(n - 1), 2.2) * gainG * brightGain
                                   var b = pow(Double(bi) / Double(n - 1), 2.2) * gainB * brightGain
+
+                                  if gamutNative {
+                                      // Linearer sRGB -> Display P3. Das ist exakt das, was
+                                      // ein Fernseher mit "Farbumfang: Nativ" macht: er nutzt
+                                      // seine echten Primaries statt auf BT.709 zu begrenzen.
+                                      let r0 = r, g0 = gg2, b0 = b
+                                      r  =  0.822462 * r0 + 0.177538 * g0
+                                      gg2 = 0.033194 * r0 + 0.966806 * g0
+                                      b  =  0.017083 * r0 + 0.072397 * g0 + 0.910520 * b0
+                                  }
 
                                   let y = 0.2126 * r + 0.7152 * gg2 + 0.0722 * b
                                   let mx = max(r, max(gg2, b))
@@ -677,11 +694,7 @@ jobs:
                                       gg2 = pow(max(gg2, 0), Double(g))
                                       b = pow(max(b, 0), Double(g))
                                   }
-                                  if black > 0.0005 {
-                                      r += Double(black) * max(0, 1 - r) * 0.6
-                                      gg2 += Double(black) * max(0, 1 - gg2) * 0.6
-                                      b += Double(black) * max(0, 1 - b) * 0.6
-                                  }
+
                                   // Weiche Begrenzung pro Pixel (nicht pro Kanal): Farbe bleibt,
                                   // nur die Helligkeit wird gestaucht. Kein Kanalschnitt.
                                   let m2 = max(r, max(gg2, b))
@@ -693,6 +706,25 @@ jobs:
                                   var oR = pow(r, 1.0 / 2.2)
                                   var oG = pow(gg2, 1.0 / 2.2)
                                   var oB = pow(b, 1.0 / 2.2)
+
+                                  // Schwarzpegel: echter Lift der Schwärze in der
+                                  // Anzeige-Domain. +0.10 hebt Schwarz um 4 %/10 Stufen,
+                                  // ohne die Lichter zu verbrennen (weil (1-x) mitläuft).
+                                  if abs(black) > 0.0005 {
+                                      let lift = Double(black) * 0.25
+                                      oR += lift * (1 - oR); oG += lift * (1 - oG); oB += lift * (1 - oB)
+                                  }
+
+                                  // Kontrast um 0.5 mit weicher Schulter über 0.85.
+                                  if abs(contrastK - 1.0) > 0.001 {
+                                      func knee(_ x: Double) -> Double {
+                                          let v = (x - 0.5) * contrastK + 0.5
+                                          if v <= 0.85 { return v }
+                                          let over = v - 0.85
+                                          return 0.85 + 0.15 * (over / (over + 0.15))
+                                      }
+                                      oR = knee(oR); oG = knee(oG); oB = knee(oB)
+                                  }
                                   if abs(gr - 1.0) > 0.001 { oR = pow(oR, Double(gr)) }
                                   if abs(gg - 1.0) > 0.001 { oG = pow(oG, Double(gg)) }
                                   if abs(gb - 1.0) > 0.001 { oB = pow(oB, Double(gb)) }
@@ -752,12 +784,11 @@ jobs:
                   let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
                       kCIInputRadiusKey: 3.0
                   ]).cropped(to: small.extent)
-                  let up = blurred.applyingFilter("CILanczosScaleTransform", parameters: [
-                      kCIInputScaleKey: 1.0 / s,
-                      kCIInputAspectRatioKey: 1.0
-                  ])
+                  // Hochskalieren bewusst bilinear: die Karte ist bereits weichgezeichnet,
+                  // Lanczos wuerde pro Panelpixel 36 Taps lesen und die Bildrate kosten.
+                  let up = blurred.transformed(by: CGAffineTransform(scaleX: 1.0 / s, y: 1.0 / s))
                   if let out = lc.apply(extent: ext, arguments: [
-                      input, up, NSNumber(value: strength), NSNumber(value: 0.22), NSNumber(value: 0.006)
+                      input, up, NSNumber(value: strength), NSNumber(value: 0.30), NSNumber(value: 0.008)
                   ]) {
                       return out
                   }
@@ -773,8 +804,8 @@ jobs:
                   let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.15)
 
                   let engineNew = (UserDefaults.standard.object(forKey: "pxSharpEngine") as? Int ?? 1) != 0
-                  let s1 = min(max(level, 0), 1) * 1.30          // Kanten
-                  let s2 = min(max(detail, 0), 1) * 0.95         // Textur
+                  let s1 = min(max(level, 0), 1) * 1.60          // Kanten
+                  let s2 = min(max(detail, 0), 1) * 1.10         // Textur
                   if s1 > 0.02 || s2 > 0.02 {
                       if engineNew, let k = casKernelInstance() {
                           let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -6, dy: -6) }
@@ -1045,7 +1076,7 @@ jobs:
 
                   // Kontrast: 50 % = neutral
                   let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
-                  if abs(contrastRaw - 0.5) > 0.01 {
+                  if !colorEngine && abs(contrastRaw - 0.5) > 0.01 {
                       image = image.applyingFilter("CIColorControls", parameters: [
                           kCIInputContrastKey: 0.8 + min(max(contrastRaw, 0), 1) * 0.4
                       ])
@@ -1054,7 +1085,7 @@ jobs:
                   // Mini-LED-Emulation: zonenweises Dimming auf der finalen Panel-Auflösung.
                   let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.25)
                   if localDim > 0.02 && !hdrActive {
-                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * 0.65, zone: 36)
+                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * 1.00, zone: 36)
                   }
 
                   // Farbtemperatur als NORMALISIERTE Matrix. CITemperatureAndTint hat die
@@ -1484,9 +1515,10 @@ jobs:
                       return PXProbe.shared.probe()
                   }
                   if path.hasPrefix("/shot") {
-                      // Aktuelles Bild als JPEG (base64) - damit sich Farbe und Schaerfe
-                      // auch ohne USB-Screenshot beurteilen lassen.
-                      return PXProbe.shared.shotJPEG()
+                      // Aktuelles Bild als JPEG (base64). ?w=2732 liefert volle Panelbreite
+                      // fuer 1:1-Ausschnitte.
+                      let w = Int(val("w") ?? "") ?? 1200
+                      return PXProbe.shared.shotJPEG(maxW: min(max(w, 200), 2732))
                   }
                   if path.hasPrefix("/state") {
                       var o: [String: Any] = [:]
@@ -1565,6 +1597,7 @@ jobs:
               @AppStorage("pxSharpDeband") private var deband: Double = 0.30
               @AppStorage("pxSharpBrightness") private var brightness: Double = 0.50
               @AppStorage("pxSharpLumaSharpen") private var lumaSharpen: Bool = true
+              @AppStorage("pxSharpGamut") private var gamut: Int = 0
               @AppStorage("pxSharpColorEngine") private var colorEngine: Bool = true
 
               /// Bildmodi, abgeleitet aus den echten Feature-Listen der beiden Geräte:
@@ -1579,7 +1612,9 @@ jobs:
                   // Schaerfe pro Rauschzunahme, nicht "Regler auf Anschlag".
                   colorEngine = true
                   brightness = 0.50
+                  gamut = 0
                   lumaSharpen = true
+                  gamut = 0
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
                       level = 0.35; detail = 0.15; clarity = 0.08
@@ -1598,6 +1633,7 @@ jobs:
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
+                      gamut = 1
                       level = 0.95; detail = 0.55; clarity = 0.26
                       deblock = 0.40; denoise = 0.25; vibrance = 0.30
                       saturation = 0.62; contrast = 0.62; temp = 0.550
@@ -1614,6 +1650,7 @@ jobs:
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
+                      gamut = 1
                       level = 1.00; detail = 0.60; clarity = 0.28
                       deblock = 0.40; denoise = 0.25; vibrance = 0.35
                       saturation = 0.62; contrast = 0.62; temp = 0.560
@@ -1678,7 +1715,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 45").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 46").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -1746,6 +1783,13 @@ jobs:
                       }
                       Toggle("Farb-Engine (3D-LUT, lineares Licht)", isOn: $colorEngine)
                       Text("Rechnet Weißabgleich, Sättigung, Vibrance, Gamma und Schwarzpegel in EINER 3D-LUT in linearem Licht. Das verhindert Farbstiche und ausgebrannte Kanäle, die entstehen, wenn jeder Regler einzeln im Gamma-Raum arbeitet. Eingeschaltet lassen.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      Picker("Farbumfang", selection: $gamut) {
+                          Text("BT.709 (korrekt)").tag(0)
+                          Text("Display P3 nativ (TV-Look)").tag(1)
+                      }
+                      Text("„Nativ“ ist die Einstellung, die auf Fernsehern für kräftigere Farben sorgt: das Panel nutzt seinen echten Farbraum statt auf BT.709 zu begrenzen. Für natürliche Farben BT.709 wählen.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                       Text("Bildschärfe").font(.headline)
