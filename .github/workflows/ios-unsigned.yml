@@ -1084,8 +1084,11 @@ jobs:
                   }
                   let sharpDamp = (1.0 - min(autoNoise * 0.45, 0.45)) * (0.55 + 0.45 * bfD)
                   // Coring-Schwelle: Regler + gemessenes Rauschen der Szene.
-                  let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.5)
-                  let coringVal = Float(min(0.045, coringBase * 0.016 + Double(min(autoNoise, 1.0)) * 0.013))
+                  // Coring-Schwelle: fast ausschliesslich vom GEMESSENEN Rauschen
+                  // bestimmt. In einer sauberen Szene bleibt Textur voll erhalten, in
+                  // einer verrauschten wird nur der Rauschteppich weggeschnitten.
+                  let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.55)
+                  let coringVal = Float(min(0.040, coringBase * 0.004 + Double(min(autoNoise, 1.0)) * 0.024))
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
                   if s1 > 0.02 || s2 > 0.02 {
@@ -2169,7 +2172,7 @@ jobs:
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.35
               @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = true
               @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
-              @AppStorage("pxSharpCoring") private var coring: Double = 0.55
+              @AppStorage("pxSharpCoring") private var coring: Double = 0.60
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -2443,7 +2446,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 74 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 75 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
