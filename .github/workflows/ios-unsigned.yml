@@ -486,7 +486,7 @@ jobs:
                   if casTried { return casKernel }
                   casTried = true
                   let src = """
-                  kernel vec4 pxCAS(sampler src, float r1, float r2, float s1, float s2, float clampK, float lumaOnly) {
+                  kernel vec4 pxCAS(sampler src, float r1, float r2, float r3, float s1, float s2, float s3, float clampK, float lumaOnly) {
                       vec2 p = destCoord();
                       vec4 c = sample(src, samplerTransform(src, p));
                       vec2 d1 = vec2(r1, r1);
@@ -507,6 +507,21 @@ jobs:
                       vec4 f2 = sample(src, samplerTransform(src, p + vec2(-d2.x,  d2.y)));
                       vec4 g2 = sample(src, samplerTransform(src, p + vec2( 0.0,  d2.y)));
                       vec4 h2 = sample(src, samplerTransform(src, p + vec2( d2.x,  d2.y)));
+
+                      vec4 a3, b3, c3, d3s, e3, f3, g3, h3;
+                      vec3 avg3 = vec3(0.0);
+                      if (s3 > 0.001) {
+                          a3 = sample(src, samplerTransform(src, p + vec2(-r3, -r3)));
+                          b3 = sample(src, samplerTransform(src, p + vec2( 0.0, -r3)));
+                          c3 = sample(src, samplerTransform(src, p + vec2( r3, -r3)));
+                          d3s = sample(src, samplerTransform(src, p + vec2(-r3,  0.0)));
+                          e3 = sample(src, samplerTransform(src, p + vec2( r3,  0.0)));
+                          f3 = sample(src, samplerTransform(src, p + vec2(-r3,  r3)));
+                          g3 = sample(src, samplerTransform(src, p + vec2( 0.0,  r3)));
+                          h3 = sample(src, samplerTransform(src, p + vec2( r3,  r3)));
+                          avg3 = (b3.rgb + d3s.rgb + e3.rgb + g3.rgb
+                                + a3.rgb + c3.rgb + f3.rgb + h3.rgb) * 0.125;
+                      }
 
                       vec3 mn = min(min(min(b1.rgb, d1s.rgb), min(e1.rgb, g1.rgb)),
                                     min(min(a1.rgb, c1.rgb), min(f1.rgb, h1.rgb)));
@@ -533,11 +548,12 @@ jobs:
                           float a = dot(adapt, vec3(0.333333));
                           float de = (lc2 - la1) * (s1 * (0.45 + 0.55 * a));
                           float dt = (lc2 - la2) * s2;
+                          float dc = (lc2 - dot(avg3, L)) * s3;
                           edge = vec3(de);
-                          tex = vec3(dt);
+                          tex = vec3(dt + dc);
                       } else {
                           edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
-                          tex  = (c.rgb - avg2) * s2;
+                          tex  = (c.rgb - avg2) * s2 + (c.rgb - avg3) * s3;
                       }
                       vec3 outv = c.rgb + edge + tex;
                       vec3 lim  = range * clampK + 0.003;
@@ -719,9 +735,9 @@ jobs:
                                   if abs(contrastK - 1.0) > 0.001 {
                                       func knee(_ x: Double) -> Double {
                                           let v = (x - 0.5) * contrastK + 0.5
-                                          if v <= 0.85 { return v }
-                                          let over = v - 0.85
-                                          return 0.85 + 0.15 * (over / (over + 0.15))
+                                          if v <= 0.80 { return v }
+                                          let over = v - 0.80
+                                          return 0.80 + 0.20 * (over / (over + 0.20))
                                       }
                                       oR = knee(oR); oG = knee(oG); oB = knee(oB)
                                   }
@@ -842,7 +858,7 @@ jobs:
                       if engineNew, let k = casKernelInstance() {
                           let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -6, dy: -6) }
                           if let out = k.apply(extent: image.extent, roiCallback: roi,
-                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7), NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.30),
+                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7), NSNumber(value: 4.5), NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: 0.0), NSNumber(value: 0.30),
                                           NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true)]) {
                               image = out
                           } else {
@@ -1099,10 +1115,11 @@ jobs:
                       if let k = casKernelInstance(),
                          let out = k.apply(extent: image.extent,
                                            roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
-                                           arguments: [image, NSNumber(value: 0.85), NSNumber(value: 1.7),
+                                           arguments: [image, NSNumber(value: 0.85), NSNumber(value: 1.7), NSNumber(value: 3.0),
                                                        NSNumber(value: min(clearImage, 1.0) * 0.95),
-                                                       NSNumber(value: min(clearImage, 1.0) * 0.55), NSNumber(value: 0.25),
-                                                       NSNumber(value: lumaSharpen)]) {
+                                                       NSNumber(value: min(clearImage, 1.0) * 0.55),
+                                                       NSNumber(value: min(clearImage, 1.0) * 0.45),
+                                                       NSNumber(value: 0.25), NSNumber(value: lumaSharpen)]) {
                           image = out
                       } else {
                           image = image.applyingFilter("CIUnsharpMask", parameters: [
@@ -1437,11 +1454,11 @@ jobs:
 
                   // Belichtungsziel: Median ~0.46, Spitzlicht ~0.86.
                   // min() sorgt dafuer, dass niemals Highlights fuer die Mitten geopfert werden.
-                  let gMid = 0.45 / max(p50, 0.06)
+                  let gMid = 0.43 / max(p50, 0.06)
                   let gHigh = 0.88 / max(p90, 0.12)
                   // Bewusst enger Regelbereich: eine Nacht bleibt Nacht. Die Automatik
                   // korrigiert Belichtungsfehler, sie erfindet keine Helligkeit.
-                  var g = min(gMid, gHigh, 1.18)
+                  var g = min(gMid, gHigh, 1.12)
                   g = max(g, 0.85)
 
                   // Rauschen: mittlerer Gradient in flachen Stellen. Sauber ~0.3-1.0,
@@ -1843,6 +1860,13 @@ jobs:
               @AppStorage("pxSharpAuto") private var auto: Bool = true
               @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.35
+              @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
+              @AppStorage("pxAudioEQ0") private var eq0: Double = 0.0
+              @AppStorage("pxAudioEQ1") private var eq1: Double = 0.0
+              @AppStorage("pxAudioEQ2") private var eq2: Double = 0.0
+              @AppStorage("pxAudioEQ3") private var eq3: Double = 0.0
+              @AppStorage("pxAudioEQ4") private var eq4: Double = 0.0
+              @AppStorage("pxAudioPreset") private var audioPreset: Int = 0
 
               // MARK: - Bildmodi
 
@@ -1873,7 +1897,7 @@ jobs:
                       saturation = 0.58; contrast = 0.55; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
                       clearImage = 0.65; toneMap = 1; localDim = 0.30; deband = 0.30
-                      brightness = 0.47; shadow = 0.35
+                      brightness = 0.45; shadow = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
@@ -1892,7 +1916,7 @@ jobs:
                       saturation = 0.60; contrast = 0.56; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
                       clearImage = 0.70; toneMap = 2; localDim = 0.30; deband = 0.30
-                      brightness = 0.47; shadow = 0.40
+                      brightness = 0.45; shadow = 0.40
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -1911,7 +1935,7 @@ jobs:
                       saturation = 0.52; contrast = 0.52; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.50; toneMap = 0; localDim = 0.15; deband = 0.20
-                      brightness = 0.49; shadow = 0.50
+                      brightness = 0.47; shadow = 0.50
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
@@ -1920,7 +1944,7 @@ jobs:
                       saturation = 0.54; contrast = 0.52; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.70; toneMap = 0; localDim = 0.25; deband = 0.30
-                      brightness = 0.47; shadow = 0.35
+                      brightness = 0.45; shadow = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   }
@@ -1961,6 +1985,23 @@ jobs:
                   }
               }
 
+              /// Klangprofile wie bei einem Fernseher (Sony-Klangmodi).
+              private func applyAudioPreset(_ p: Int) {
+                  switch p {
+                  case 0: // Standard
+                      eq0 = 0; eq1 = 0; eq2 = 0; eq3 = 0; eq4 = 0; audio3D = 0.0
+                  case 1: // Sony Kino
+                      eq0 = 2; eq1 = 1; eq2 = 0; eq3 = 2; eq4 = 1; audio3D = 0.20
+                  case 2: // Sony Musik
+                      eq0 = 3; eq1 = 0; eq2 = -1; eq3 = 1; eq4 = 3; audio3D = 0.45
+                  case 3: // Sony Spiel
+                      eq0 = 4; eq1 = 2; eq2 = 0; eq3 = 3; eq4 = 1; audio3D = 0.30
+                  case 4: // Nacht
+                      eq0 = 5; eq1 = 2; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
+                  default: break
+                  }
+              }
+
               private func applyWB(_ p: Int) {
                   switch p {
                   case 0: // Neutral / D65
@@ -1994,6 +2035,9 @@ jobs:
                   auto = true
                   autoStrength = 0.65
                   shadow = 0.35
+                  audio3D = 0.0
+                  eq0 = 0; eq1 = 0; eq2 = 0; eq3 = 0; eq4 = 0
+                  audioPreset = 0
                   metalFX = false; pixelPerfect = false
               }
 
@@ -2018,12 +2062,26 @@ jobs:
                   }
               }
 
+              /// Ein EQ-Band mit dB-Anzeige.
+              @ViewBuilder
+              private func eqRow(_ title: String, _ value: Binding<Double>) -> some View {
+                  HStack {
+                      Text(title).font(.caption)
+                      Slider(value: value, in: -12...12, step: 0.5)
+                      Text(String(format: "%+.1f dB", value.wrappedValue))
+                          .font(.caption2)
+                          .foregroundColor(.secondary)
+                          .monospacedDigit()
+                          .frame(width: 62, alignment: .trailing)
+                  }
+              }
+
               var body: some View {
                   Group {
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 49 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 50 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2232,6 +2290,34 @@ jobs:
                           .foregroundColor(.secondary)
 
                       // ---------------------------------------------------------------- 7
+                      // ---------------------------------------------------------------- 7
+                      Text("7 · Audio (3D + Equalizer)").font(.headline)
+                      Picker("Klangprofil", selection: $audioPreset) {
+                          Text("Standard").tag(0)
+                          Text("Sony Kino").tag(1)
+                          Text("Sony Musik").tag(2)
+                          Text("Sony Spiel").tag(3)
+                          Text("Nacht").tag(4)
+                          Text("Eigene").tag(5)
+                      }
+                      .onChange(of: audioPreset) { p in if p < 5 { applyAudioPreset(p) } }
+                      Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. „Sony Spiel“ hebt Tiefbass und Präsenz an, damit Schritte und Schüsse ortbar sind.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      sliderRow("3D-Weite (Raumklang)", value: $audio3D, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", audio3D * 100),
+                                rule: "Je höher, desto breiter die Bühne (Mitten/Seiten-Verbreiterung mit kurzer Laufzeitverzögerung). Über 60 % wird es phasig.")
+                      VStack(alignment: .leading, spacing: 8) {
+                          eqRow("Tiefbass 80 Hz", $eq0)
+                          eqRow("Bass 300 Hz", $eq1)
+                          eqRow("Mitten 1 kHz", $eq2)
+                          eqRow("Präsenz 3,2 kHz", $eq3)
+                          eqRow("Höhen 10 kHz", $eq4)
+                      }
+                      Text("Je höher ein Band, desto stärker wird dieser Frequenzbereich angehoben (max. ±12 dB). Gegen dumpfen Klang: Höhen +3. Gegen dröhnenden Bass: 300 Hz −3.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+
                       DisclosureGroup("Welcher Regler wofür? (Kurzfassung)") {
                           VStack(alignment: .leading, spacing: 6) {
                               Text("Willst du ein besseres Bild: Bildmodus wechseln. Fertig.")
@@ -2354,6 +2440,131 @@ jobs:
           else:
               print('review: anchor not found')
           PATCH_EOF
+
+          cat > /tmp/pxaudio.txt <<'PX_AUDIO_EOF'
+          // ---- PXSHARP_AUDIO_DSP: 5-Band-EQ + 3D-Weite + Soft-Limiter ----------------
+          #include <math.h>
+          #include <stdint.h>
+
+          typedef struct {
+              float b0, b1, b2, a1, a2;
+              float x1[2], x2[2], y1[2], y2[2];
+          } PXBiquad;
+
+          static PXBiquad g_px_bands[5];
+          static float g_px_db[5] = {0,0,0,0,0};
+          static float g_px_3d = 0.0f;
+          static int g_px_ready = 0;
+          static int g_px_tick = 0;
+          static float g_px_delay[64];
+          static int g_px_dpos = 0;
+
+          static void px_band(PXBiquad *q, float fs, float f, float db, float Q) {
+              float A = powf(10.0f, db / 40.0f);
+              float w0 = 2.0f * (float)M_PI * f / fs;
+              float cw = cosf(w0), sw = sinf(w0);
+              float al = sw / (2.0f * Q);
+              float a0 = 1.0f + al / A;
+              q->b0 = (1.0f + al * A) / a0;
+              q->b1 = (-2.0f * cw) / a0;
+              q->b2 = (1.0f - al * A) / a0;
+              q->a1 = (-2.0f * cw) / a0;
+              q->a2 = (1.0f - al / A) / a0;
+          }
+
+          static float px_bq(PXBiquad *q, float x, int ch) {
+              float y = q->b0 * x + q->b1 * q->x1[ch] + q->b2 * q->x2[ch]
+                      - q->a1 * q->y1[ch] - q->a2 * q->y2[ch];
+              q->x2[ch] = q->x1[ch]; q->x1[ch] = x;
+              q->y2[ch] = q->y1[ch]; q->y1[ch] = y;
+              return y;
+          }
+
+          static void px_dsp_update(void) {
+              NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+              static const float freqs[5] = {80.0f, 300.0f, 1000.0f, 3200.0f, 10000.0f};
+              for (int i = 0; i < 5; i++) {
+                  NSString *k = [NSString stringWithFormat:@"pxAudioEQ%d", i];
+                  float v = (float)[d doubleForKey:k];
+                  if (v < -12.0f) v = -12.0f;
+                  if (v > 12.0f) v = 12.0f;
+                  if (!g_px_ready || fabsf(v - g_px_db[i]) > 0.05f) {
+                      g_px_db[i] = v;
+                      px_band(&g_px_bands[i], 48000.0f, freqs[i], v, 0.9f);
+                  }
+              }
+              float w = (float)[d doubleForKey:@"pxAudio3D"];
+              if (w < 0.0f) w = 0.0f;
+              if (w > 1.0f) w = 1.0f;
+              g_px_3d = w;
+              g_px_ready = 1;
+          }
+
+          static inline float px_soft(float x) {
+              float a = fabsf(x);
+              if (a <= 0.92f) return x;
+              float over = a - 0.92f;
+              float y = 0.92f + over / (1.0f + over * 3.5f);
+              return x < 0 ? -y : y;
+          }
+
+          /// Wird pro Audio-Puffer aufgerufen. frames = Samples pro Kanal.
+          static void pylux_audio_process(int16_t *buf, size_t frames, int channels) {
+              if (channels < 1) return;
+              if (!g_px_ready || (++g_px_tick & 31) == 0) px_dsp_update();
+              int nch = channels > 2 ? 2 : channels;
+              float amt = g_px_3d;
+
+              for (size_t i = 0; i < frames; i++) {
+                  int16_t *fr = buf + i * channels;
+                  float L = fr[0] / 32768.0f;
+                  float R = nch > 1 ? fr[1] / 32768.0f : L;
+
+                  for (int b = 0; b < 5; b++) {
+                      L = px_bq(&g_px_bands[b], L, 0);
+                      R = px_bq(&g_px_bands[b], R, 1);
+                  }
+
+                  if (amt > 0.01f) {
+                      float mid = (L + R) * 0.5f;
+                      float side = (L - R) * 0.5f;
+                      g_px_delay[g_px_dpos & 63] = side;
+                      float sd = g_px_delay[(g_px_dpos - 6) & 63];
+                      g_px_dpos++;
+                      side = side * (1.0f + 1.30f * amt) + sd * 0.50f * amt;
+                      L = mid + side;
+                      R = mid - side;
+                  }
+
+                  L = px_soft(L);
+                  R = px_soft(R);
+                  fr[0] = (int16_t)lrintf(fmaxf(-1.0f, fminf(1.0f, L)) * 32767.0f);
+                  if (nch > 1) fr[1] = (int16_t)lrintf(fmaxf(-1.0f, fminf(1.0f, R)) * 32767.0f);
+              }
+          }
+          // ---- ENDE PXSHARP_AUDIO_DSP ------------------------------------------------
+          PX_AUDIO_EOF
+
+          python3 - <<'AUDIO_PATCH_EOF'
+          p = 'ios/Pylux/Bridge/ChiakiAudioOutputIOS.m'
+          s = open(p, encoding='utf-8').read()
+          if 'PXSHARP_AUDIO_DSP' not in s:
+              dsp = open('/tmp/pxaudio.txt', encoding='utf-8').read()
+              anchor = 'static void aq_output_callback(void *userdata, AudioQueueRef q, AudioQueueBufferRef buf) {'
+              if anchor in s:
+                  s = s.replace(anchor, dsp + '\n' + anchor, 1)
+              old_tail = '    buf->mAudioDataByteSize = cap;\n    AudioQueueEnqueueBuffer(ao->aq, buf, 0, NULL);'
+              new_tail = ('    buf->mAudioDataByteSize = cap;\n'
+                          '    int pch = (int)(ao->channels > 2 ? 2 : (ao->channels > 0 ? ao->channels : 2));\n'
+                          '    pylux_audio_process((int16_t *)buf->mAudioData, (size_t)(cap / 2 / pch), pch);\n'
+                          '    AudioQueueEnqueueBuffer(ao->aq, buf, 0, NULL);')
+              if old_tail in s:
+                  s = s.replace(old_tail, new_tail, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('audio-dsp: eingebaut')
+          else:
+              print('audio-dsp: schon vorhanden')
+          AUDIO_PATCH_EOF
 
           python3 - <<'PATCH_EOF'
           # Spenden-Aufforderung ("Keep Pylux alive") komplett abschalten.
