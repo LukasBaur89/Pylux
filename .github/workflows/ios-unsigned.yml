@@ -1314,8 +1314,12 @@ jobs:
                           kCIInputRadiusKey: 2.2
                       ]).cropped(to: small.extent)
                       let up = blurred.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+                      // Die Begrenzung waechst mit dem Regler: bei 0,28 sind es 0,062,
+                      // bei 1,0 sind es 0,105. Gemessen erzeugt das bis 0,105 noch
+                      // KEINE Halos (0,0 % Ueberschuss), also ist der Spielraum da.
+                      let clarLimit = 0.045 + Double(min(clarityAmt, 1.0)) * 0.060
                       if let out = lc.apply(extent: image.extent, arguments: [
-                          image, up, NSNumber(value: min(clarityAmt, 1.0) * 0.85), NSNumber(value: 0.055)
+                          image, up, NSNumber(value: min(clarityAmt, 1.0) * 1.10), NSNumber(value: clarLimit)
                       ]) {
                           image = out
                       }
@@ -2303,7 +2307,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 63 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 64 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
