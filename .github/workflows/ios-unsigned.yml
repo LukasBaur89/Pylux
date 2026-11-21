@@ -812,6 +812,43 @@ jobs:
                   return shadowKernel
               }
 
+              private var deconvKernel: CIKernel?
+              private var deconvTried = false
+
+              /// Kanten-Rekonstruktion (Deconvolution) bei Quellaufloesung.
+              /// Das Spiel glaettet Kanten (TAA/FXAA) schon VOR der Kodierung — das ist
+              /// ein bekannter Weichzeichner von ~1 px. Ein 3x3-Laplace-Operator ist die
+              /// diskrete Umkehrung eines solchen Gauß-Blurs: er zieht genau die Stufe
+              /// zurueck, die durch die Glaettung entstanden ist.
+              /// Zwei Sicherungen: Coring (Rauschen wird nicht verstaerkt) und die
+              /// Halo-Begrenzung (kein Ueberschwingen ueber den lokalen Bereich).
+              private func deconvKernelInstance() -> CIKernel? {
+                  if deconvTried { return deconvKernel }
+                  deconvTried = true
+                  let src = """
+                  kernel vec4 pxDeconv(sampler src, float k, float coring, float clampK) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(src, samplerTransform(src, p));
+                      vec4 u = sample(src, samplerTransform(src, p + vec2( 0.0, -1.0)));
+                      vec4 d = sample(src, samplerTransform(src, p + vec2( 0.0,  1.0)));
+                      vec4 l = sample(src, samplerTransform(src, p + vec2(-1.0,  0.0)));
+                      vec4 r = sample(src, samplerTransform(src, p + vec2( 1.0,  0.0)));
+                      vec3 L = vec3(0.299, 0.587, 0.114);
+                      float lap = 4.0 * dot(c.rgb, L)
+                                - dot(u.rgb, L) - dot(d.rgb, L) - dot(l.rgb, L) - dot(r.rgb, L);
+                      lap = sign(lap) * max(0.0, abs(lap) - coring);
+                      vec3 mn = min(min(u.rgb, d.rgb), min(l.rgb, r.rgb));
+                      vec3 mx = max(max(u.rgb, d.rgb), max(l.rgb, r.rgb));
+                      vec3 lim = (mx - mn) * clampK + 0.002;
+                      vec3 o = clamp(c.rgb + vec3(lap * k), mn - lim, mx + lim);
+                      return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  deconvKernel = CIKernel(source: src)
+                  if deconvKernel == nil { os_log(.error, log: videoViewLog, "[px] deconv kernel compile failed") }
+                  return deconvKernel
+              }
+
               private var ditherKernel: CIColorKernel?
               private var ditherTried = false
 
@@ -1382,6 +1419,18 @@ jobs:
                               kCIInputIntensityKey: min(clearImage, 1.0) * 0.55
                           ])
                       }
+                  }
+
+                  // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
+                  let deconvAmt = Float(UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0)
+                  if deconvAmt > 0.02, let k = deconvKernelInstance(),
+                     let out = k.apply(extent: image.extent,
+                                       roiCallback: { _, rect in rect.insetBy(dx: -3, dy: -3) },
+                                       arguments: [image,
+                                                   NSNumber(value: min(deconvAmt, 1.0) * 0.45),
+                                                   NSNumber(value: 0.004 + Double(min(Float(scene.noise), 1.0)) * 0.012),
+                                                   NSNumber(value: Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.30))]) {
+                      image = out
                   }
 
                   // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
@@ -2180,6 +2229,7 @@ jobs:
               @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
               @AppStorage("pxSharpCoring") private var coring: Double = 0.60
               @AppStorage("pxSharpHalo") private var halo: Double = 0.30
+              @AppStorage("pxSharpDeconv") private var deconv: Double = 0.35
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -2453,7 +2503,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 77 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 78 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2530,6 +2580,9 @@ jobs:
                       sliderRow("Detail-Klarheit (Coring)", value: $coring, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", coring * 100),
                                 rule: "Je höher, desto konsequenter wird Rauschen von echter Textur getrennt: alles unter dem Rauschpegel wird verworfen, Struktur darüber verstärkt. Das ist der Unterschied zwischen verrauscht-scharf und kristallklar.")
+                      sliderRow("Kanten-Rekonstruktion (Deconvolution)", value: $deconv, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", deconv * 100),
+                                rule: "Je höher, desto stärker wird die Kantenglättung des Spiels (TAA/FXAA) rechnerisch zurückgenommen — ein 3×3-Laplace gegen einen 1-px-Blur. Über 50 % entstehen Ringe an harten Kanten.")
                       sliderRow("Halo-Grenze (Textur gegen Höfe)", value: $halo, range: 0.15...0.55, step: 0.01,
                                 display: String(format: "%.0f %%", halo * 100),
                                 rule: "Je höher, desto mehr Überschwinger an Kanten sind erlaubt — das gibt mehr Textur, aber sichtbare helle Höfe an harten Konturen. Gemessen: 30 % = 0 % Halos, 45 % = 5–8 % Halos.")
