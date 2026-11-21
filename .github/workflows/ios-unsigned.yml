@@ -1004,8 +1004,31 @@ jobs:
                   // angewendet (Faktor^(1/2.2)). Das ist physikalisch eine Belichtung,
                   // keine Gamma-Verschiebung.
                   let autoOn = (UserDefaults.standard.object(forKey: "pxSharpAuto") as? NSNumber)?.boolValue ?? true
+                  // ---- TV-Helligkeit --------------------------------------------------
+                  // Der eigentliche Grund fuer "zu hell": das iPad zeigt SDR mit bis zu
+                  // ~600 cd/m2, ein Fernseher mit 100-200. Derselbe Code (z. B. 230/255)
+                  // ist auf dem iPad also drei- bis sechsmal so hell. Ein TV regelt das
+                  // ueber die Hintergrundbeleuchtung - hier wird die Ausgabe entsprechend
+                  // skaliert, damit die absolute Leinhelle stimmt.
+                  let tvBrightOn = (UserDefaults.standard.object(forKey: "pxSharpTvBrightness") as? NSNumber)?.boolValue ?? true
+                  var tvComp = 1.0
+                  if tvBrightOn {
+                      let sb = min(max(Double(UIScreen.main.brightness), 0.0), 1.0)
+                      // 100 % Bildschirm -> 0.55, 50 % -> 0.775, 20 % -> 0.91
+                      tvComp = 0.55 + 0.45 * (1.0 - sb)
+                  }
                   let autoStrength = Float(UserDefaults.standard.object(forKey: "pxSharpAutoStrength") as? Double ?? 0.65)
                   let scene = PXScene.shared
+                  if tvComp < 0.999 {
+                      let f = CGFloat(pow(tvComp, 1.0 / 2.2))
+                      image = image.applyingFilter("CIColorMatrix", parameters: [
+                          "inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
+                          "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
+                          "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
+                          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                          "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
+                      ])
+                  }
                   if autoOn && autoStrength > 0.01 {
                       let g = 1.0 + (scene.gain - 1.0) * Double(autoStrength)
                       if abs(g - 1.0) > 0.002 {
@@ -1466,7 +1489,7 @@ jobs:
                   // Bewusst enger Regelbereich: eine Nacht bleibt Nacht. Die Automatik
                   // korrigiert Belichtungsfehler, sie erfindet keine Helligkeit.
                   var g = min(gMid, gHigh, 1.12)
-                  g = max(g, 0.85)
+                  g = max(g, 0.64)
 
                   // Rauschen: mittlerer Gradient in flachen Stellen. Sauber ~0.3-1.0,
                   // verrauscht 2-6 (Stufen/255).
@@ -1789,6 +1812,7 @@ jobs:
                       o["pxSceneMedian"] = String(format: "%.3f", PXScene.shared.mean)
                       o["pxSceneP90"] = String(format: "%.3f", PXScene.shared.p90)
                       o["pxRenderMs"] = String(format: "%.2f", PXScene.shared.renderMs)
+                      o["pxScreenBrightness"] = String(format: "%.2f", Double(UIScreen.main.brightness))
                       o["pxSceneDark"] = String(format: "%.3f", PXScene.shared.darkFrac)
                       if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
                           return String(data: data, encoding: .utf8) ?? "{}"
@@ -1867,6 +1891,7 @@ jobs:
               @AppStorage("pxSharpAuto") private var auto: Bool = true
               @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.35
+              @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = true
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -1888,6 +1913,7 @@ jobs:
                   auto = true
                   autoStrength = 0.65
                   shadow = 0.35
+                  tvBrightness = true
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
                       level = 0.35; detail = 0.15; clarity = 0.08
@@ -2042,6 +2068,7 @@ jobs:
                   auto = true
                   autoStrength = 0.65
                   shadow = 0.35
+                  tvBrightness = true
                   audio3D = 0.0
                   eq0 = 0; eq1 = 0; eq2 = 0; eq3 = 0; eq4 = 0
                   audioPreset = 0
@@ -2088,7 +2115,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 51 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 52 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2243,6 +2270,10 @@ jobs:
 
                       // ---------------------------------------------------------------- 5
                       Text("5 · Bild-Engine (das Innenleben des Fernsehers)").font(.headline)
+                      Toggle("TV-Helligkeit (an Bildschirmhelligkeit anpassen)", isOn: $tvBrightness)
+                      Text("Das iPad zeigt SDR mit bis zu 600 cd/m², ein Fernseher mit 100–200. Derselbe Bildpunkt wirkt hier also drei- bis sechsmal so hell. Diese Option skaliert die Ausgabe auf TV-Leuchtdichte — bei 100 % Bildschirmhelligkeit auf 55 %, bei 50 % auf 78 %. Wenn dir das Bild dann zu dunkel ist: Bildschirmhelligkeit am iPad erhöhen, nicht den Regler darunter.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
                       sliderRow("Helligkeit (Hintergrundlicht)", value: $brightness, range: 0...1, step: 0.02,
                                 display: String(format: "%+.0f %%", (brightness - 0.5) * 200),
                                 rule: "Je höher, desto heller das ganze Bild — linear gerechnet wie die Hintergrundbeleuchtung. 0 % = neutral. Für dunkle Räume 5–10 % darunter.")
