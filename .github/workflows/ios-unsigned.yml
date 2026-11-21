@@ -2392,7 +2392,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 67 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 68 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2750,6 +2750,32 @@ jobs:
               open(p, 'w', encoding='utf-8').write(s)
           print('settings changed:', changed)
           PATCH_EOF
+
+          python3 - <<'HDR_PATCH_EOF'
+          # HDR-Codec (H.265 HDR = BT.2020/PQ, 10 Bit) in der App anwaehlbar machen.
+          p = 'ios/Pylux/Views/SettingsView.swift'
+          s = open(p, encoding='utf-8').read()
+          if 'H.265 + HDR' not in s:
+              for cand in ('                Text("H.265 (HDR-fähig)").tag(1)\n',
+                           '                Text("H.265 (PS5 only)").tag(1)\n'):
+                  if cand in s:
+                      s = s.replace(cand, cand + '                Text("H.265 + HDR (BT.2020, 10 Bit)").tag(2)\n', 1)
+                      print('settings: HDR-Option eingebaut')
+                      break
+          s = s.replace('case 1080: return codec == 1 ? 12000 : 15000',
+                        'case 1080: return codec >= 1 ? 12000 : 15000')
+          open(p, 'w', encoding='utf-8').write(s)
+
+          p2 = 'ios/Pylux/Views/ConnectInfoEntryView.swift'
+          s2 = open(p2, encoding='utf-8').read()
+          if 'H.265 HDR' not in s2:
+              s2 = s2.replace('private let codecs = ["H.264", "H.265"]',
+                              'private let codecs = ["H.264", "H.265", "H.265 HDR"]', 1)
+              s2 = s2.replace('let ci = clamped(codecIndex, min: 0, max: 1)',
+                              'let ci = clamped(codecIndex, min: 0, max: 2)', 1)
+              open(p2, 'w', encoding='utf-8').write(s2)
+              print('connect-info: HDR-Option')
+          HDR_PATCH_EOF
 
           python3 - <<'PATCH_EOF'
           p = 'ios/Pylux/App/PyluxAppDelegate.swift'
