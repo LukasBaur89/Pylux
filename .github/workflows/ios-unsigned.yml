@@ -462,26 +462,25 @@ jobs:
                   let clarity = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.15)
 
                   if level > 0.02 {
-                      // Bewusst wieder CIUnsharpMask: CISharpenLuminance hat in HDR (PQ) das
-                      // Farbsignal zerstört (lila Bild). UnsharpMask ist bewährt und bleibt
-                      // farbrichtig; die Halos werden über die zwei Stufen klein gehalten.
+                      // Kanten: radius 1.4 statt 1.0, Intensität bis 1.25. Das ist der Bereich,
+                      // in dem ein 1080p-Bild auf 2732 px tatsächlich knackig wird.
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 1.0,
-                          kCIInputIntensityKey: min(level, 1.0)
+                          kCIInputRadiusKey: 1.4,
+                          kCIInputIntensityKey: min(level, 1.0) * 1.25
                       ])
                   }
                   // Textur (Gras, Stoff, Metall)
                   if detail > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
-                          kCIInputRadiusKey: 2.5,
-                          kCIInputIntensityKey: min(detail, 1.0) * 0.5
+                          kCIInputRadiusKey: 2.2,
+                          kCIInputIntensityKey: min(detail, 1.0) * 0.58
                       ])
                   }
                   // Lokaler Detailkontrast ("3D-Pop")
                   if clarity > 0.02 {
                       image = image.applyingFilter("CIUnsharpMask", parameters: [
                           kCIInputRadiusKey: 8.0,
-                          kCIInputIntensityKey: min(clarity, 1.0) * 0.45
+                          kCIInputIntensityKey: min(clarity, 1.0) * 0.50
                       ])
                   }
                   return image
@@ -559,6 +558,24 @@ jobs:
                   if abs(black) > 0.001 {
                       image = image.applyingFilter("CIColorControls", parameters: [
                           kCIInputBrightnessKey: black
+                      ])
+                  }
+
+                  // Tone Mapping: echter Verarbeitungsblock, nicht nur ein Reglerwert.
+                  // Sony "XR Contrast Booster" und LG "Precision Dimming" arbeiten beide mit
+                  // Highlight-Rolloff + Shadow-Lift, aber mit anderer Kurve und anderem Radius.
+                  let toneMap = UserDefaults.standard.integer(forKey: "pxSharpToneMap")
+                  if toneMap == 1 {
+                      image = image.applyingFilter("CIHighlightShadowAdjust", parameters: [
+                          "inputHighlightAmount": 0.75,
+                          "inputShadowAmount": 0.25,
+                          "inputRadius": 2.5
+                      ])
+                  } else if toneMap == 2 {
+                      image = image.applyingFilter("CIHighlightShadowAdjust", parameters: [
+                          "inputHighlightAmount": 0.80,
+                          "inputShadowAmount": 0.40,
+                          "inputRadius": 5.0
                       ])
                   }
 
@@ -817,6 +834,7 @@ jobs:
               @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
               @AppStorage("pxSharpMode") private var mode: Int = 5
               @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.0
+              @AppStorage("pxSharpToneMap") private var toneMap: Int = 0
               @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
 
               /// Bildmodi, abgeleitet aus den echten Feature-Listen der beiden Geräte:
@@ -838,32 +856,32 @@ jobs:
                       deblock = 0.25; denoise = 0.0; vibrance = 0.30
                       saturation = 0.60; contrast = 0.62; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
-                      clearImage = 0.50
-                      wbR = 1.020; wbG = 1.000; wbB = 0.980
+                      clearImage = 0.50; toneMap = 1
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
                       level = 0.75; detail = 0.55; clarity = 0.38
-                      deblock = 0.20; denoise = 0.0; vibrance = 0.45
-                      saturation = 0.68; contrast = 0.68; temp = 0.850
+                      deblock = 0.20; denoise = 0.0; vibrance = 0.30
+                      saturation = 0.60; contrast = 0.68; temp = 0.850
                       gamma = 1.00; black = 0.0; hdrPeak = 900
-                      clearImage = 0.70
-                      wbR = 0.990; wbG = 1.000; wbB = 1.030
+                      clearImage = 0.70; toneMap = 1
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93
                       level = 0.60; detail = 0.45; clarity = 0.25
                       deblock = 0.25; denoise = 0.0; vibrance = 0.35
                       saturation = 0.62; contrast = 0.60; temp = 0.6375
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 0.45
-                      wbR = 0.990; wbG = 1.000; wbB = 1.020
+                      clearImage = 0.45; toneMap = 2
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid
                       level = 0.80; detail = 0.60; clarity = 0.35
-                      deblock = 0.20; denoise = 0.0; vibrance = 0.50
-                      saturation = 0.70; contrast = 0.70; temp = 0.9375
+                      deblock = 0.20; denoise = 0.0; vibrance = 0.35
+                      saturation = 0.62; contrast = 0.70; temp = 0.9375
                       gamma = 1.00; black = 0.0; hdrPeak = 950
-                      clearImage = 0.65
-                      wbR = 0.980; wbG = 1.000; wbB = 1.040
+                      clearImage = 0.65; toneMap = 2
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 6: // Game (minimal)
                       level = 0.50; detail = 0.25; clarity = 0.05
@@ -909,6 +927,7 @@ jobs:
                   gammaR = 1.0; gammaG = 1.0; gammaB = 1.0
                   deblock = 0.0
                   clearImage = 0.0
+                  toneMap = 0
                   metalFX = false; pixelPerfect = false
               }
 
@@ -917,7 +936,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 35").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 36").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -938,6 +957,11 @@ jobs:
                       Text("Abgeleitet aus den Gerätedaten: Sony = XR Clear Image + XR Contrast Booster 20 + RGB Triluminos Max + Live Colour. LG = Precision Dimming Ultra + Dynamic QNED Color Pro + α8 AI Super Upscaling. Farbtemperaturen nach Messwerten: Filmmaker 6500 K, Standard 6300–7600 K, Vivid 9300–10000 K.")
                           .font(.caption)
                           .foregroundColor(.secondary)
+                      Picker("Tone Mapping", selection: $toneMap) {
+                          Text("Aus (linear)").tag(0)
+                          Text("Sony Contrast Booster").tag(1)
+                          Text("LG Precision Dimming").tag(2)
+                      }
                       Text("Bildschärfe").font(.headline)
                       VStack(alignment: .leading, spacing: 4) {
                           HStack {
