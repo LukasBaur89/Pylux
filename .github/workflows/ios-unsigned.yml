@@ -957,15 +957,15 @@ jobs:
           PATCH_EOF
 
           python3 - <<'PATCH_EOF'
-          p = 'ios/Pylux/Services/AppReviewHelper.swift'
+          p = 'ios/Pylux/App/PyluxAppDelegate.swift'
           s = open(p, encoding='utf-8').read()
-          if 'pxsharp-disabled' not in s:
-              s = s.replace('    func requestReviewIfEligible(in scene: UIWindowScene?) {\n',
-                            '    func requestReviewIfEligible(in scene: UIWindowScene?) {\n        // pxsharp-disabled\n        return\n', 1)
+          old = '                AppReviewHelper.shared.requestReviewIfEligible(in: scene)\n'
+          if old in s:
+              s = s.replace(old, '                // pxsharp: App-Store-Bewertung deaktiviert\n', 1)
               open(p, 'w', encoding='utf-8').write(s)
               print('review: disabled')
           else:
-              print('review: already disabled')
+              print('review: anchor not found')
           PATCH_EOF
 
           git --no-pager diff --stat | tail -8
