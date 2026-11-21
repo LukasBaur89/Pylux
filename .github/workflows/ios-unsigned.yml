@@ -747,6 +747,32 @@ jobs:
                   ])
               }
 
+              private var shadowKernel: CIColorKernel?
+              private var shadowTried = false
+
+              /// Schattendurchzeichnung ("Black Stabilizer"): hebt NUR die dunklen
+              /// Bereiche an, multiplikativ - echtes Schwarz bleibt schwarz. Das ist die
+              /// Funktion, die auf Fernsehern Nachtszenen lesbar macht, ohne sie grau zu
+              /// waschen.
+              private func shadowKernelInstance() -> CIColorKernel? {
+                  if shadowTried { return shadowKernel }
+                  shadowTried = true
+                  let src = """
+                  kernel vec4 pxShadow(__sample c, float amount, float knee) {
+                      float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+                      float w = 1.0 - smoothstep(0.0, knee, l);
+                      // quadratische Gewichtung: ganz nah an Schwarz fast nichts,
+                      // ab 10 % volle Wirkung -> kein Grauschleier
+                      float ww = w * w;
+                      vec3 o = c.rgb * (1.0 + amount * ww);
+                      return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  shadowKernel = CIColorKernel(source: src)
+                  if shadowKernel == nil { os_log(.error, log: videoViewLog, "[px] shadow kernel compile failed") }
+                  return shadowKernel
+              }
+
               /// Lokales Dimming (Mini-LED-Emulation). Ein echter Mini-LED-Fernseher dimmt
               /// die Hintergrundbeleuchtung zonenweise: dunkle Bildbereiche bekommen weniger
               /// Licht, helle bleiben stehen. Ergebnis sind tiefe Schwärzen und ein deutlich
@@ -996,10 +1022,28 @@ jobs:
                       ])
                   }
 
+                  // ---- Schattendurchzeichnung (Black Stabilizer) --------------------
+                  // Manueller Regler + Automatik. Die Automatik greift umso staerker,
+                  // je dunkler die Szene ist (Szenenmedian), und nie bei Tageslicht.
+                  let shadowManual = Float(UserDefaults.standard.object(forKey: "pxSharpShadow") as? Double ?? 0.35)
+                  var shadowAmt = Double(shadowManual)
+                  if autoOn && autoStrength > 0.01 {
+                      let dark = min(max((0.32 - scene.mean) / 0.32, 0.0), 1.0)
+                      shadowAmt = min(1.0, shadowAmt + dark * Double(autoStrength) * 0.9)
+                  }
+                  if shadowAmt > 0.02, let sk = shadowKernelInstance(),
+                     let out = sk.apply(extent: image.extent,
+                                        roiCallback: { _, rect in rect },
+                                        arguments: [image, NSNumber(value: shadowAmt), NSNumber(value: 0.45)]) {
+                      image = out
+                  }
+
                   var denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0)
                   if autoOn {
                       // Bis zu +80 % Filter in verrauschten Szenen
-                      denoise = min(1.0, denoise * (1.0 + Float(scene.noise) * autoStrength * 1.2))
+                      // In dunklen Szenen mehr Filter: die Schattenstufe verstaerkt dort Rauschen.
+                      let darkBoost = 1.0 + Float(scene.darkFrac) * 0.45
+                      denoise = min(1.0, denoise * (1.0 + Float(scene.noise) * autoStrength * 1.2) * darkBoost)
                   }
                   if denoise > 0.02 {
                       // Kantenerhaltend: glaettet nur, was innerhalb der Luma-Schwelle liegt.
@@ -1118,7 +1162,10 @@ jobs:
                   // Mini-LED-Emulation: zonenweises Dimming auf der finalen Panel-Auflösung.
                   let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.25)
                   if localDim > 0.02 && !hdrActive {
-                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * 1.00, zone: 36)
+                      // In dunklen Szenen das Dimming zuruecknehmen: sonst laufen die
+                      // Schatten noch weiter zu (die Schattenstufe hat sie gerade geoeffnet).
+                      let dimScale = 0.30 + 0.70 * Float(min(max(scene.mean / 0.40, 0.0), 1.0))
+                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * dimScale, zone: 36)
                   }
 
                   // Farbtemperatur als NORMALISIERTE Matrix. CITemperatureAndTint hat die
@@ -1250,6 +1297,10 @@ jobs:
                               bounds: canvasRect,
                               colorSpace: outSpace)
 
+                  let renderStart = CACurrentMediaTime()
+                  cb.addCompletedHandler { _ in
+                      PXScene.shared.noteRenderMs((CACurrentMediaTime() - renderStart) * 1000.0)
+                  }
                   cb.present(drawable)
                   cb.commit()
 
@@ -1288,12 +1339,28 @@ jobs:
               // Glaettung (langsam, damit es nicht pumpt)
               private var gainEma: Double = 1.0
               private var noiseEma: Double = 0.0
+              private var renderMsEma: Double = 0
 
               // Vom Renderer gelesen
               private(set) var gain: Double = 1.0
               private(set) var noise: Double = 0.0
               private(set) var mean: Double = 0.5
               private(set) var p90: Double = 0.85
+              private(set) var darkFrac: Double = 0.0
+
+              /// Gemessene GPU-Zeit pro Bild in Millisekunden (gleitender Mittelwert).
+              /// 16,6 ms = 60 fps. Alles darunter ist Reserve, alles darueber kostet Bilder.
+              var renderMs: Double {
+                  lock.lock()
+                  defer { lock.unlock() }
+                  return renderMsEma
+              }
+
+              func noteRenderMs(_ ms: Double) {
+                  lock.lock()
+                  renderMsEma += (ms - renderMsEma) * 0.08
+                  lock.unlock()
+              }
 
               private init() {}
 
@@ -1325,18 +1392,29 @@ jobs:
 
                   var hist = [Int](repeating: 0, count: 256)
                   var n = 0
-                  var gradSum = 0.0
-                  var gradN = 0
+                  var flatSum = 0.0
+                  var flatN = 0
+                  var darkSum = 0.0
+                  var darkN = 0
                   var y = 4
                   while y < h - 4 {
                       let row = y * bpr
                       var x = 4
-                      while x < w - 5 {
+                      while x < w - 6 {
                           let v = Int(p[row + x])
                           hist[v] += 1
                           n += 1
-                          gradSum += Double(abs(Int(p[row + x + 1]) - v))
-                          gradN += 1
+                          // Rauschen nur in FLACHEN Stellen messen: nur wenn auch der
+                          // Pixel 2 Stellen weiter fast gleich ist. Sonst misst man
+                          // Textur statt Rauschen.
+                          let v1 = Int(p[row + x + 1])
+                          let v2 = Int(p[row + x + 2])
+                          let d = abs(v1 - v)
+                          if abs(v2 - v) <= 6 && d <= 24 {
+                              flatSum += Double(d)
+                              flatN += 1
+                          }
+                          if v < 90 { darkSum += Double(v); darkN += 1 }
                           x += 6
                       }
                       y += 6
@@ -1366,10 +1444,13 @@ jobs:
                   var g = min(gMid, gHigh, 1.18)
                   g = max(g, 0.85)
 
-                  // Rauschen: mittlerer Horizontalgradient. Saubere Szenen liegen bei ~1,
-                  // verrauschte bei 4-8 (Stufe/255).
-                  let grad = gradSum / Double(gradN)
-                  let nz = min(max((grad - 0.8) / 6.0, 0.0), 1.0)
+                  // Rauschen: mittlerer Gradient in flachen Stellen. Sauber ~0.3-1.0,
+                  // verrauscht 2-6 (Stufen/255).
+                  let grad = flatN > 0 ? flatSum / Double(flatN) : 0.0
+                  let nz = min(max((grad - 0.7) / 3.5, 0.0), 1.0)
+                  // Wie dunkel ist die Szene wirklich? (Anteil unter 90/255)
+                  let darkFrac = n > 0 ? Double(darkN) / Double(n) : 0.0
+                  _ = darkSum
 
                   lock.lock()
                   // Asymmetrische Glaettung: schnell runter (nicht ueberbelichten),
@@ -1381,6 +1462,7 @@ jobs:
                   noise = noiseEma
                   mean = p50
                   self.p90 = p90
+                  self.darkFrac = darkFrac
                   lock.unlock()
               }
           }
@@ -1682,6 +1764,8 @@ jobs:
                       o["pxAutoNoise"] = String(format: "%.3f", PXScene.shared.noise)
                       o["pxSceneMedian"] = String(format: "%.3f", PXScene.shared.mean)
                       o["pxSceneP90"] = String(format: "%.3f", PXScene.shared.p90)
+                      o["pxRenderMs"] = String(format: "%.2f", PXScene.shared.renderMs)
+                      o["pxSceneDark"] = String(format: "%.3f", PXScene.shared.darkFrac)
                       if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
                           return String(data: data, encoding: .utf8) ?? "{}"
                       }
@@ -1758,6 +1842,7 @@ jobs:
               @AppStorage("pxSharpColorEngine") private var colorEngine: Bool = true
               @AppStorage("pxSharpAuto") private var auto: Bool = true
               @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
+              @AppStorage("pxSharpShadow") private var shadow: Double = 0.35
 
               // MARK: - Bildmodi
 
@@ -1771,6 +1856,7 @@ jobs:
                   gamut = 0
                   auto = true
                   autoStrength = 0.65
+                  shadow = 0.35
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
                       level = 0.35; detail = 0.15; clarity = 0.08
@@ -1778,16 +1864,16 @@ jobs:
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.00; localDim = 0.15; toneMap = 0; deband = 0.35
-                      brightness = 0.48
+                      brightness = 0.48; shadow = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 1: // Sony BRAVIA 7 II (XR Clear Image, Contrast Booster)
-                      level = 0.85; detail = 0.50; clarity = 0.20
+                      level = 0.90; detail = 0.55; clarity = 0.20
                       deblock = 0.45; denoise = 0.30; vibrance = 0.22
                       saturation = 0.58; contrast = 0.55; temp = 0.475
                       gamma = 1.00; black = 0.0; hdrPeak = 800
-                      clearImage = 0.60; toneMap = 1; localDim = 0.30; deband = 0.30
-                      brightness = 0.47
+                      clearImage = 0.65; toneMap = 1; localDim = 0.30; deband = 0.30
+                      brightness = 0.47; shadow = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 2: // Sony Vivid / Live Colour
@@ -1796,17 +1882,17 @@ jobs:
                       deblock = 0.45; denoise = 0.30; vibrance = 0.30
                       saturation = 0.62; contrast = 0.58; temp = 0.545
                       gamma = 1.00; black = 0.0; hdrPeak = 900
-                      clearImage = 0.70; toneMap = 2; localDim = 0.40; deband = 0.30
-                      brightness = 0.50
+                      clearImage = 0.72; toneMap = 2; localDim = 0.40; deband = 0.30
+                      brightness = 0.50; shadow = 0.40
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
-                      level = 0.90; detail = 0.55; clarity = 0.22
+                      level = 0.95; detail = 0.62; clarity = 0.22
                       deblock = 0.45; denoise = 0.30; vibrance = 0.25
                       saturation = 0.60; contrast = 0.56; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 0.65; toneMap = 2; localDim = 0.30; deband = 0.35
-                      brightness = 0.47
+                      clearImage = 0.70; toneMap = 2; localDim = 0.30; deband = 0.30
+                      brightness = 0.47; shadow = 0.40
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -1816,16 +1902,16 @@ jobs:
                       saturation = 0.62; contrast = 0.58; temp = 0.555
                       gamma = 1.00; black = 0.0; hdrPeak = 950
                       clearImage = 0.72; toneMap = 2; localDim = 0.45; deband = 0.30
-                      brightness = 0.50
+                      brightness = 0.50; shadow = 0.45
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
-                  case 6: // Game (minimal, max. Reaktionszeit)
-                      level = 0.60; detail = 0.30; clarity = 0.05
-                      deblock = 0.40; denoise = 0.20; vibrance = 0.10
-                      saturation = 0.50; contrast = 0.50; temp = 0.50
+                  case 6: // Game (scharf, Schatten lesbar, wenig Filter)
+                      level = 0.90; detail = 0.60; clarity = 0.18
+                      deblock = 0.35; denoise = 0.15; vibrance = 0.12
+                      saturation = 0.52; contrast = 0.52; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.15; toneMap = 0; localDim = 0.15; deband = 0.20
-                      brightness = 0.49
+                      clearImage = 0.50; toneMap = 0; localDim = 0.15; deband = 0.20
+                      brightness = 0.49; shadow = 0.50
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   default: // Ultra (max. Detail)
@@ -1834,7 +1920,7 @@ jobs:
                       saturation = 0.54; contrast = 0.52; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.70; toneMap = 0; localDim = 0.25; deband = 0.30
-                      brightness = 0.47
+                      brightness = 0.47; shadow = 0.35
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   }
@@ -1907,6 +1993,7 @@ jobs:
                   lumaSharpen = true
                   auto = true
                   autoStrength = 0.65
+                  shadow = 0.35
                   metalFX = false; pixelPerfect = false
               }
 
@@ -1936,7 +2023,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 47 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 48 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2097,6 +2184,9 @@ jobs:
                       sliderRow("Lokales Dimming (Mini-LED-Zonen)", value: $localDim, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", localDim * 100),
                                 rule: "Je höher, desto tiefer werden dunkle Bildbereiche abgesenkt, helle bleiben stehen. Über 60 % laufen Schatten zu. 30 % entspricht dem QNED93.")
+                      sliderRow("Schattendurchzeichnung (Black Stabilizer)", value: $shadow, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", shadow * 100),
+                                rule: "Je höher, desto mehr werden nur die dunklen Bereiche angehoben — echtes Schwarz bleibt schwarz. Für Nachtszenen im Spiel: 50 %.")
                       Picker("Tone Mapping (Kontrastkurve)", selection: $toneMap) {
                           Text("Aus (linear)").tag(0)
                           Text("Sony Contrast Booster").tag(1)
@@ -2149,6 +2239,7 @@ jobs:
                               Text("Ist es zu bunt: Sättigung −0,05, Farbumfang auf BT.709.")
                               Text("Ist es zu blass: Farbdynamik +10 %, Sättigung +0,05.")
                               Text("Ist es unscharf: zuerst Detail, dann Clear Image, zuletzt Bildschärfe.")
+                              Text("Nachtszenen zu dunkel: Schattendurchzeichnung auf 50–60 %.")
                               Text("Rauscht es: MPEG-Blöcke auf 50 %, Rauschfilter auf 40 %.")
                               Text("Schatten laufen zu: lokales Dimming −10 %, Schwarzwert +1 %.")
                               Text("Farbstich: Farbtemperatur in 0,025-Schritten, dann Weißabgleich RGB.")
