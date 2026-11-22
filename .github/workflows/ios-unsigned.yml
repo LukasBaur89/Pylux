@@ -3700,6 +3700,54 @@ jobs:
               print('review: anchor not found')
           PATCH_EOF
 
+          python3 - <<'CTRL_BITRATE_PATCH'
+          # Die angeforderte Bitrate wirklich an die Konsole senden.
+          p = 'lib/src/ctrl.c'
+          s = open(p, encoding='utf-8').read()
+          if 'PXSHARP_REAL_BITRATE' not in s:
+              old = '\t\tuint8_t bitrate[4] = { 0 };\n'
+              new = ('\t\tuint8_t bitrate[4] = { 0 };\n'
+                     '\t\t// PXSHARP_REAL_BITRATE: Kodierung wie streaming_type darunter --\n'
+                     '\t\t// 32 Bit little-endian, in kbps. Vorher standen hier immer vier\n'
+                     '\t\t// Nullbytes, deshalb waehlte die Konsole die Rate selbst und der\n'
+                     '\t\t// Regler in der App hatte keine Wirkung.\n'
+                     '\t\t{\n'
+                     '\t\t\tunsigned int px_br = session->connect_info.video_profile.bitrate;\n'
+                     '\t\t\tif(px_br >= 2000 && px_br <= 200000)\n'
+                     '\t\t\t{\n'
+                     '\t\t\t\tbitrate[0] = px_br & 0xff;\n'
+                     '\t\t\t\tbitrate[1] = (px_br >> 8) & 0xff;\n'
+                     '\t\t\t\tbitrate[2] = (px_br >> 16) & 0xff;\n'
+                     '\t\t\t\tbitrate[3] = (px_br >> 24) & 0xff;\n'
+                     '\t\t\t}\n'
+                     '\t\t}\n')
+              if old in s:
+                  s = s.replace(old, new, 1)
+                  open(p, 'w', encoding='utf-8').write(s)
+                  print('ctrl.c: Bitrate wird jetzt gesendet')
+              else:
+                  print('ctrl.c: Anker nicht gefunden')
+          else:
+              print('ctrl.c: schon gepatcht')
+          CTRL_BITRATE_PATCH
+
+          python3 - <<'CAPS_PATCH'
+          p = 'ios/Pylux/Views/SettingsView.swift'
+          s = open(p, encoding='utf-8').read()
+          n = 0
+          for old, new in [
+              ('(bitrate >= 2000 && bitrate <= 50000)', '(bitrate >= 2000 && bitrate <= 200000)'),
+              ('prefs.bitrate < 2000 || prefs.bitrate > 50000', 'prefs.bitrate < 2000 || prefs.bitrate > 200000'),
+              ('Valid range: 2000 - 50000 kbps', 'Valid range: 2000 - 200000 kbps'),
+              ('// Bitrate (with validation 2000-50000, matches Android)', '// Bitrate (PXSharp: 2000-200000 kbps)'),
+          ]:
+              if old in s:
+                  s = s.replace(old, new, 1); n += 1
+          if n:
+              open(p, 'w', encoding='utf-8').write(s)
+          print('caps entfernt:', n)
+          CAPS_PATCH
+
           python3 - <<'QUICKPANEL_PATCH'
           # Bild-Panel direkt im Stream (ohne die Einstellungen zu verlassen).
           p = 'ios/Pylux/Views/StreamView.swift'
@@ -3780,11 +3828,11 @@ jobs:
           p = 'ios/Pylux/Views/SettingsView.swift'
           s = open(p, encoding='utf-8').read()
           pat = re.compile(r'case 1080: return codec\s*[=><!]+\s*1\s*\?\s*\d+\s*:\s*\d+')
-          new = 'case 1080: return codec >= 1 ? 30000 : 25000'
+          new = 'case 1080: return codec >= 1 ? 60000 : 40000'
           s2, n = pat.subn(new, s, count=1)
           if n:
               open(p, 'w', encoding='utf-8').write(s2)
-              print('bitrate auto: 1080p -> 30000 (H.265) / 25000 (H.264)')
+              print('bitrate auto: 1080p -> 60000 (H.265) / 40000 (H.264)')
           else:
               print('bitrate auto: anchor not found')
           BITRATE_PATCH_EOF
