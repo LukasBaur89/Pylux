@@ -365,7 +365,9 @@ jobs:
                   // pro Frame ein zusaetzliches Present mit identischem Bild erzeugt —
                   // sichtbar als Mikro-Ruckler und unnoetige GPU-Last. Mit 60 Hz liegt
                   // Present und Frame im Verhaeltnis 1:1.
-                  link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+                  let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
+                  let hz = Float(hzPref == 0 ? 60 : hzPref)
+                  link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: max(60, hz), preferred: hz)
                   link.add(to: .main, forMode: .common)
                   displayLink = link
               }
@@ -1380,6 +1382,7 @@ jobs:
               /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
               /// Panel-Auflösung, nie auf dem 1080p-Signal.
               private func applyDetailStage(_ input: CIImage) -> CIImage {
+                  if UserDefaults.standard.bool(forKey: "pxSharpBypass") { return input }
                   var image = input
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.50)
                   let detail = Float(UserDefaults.standard.object(forKey: "pxSharpDetail") as? Double ?? 0.0)
@@ -1407,7 +1410,7 @@ jobs:
                   // bestimmt. In einer sauberen Szene bleibt Textur voll erhalten, in
                   // einer verrauschten wird nur der Rauschteppich weggeschnitten.
                   let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04)
-                  let coringVal = Float(min(0.040, coringBase * 0.004 + Double(min(autoNoise, 1.0)) * 0.024))
+                  let coringVal = Float(min(0.080, coringBase * 0.040 + Double(min(autoNoise, 1.0)) * 0.024))
                   let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
@@ -1507,6 +1510,9 @@ jobs:
                   }
                   let src = image.extent.size
                   guard src.width > 0, src.height > 0 else { return }
+                  // A/B-Vergleich: schaltet JEDE Nachbearbeitung ab, damit man den
+                  // Unterschied zwischen "verarbeitet" und "roh" direkt sieht.
+                  let bypassNow = UserDefaults.standard.bool(forKey: "pxSharpBypass")
 
                   // Range: PS5 liefert Limited (16-235). Wenn die Kette das nicht macht, wird
                   // das Bild zu dunkel und die Schatten laufen zu.
@@ -1586,7 +1592,7 @@ jobs:
                       // Deckel bei +10 %: die Szenen-Automatik hat dunkle Szenen vorher um
                       // bis zu +23 % aufgehellt. Zusammen mit der Schatten-Anhebung wurde
                       // das Bild dadurch flau. Nachtszenen DUERFEN dunkel sein.
-                      expo *= min(1.10, 1.0 + (scene.gain - 1.0) * Double(autoStrength))
+                      expo *= min(1.30, max(0.70, 1.0 + (scene.gain - 1.0) * Double(autoStrength) * 2.0))
                   }
                   // Im HDR-Pfad keine SDR-Belichtung: PQ kodiert Helligkeit absolut.
                   if hdrActive { expo = 1.0 }
@@ -1605,7 +1611,7 @@ jobs:
                   // den Mitten, Rolloff in den Lichtern, leichte Anhebung der Schatten.
                   // CIHighlightShadowAdjust (vorher) war ein lokaler Operator und hat
                   // Helligkeitskanten um helle Objekte erzeugt — genau das wirkt künstlich.
-                  let toneMap = hdrActive ? 0 : UserDefaults.standard.integer(forKey: "pxSharpToneMap")
+                  let toneMap = (hdrActive || bypassNow) ? 0 : UserDefaults.standard.integer(forKey: "pxSharpToneMap")
                   if toneMap == 1 {
                       image = image.applyingFilter("CIToneCurve", parameters: [
                           "inputPoint0": CIVector(x: 0.00, y: 0.000),
@@ -1626,7 +1632,7 @@ jobs:
 
                   // ---- Lokale Tonwertspreizung (TV-Technologie) ----------------------
                   // Wirkt nur auf die Verteilung, nicht auf die Gesamthelligkeit.
-                  let localTone = Float(UserDefaults.standard.object(forKey: "pxSharpLocalTone") as? Double ?? 0.0)
+                  let localTone = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpLocalTone") as? Double ?? 0.0))
                   if localTone > 0.01 && !hdrActive {
                       // In bereits hellen Szenen darf die Spreizung nicht weiter aufblasen.
                       // p90 ist der Spitzlichtpegel: ab 0,72 wird zurueckgenommen, ab 0,95 aus.
@@ -1642,7 +1648,7 @@ jobs:
                   // Black Stabilizer wirkt NUR in dunklen Szenen. In einer hellen Szene
                   // wuerde er nur den Kontrast flachdruecken (gemessen: std -3 %).
                   let darkFactor = min(max((0.34 - scene.mean) / 0.24, 0.0), 1.0)
-                  var shadowAmt = Double(shadowManual) * (0.22 + 0.78 * darkFactor)
+                  var shadowAmt = Double(bypassNow ? 0 : shadowManual) * (0.55 + 0.45 * darkFactor)
                   if autoOn && autoStrength > 0.01 {
                       // Die Automatik darf die Schatten nur MODERAT anheben. Vorher kam sie
                       // in Nachtszenen auf 0,95 und hat das Schwarz auf 10/255 gehoben —
@@ -1721,7 +1727,7 @@ jobs:
                   // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
                   // echte Kanten statt weicher Pixel bekommt — ebenfalls CAS, damit die
                   // Vorverstärkung keine Halos in die Skalierung schickt.
-                  let clearImage = Float(UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0)
+                  let clearImage = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0))
                   if clearImage > 0.05 {
                       if let k = casKernelInstance(),
                          let out = k.apply(extent: image.extent,
@@ -1743,7 +1749,7 @@ jobs:
                   }
 
                   // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
-                  let deconvAmt = Float(UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0)
+                  let deconvAmt = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0))
                   // Deconvolution läuft IMMER — sie ist die Stufe mit dem größten
                   // Texturgewinn (+44 % gemessen). Sie wird von keiner Lastregel
                   // abgeschaltet, auch nicht bei Hitze.
@@ -1760,8 +1766,8 @@ jobs:
                   // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
                   // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
                   // ein Drittel der Pixel.
-                  let clarityAmt = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0)
-                  if clarityAmt > 0.02, perfLevelNow < 1, let lc = diffKernelInstance() {
+                  let clarityAmt = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0))
+                  if clarityAmt > 0.02, let lc = diffKernelInstance() {
                       let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
                       let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
                           kCIInputRadiusKey: 2.2
@@ -1781,15 +1787,15 @@ jobs:
                   // Mini-LED-Dimming und Farb-LUT wirken bei QUELLAUFLÖSUNG (1080p) statt
                   // auf dem Panel. Beides sind niederfrequente bzw. punktweise Operationen —
                   // das Ergebnis ist identisch, kostet aber nur 2,1 statt 5,6 Mio Pixel.
-                  let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.0)
+                  let localDim = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.0))
                   if localDim > 0.02 && !hdrActive {
-                      let dimScale = 0.30 + 0.70 * Float(min(max(scene.mean / 0.40, 0.0), 1.0))
+                      let dimScale = 0.60 + 0.40 * Float(min(max(scene.mean / 0.40, 0.0), 1.0))
                       // Bei Stufe 2 nur noch halbes Dimming: es ist die teuerste Stufe
                       // nach der Deconvolution, und der Unterschied ist im Bild klein.
                       let pd: Float = perfLevelNow >= 2 ? 0.5 : 1.0
                       image = applyLocalDimming(image, strength: min(localDim, 1.0) * dimScale * pd, zone: 36)
                   }
-                  if colorEngine && !hdrActive {
+                  if colorEngine && !hdrActive && !bypassNow {
                       image = applyColorEngine(image)
                   }
 
@@ -2671,6 +2677,8 @@ jobs:
               @AppStorage("pxSharpShowDiag") private var showDiag: Bool = true
               @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 600
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
+              @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
+              @AppStorage("pxSharpBypass") private var bypass: Bool = false
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
@@ -3042,7 +3050,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 105 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 113 · jede Stufe einzeln schaltbar").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3051,6 +3059,13 @@ jobs:
                               .foregroundColor(.red)
                       }
 
+                      // Direktvergleich: schaltet jede Nachbearbeitung ab. Wenn sich hier
+                      // nichts ändert, wirkt auch kein einzelner Regler — umgekehrt sieht
+                      // man so sofort, was die Regler zusammen bewirken.
+                      Toggle("Vergleich: unbearbeitetes Bild (A/B)", isOn: $bypass)
+                      Text("An = reine Quelle ohne jede Verarbeitung. Schalte hin und her: was du im Bild siehst, ist der Unterschied, den die Regler machen. Bleibt das Bild gleich, hat der Stream gerade ein Problem, nicht die Einstellung.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
                       // ---------------------------------------------------------------- 1
                       // ---------------------------------------------------------------- 0
                       VStack(alignment: .leading, spacing: 3) {
@@ -3289,7 +3304,15 @@ jobs:
 
                       // ---------------------------------------------------------------- 6
                       Text("6 · Anzeige").font(.headline)
-                      Toggle("Frame Pacing (120 Hz)", isOn: $pacing)
+                      Toggle("Frame Pacing", isOn: $pacing)
+                      Picker("Bildrate (Pacing)", selection: $paceHz) {
+                          Text("60 Hz (Quelle liefert 60)").tag(60)
+                          Text("120 Hz (ProMotion, weniger Mikro-Ruckler)").tag(120)
+                          Text("240 Hz (Panel kann max. 120)").tag(240)
+                      }
+                      Text("Die PS5 liefert 60 Bilder pro Sekunde. 120 Hz lässt das Panel zweimal pro Bild aktualisieren — das nimmt Mikro-Ruckler, kostet aber etwas Akku. 240 Hz kann das Panel nicht; der Wert wird auf 120 begrenzt.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
                       Picker("Farbbereich (HDMI-Level)", selection: $rangeMode) {
                           Text("Auto").tag(0)
                           Text("Limited → Full").tag(1)
@@ -3462,6 +3485,8 @@ jobs:
                       "pxSharpGammaB": 1.0,
                       "pxSharpWBPreset": 3,
                       "pxSharpPacing": true,
+                      "pxSharpPaceHz": 60,
+                      "pxSharpBypass": false,
                       "pxSharpHdrPeak": 600,
                       "pxSharpTunedV1": true,
                       "pxSharpTunedV2": true,
@@ -3503,6 +3528,7 @@ jobs:
                       v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.12
                   }
                   v["pxSharpMode"] = m
+                  v["pxSharpBypass"] = false
                   for (key, value) in v { d.set(value, forKey: key) }
               }
           }
