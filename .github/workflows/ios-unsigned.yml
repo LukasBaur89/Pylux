@@ -1417,13 +1417,13 @@ jobs:
                   let coringVal = Float(min(0.080, coringBase * 0.040 + Double(min(autoNoise, 1.0)) * 0.024))
                   let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
                   let master = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
-                  let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp * autoDetailScale * master
-                  let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp * autoDetailScale * master
+                  let s1 = min(max(level, 0), 1) * 2.10 * sharpDamp * autoDetailScale * master
+                  let s2 = min(max(detail, 0), 1) * 1.70 * sharpDamp * autoDetailScale * master
                   // Texturtiefe: vergroessert den zweiten Radius (2,7 -> 5,0 px auf dem
                   // Panel). Kleine Radien = Feinststruktur, grosse Radien = Texturtiefe
                   // (Gras, Stoff, Mauerwerk). Kostet keine zusaetzlichen Samples.
                   let texDepth = Float(min(max(UserDefaults.standard.object(forKey: "pxSharpTexDepth") as? Double ?? 0.0, 0.0), 1.0))
-                  let r2v = 2.7 + 2.3 * texDepth
+                  let r2v = 2.2 + 6.5 * texDepth
                   let s2v = s2 * (1.0 - 0.25 * texDepth)
                   if s1 > 0.02 || s2 > 0.02 {
                       if engineNew, let k = cas2KernelInstance() {
@@ -1452,7 +1452,7 @@ jobs:
                           }
                           if detail > 0.02 {
                               image = image.applyingFilter("CIUnsharpMask", parameters: [
-                                  kCIInputRadiusKey: 2.2,
+                                  kCIInputRadiusKey: 3.2,
                                   kCIInputIntensityKey: min(detail, 1.0) * 0.58
                               ])
                           }
@@ -1815,15 +1815,15 @@ jobs:
                   if clarityAmt > 0.02, let lc = diffKernelInstance() {
                       let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
                       let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
-                          kCIInputRadiusKey: 2.2
+                          kCIInputRadiusKey: 3.2
                       ]).cropped(to: small.extent)
                       let up = blurred.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
                       // Die Begrenzung waechst mit dem Regler: bei 0,28 sind es 0,062,
                       // bei 1,0 sind es 0,105. Gemessen erzeugt das bis 0,105 noch
                       // KEINE Halos (0,0 % Ueberschuss), also ist der Spielraum da.
-                      let clarLimit = 0.045 + Double(min(clarityAmt, 1.0)) * 0.060
+                      let clarLimit = 0.055 + Double(min(clarityAmt, 1.0)) * 0.075
                       if let out = lc.apply(extent: image.extent, arguments: [
-                          image, up, NSNumber(value: min(clarityAmt, 1.0) * 1.10), NSNumber(value: clarLimit)
+                          image, up, NSNumber(value: min(clarityAmt, 1.0) * 1.50), NSNumber(value: clarLimit)
                       ]) {
                           image = out
                       }
@@ -2747,7 +2747,7 @@ jobs:
               @AppStorage("pxSharpGammaG") private var gammaG: Double = 1.0
               @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
               @AppStorage("pxSharpMode") private var mode: Int = 9
-              @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.0
+              @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.20
               @AppStorage("pxSharpToneMap") private var toneMap: Int = 0
               @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
               @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.0
@@ -2761,7 +2761,7 @@ jobs:
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
               @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
               @AppStorage("pxSharpChroma") private var chroma: Double = 0.0
-              @AppStorage("pxSharpCoring") private var coring: Double = 0.04
+              @AppStorage("pxSharpCoring") private var coring: Double = 0.03
               @AppStorage("pxSharpHalo") private var halo: Double = 0.12
               @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
               @AppStorage("pxSharpScaler") private var scaler: Int = 0
@@ -2857,8 +2857,8 @@ jobs:
                       deblock = 0.14; denoise = 0.06; vibrance = 0.0
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
-                      brightness = 0.50; shadow = 0.12; chroma = 0.0; coring = 0.04
+                      clearImage = 0.20; toneMap = 0; localDim = 0.0; deband = 0.30
+                      brightness = 0.50; shadow = 0.12; chroma = 0.0; coring = 0.03
                       deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -2868,8 +2868,8 @@ jobs:
                       deblock = 0.14; denoise = 0.06; vibrance = 0.04
                       saturation = 0.52; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 900
-                      clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
-                      brightness = 0.50; shadow = 0.14; chroma = 0.0; coring = 0.04
+                      clearImage = 0.20; toneMap = 0; localDim = 0.0; deband = 0.30
+                      brightness = 0.50; shadow = 0.14; chroma = 0.0; coring = 0.03
                       deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -3195,9 +3195,9 @@ jobs:
                       Text("Fernseher schärfen die Helligkeit, nicht die Farbe. Dadurch entstehen an Kanten keine farbigen Ränder.")
                           .font(.caption)
                           .foregroundColor(.secondary)
-                      sliderRow("Detail (Textur, 2,7 px)", value: $detail, range: 0...1, step: 0.05,
+                      sliderRow("Texturdichte (Feinstruktur 2–5 px)", value: $detail, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", detail * 100),
-                                rule: "Je höher, desto mehr Struktur in Gras, Stoff, Metall. Der stärkste Hebel für „gestochen scharf“ — gemessen +155 % Detail bei +10 % Rauschen.")
+                                rule: "Feine Struktur: Gras, Kies, Stoff, Metall. Das ist das Band, in dem sich Detaildichte abspielt — nicht die Kante. Gemessen +170 % Textur bei 10 % Rauschen.")
                       sliderRow("Farbschärfe (Chroma)", value: $chroma, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", chroma * 100),
                                 rule: "Je höher, desto schärfer werden FARBkanten (Schildtext, Zierleisten, Lichter). Der Stream liefert Farbe nur mit halber Auflösung (4:2:0) — dieser Regler holt die Präzision zurück, ohne Helligkeitsrauschen zu erzeugen.")
@@ -3213,9 +3213,9 @@ jobs:
                       sliderRow("Clear Image (Vor-Schärfung 1080p)", value: $clearImage, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", clearImage * 100),
                                 rule: "Je höher, desto mehr echte Kanten bekommt der Upscaler zu sehen. Über 75 % werden feine Linien unruhig.")
-                      sliderRow("Klarheit (lokaler Kontrast, 8 px)", value: $clarity, range: 0...1, step: 0.05,
+                      sliderRow("Texturtiefe (Grobband 8–16 px)", value: $clarity, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", clarity * 100),
-                                rule: "Je höher, desto mehr Tiefe und „Pop“. Über 30 % wirkt es wie ein Grauschleier auf Kanten.")
+                                rule: "Grobe Textur und Tiefe: Mauerwerk, Fels, Bodenwellen. Großes Band, wenig Halo. Über 40 % wirkt es wie ein Grauschleier.")
                       sliderRow("Rauschfilter (MPEG)", value: $denoise, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", denoise * 100),
                                 rule: "Je höher, desto glatter verrauschte Flächen. Über 60 % wirkt das Bild plastikartig.")
@@ -3518,14 +3518,14 @@ jobs:
                       "pxSharpCastFix": 0.0,
                       "pxSharpDeblock": 0.14,
                       "pxSharpDeband": 0.30,
-                      "pxSharpClearImage": 0.0,
+                      "pxSharpClearImage": 0.20,
                       "pxSharpToneMap": 0,
                       "pxSharpLocalDim": 0.0,
                       "pxSharpBrightness": 0.5,
                       "pxSharpShadow": 0.12,
                       "pxSharpTvBrightness": false,
                       "pxSharpChroma": 0.0,
-                      "pxSharpCoring": 0.04,
+                      "pxSharpCoring": 0.03,
                       "pxSharpHalo": 0.12,
                       "pxSharpDeconv": 0.0,
                       "pxSharpAuto": false,
@@ -3609,6 +3609,8 @@ jobs:
               @AppStorage("pxSharpBrightness") private var brightness: Double = 0.5
               @AppStorage("pxSharpGamut") private var gamut: Int = 0
               @AppStorage("pxSharpMode") private var mode: Int = 9
+              @AppStorage("pxSharpMaster") private var master: Double = 1.0
+              @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
 
               var body: some View {
                   VStack(alignment: .leading, spacing: 0) {
@@ -3644,6 +3646,28 @@ jobs:
                       .padding(.horizontal, 18)
                       .padding(.bottom, 12)
                       .onChange(of: mode) { m in SharpnessRow.applyPreset(m) }
+
+                      HStack(spacing: 12) {
+                          Text("Stärke")
+                              .font(.system(size: 12, weight: .semibold))
+                              .foregroundColor(.white.opacity(0.8))
+                          Slider(value: $master, in: 0...2).tint(.white)
+                          Text(String(format: "%.0f%%", master * 100))
+                              .font(.system(size: 12, design: .monospaced))
+                              .foregroundColor(.white.opacity(0.6))
+                              .frame(width: 46, alignment: .trailing)
+                      }
+                      .padding(.horizontal, 18)
+                      .padding(.bottom, 6)
+
+                      Toggle(isOn: $autoEngine) {
+                          Text("Bildautomatik")
+                              .font(.system(size: 13))
+                              .foregroundColor(.white.opacity(0.85))
+                      }
+                      .toggleStyle(.switch)
+                      .padding(.horizontal, 18)
+                      .padding(.bottom, 12)
 
                       // Alle Einstellungen — dieselbe Ansicht wie in den Einstellungen,
                       // nur über dem Spiel.
