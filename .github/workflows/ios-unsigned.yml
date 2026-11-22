@@ -2311,6 +2311,17 @@ jobs:
               /// base64-kodiert zurück. Fuer die visuelle Kontrolle von Farbe/Schaerfe
               /// ohne USB-Verbindung.
               func shotJPEG(maxW: Int = 1200) -> String {
+                  shotImage(maxW: maxW, png: false)
+              }
+
+              /// Verlustfreie Aufnahme (PNG). Wichtig fuer Messungen: JPEG rechnet in
+              /// 4:2:0 herunter und halbiert damit die Farbaufloesung — Farbkanten und
+              /// Banding lassen sich damit nicht ehrlich beurteilen.
+              func shotPNG(maxW: Int = 1920) -> String {
+                  shotImage(maxW: maxW, png: true)
+              }
+
+              private func shotImage(maxW: Int, png: Bool) -> String {
                   lock.lock()
                   guard let img = image, let ctx = ctx, let sp = space, w > 8, h > 8 else {
                       lock.unlock()
@@ -2328,9 +2339,16 @@ jobs:
                       return "{\"ok\":false}"
                   }
                   let ui = UIImage(cgImage: cg)
-                  guard let data = ui.jpegData(compressionQuality: 0.88) else { return "{\"ok\":false}" }
-                  let b64 = data.base64EncodedString()
-                  return "{\"ok\":true,\"w\":\(ow),\"h\":\(oh),\"jpeg\":\"\(b64)\"}"
+                  let data: Data?
+                  if png {
+                      data = ui.pngData()
+                  } else {
+                      data = ui.jpegData(compressionQuality: 0.88)
+                  }
+                  guard let d = data else { return "{\"ok\":false}" }
+                  let b64 = d.base64EncodedString()
+                  let fmt = png ? "png" : "jpeg"
+                  return "{\"ok\":true,\"w\":\(ow),\"h\":\(oh),\"\(fmt)\":\"\(b64)\"}"
               }
 
               func probe() -> String {
@@ -2518,9 +2536,13 @@ jobs:
                   }
                   if path.hasPrefix("/shot") {
                       // Aktuelles Bild als JPEG (base64). ?w=2732 liefert volle Panelbreite
-                      // fuer 1:1-Ausschnitte.
+                      // fuer 1:1-Ausschnitte. ?fmt=png liefert verlustfrei (fuer Messungen).
                       let w = Int(val("w") ?? "") ?? 1200
-                      return PXProbe.shared.shotJPEG(maxW: min(max(w, 200), 2732))
+                      let width = min(max(w, 200), 2732)
+                      if val("fmt") == "png" {
+                          return PXProbe.shared.shotPNG(maxW: min(width, 1920))
+                      }
+                      return PXProbe.shared.shotJPEG(maxW: width)
                   }
                   if path.hasPrefix("/state") {
                       var o: [String: Any] = [:]
@@ -2713,7 +2735,7 @@ jobs:
                       saturation = 0.52; contrast = 0.49; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
                       clearImage = 0.85; toneMap = 2; localDim = 0.0; deband = 0.14
-                      brightness = 0.38; shadow = 0.22; chroma = 0.60; coring = 0.62
+                      brightness = 0.38; shadow = 0.22; chroma = 0.80; coring = 0.62
                       deconv = 0.30
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -2935,7 +2957,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 104 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 105 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
