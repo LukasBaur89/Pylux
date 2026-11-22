@@ -719,7 +719,13 @@ jobs:
                       // smoothstep blendet die Schaerfung dort aus, laesst Textur stehen.
                       float bandC = dot(range, vec3(0.299, 0.587, 0.114));
                       float bandGuard = smoothstep(0.0025, 0.020, bandC);
-                      vec3 outv = c.rgb + (edge + tex) * bandGuard;
+                      // STRUKTUR-GATTER: Nur dort verstaerken, wo wirklich Struktur ist.
+                      // Vorher wurde in leeren Flaechen (Himmel, Wand, Haut) genauso
+                      // geschaerft wie an Kanten -- dadurch bekamen 11 Prozentpunkte
+                      // vorher glatter Flaeche Rauschen. Gemessen: Rauschen x1.29.
+                      float structure = smoothstep(0.004, 0.028, bandC);
+                      float edgeGain = mix(0.35, 1.0, structure);
+                      vec3 outv = c.rgb + (edge * edgeGain + tex * structure) * bandGuard;
                       vec3 lim  = range * clampK + 0.003;
                       outv = clamp(outv, mn - lim, mx + lim);
                       return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
@@ -1581,7 +1587,7 @@ jobs:
                   // Panel). Kleine Radien = Feinststruktur, grosse Radien = Texturtiefe
                   // (Gras, Stoff, Mauerwerk). Kostet keine zusaetzlichen Samples.
                   let texDepth = Float(min(max(UserDefaults.standard.object(forKey: "pxSharpTexDepth") as? Double ?? 0.0, 0.0), 1.0))
-                  let r2v = 2.2 + 6.5 * texDepth
+                  let r2v = 2.2 + 3.2 * texDepth
                   let s2v = s2 * (1.0 - 0.25 * texDepth)
                   // Je haerter geschaerft wird, desto enger wird der Ueberschwinger
                   // begrenzt. Gemessen: bei level 1.0 + detail 0.8 entstanden an Haaren
@@ -1707,9 +1713,11 @@ jobs:
                       autoDetailScale = Float(1.0 - min(0.40, nz * 0.50))
                       // Hitzeschutz: meldet die Lastregel Stufe 2, Schaerfe zuruecknehmen,
                       // bevor Bilder ausfallen.
+                      // Hitzeschutz erst bei .critical. Bei .serious stehen viele Geraete
+                      // im Dauerbetrieb -- dort dauerhaft 15 % Schaerfe wegzunehmen sah
+                      // aus wie "das Bild wird unscharf", ohne einen Bildausfall zu verhindern.
                       let th = ProcessInfo.processInfo.thermalState
-                      if th == .serious { autoDetailScale *= 0.85 }
-                      if th == .critical { autoDetailScale *= 0.60 }
+                      if th == .critical { autoDetailScale *= 0.70 }
                   }
                   if autoExpo < 0.999 || autoExpo > 1.001 {
                       let f = CGFloat(pow(autoExpo, 1.0 / 2.2))
@@ -1949,7 +1957,7 @@ jobs:
                      let out = ck.apply(extent: image.extent,
                                         roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
                                         arguments: [image, NSNumber(value: 1.8),
-                                                    NSNumber(value: chromaAmt * 1.8), NSNumber(value: 0.006)]) {
+                                                    NSNumber(value: chromaAmt * 1.8), NSNumber(value: 0.010)]) {
                       image = out
                   }
 
