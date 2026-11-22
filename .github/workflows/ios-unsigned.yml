@@ -710,6 +710,7 @@ jobs:
                   // mit weicher Schulter. CIColorControls schneidet bei 1.0 hart ab - in
                   // hellen Szenen waren das gemessen 3,6 % ausgebrannte Pixel.
                   let contrastRawL = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
+                  let masterC = min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)
                   let cScaled = 0.5 + (Double(contrastRawL) - 0.5) * masterC
                   let contrastK = 0.8 + min(max(cScaled, 0), 1) * 0.4
                   // Backlight-Emulation: 0.5 = neutral, 0 = -0.8 Blenden, 1 = +0.8 Blenden.
@@ -724,7 +725,6 @@ jobs:
                   if kn > 0.0001 {
                       gainR /= kn; gainG /= kn; gainB /= kn
                   }
-                  let masterC = min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)
                   let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75 * masterC
                   let kVib = Double(vib) * 1.10 * masterC
                   // Hue-selektives Farbmanagement (wie "Color Detail" bei Sony/LG):
