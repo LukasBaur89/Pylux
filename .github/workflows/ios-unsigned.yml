@@ -3326,7 +3326,7 @@ jobs:
                           .foregroundColor(.secondary)
                       Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
                       Toggle("HDR deaktivieren (Test bei Farbfehlern)", isOn: $hdrOff)
-                      Text("Für echtes HDR: Codec auf „H.265 + HDR" stellen und auf der PS5 HDR einschalten. Dann liefert die Konsole 10 Bit, und das Panel nutzt seine 1600 Nits — der einzige echte HDR-Weg, der hier möglich ist.")
+                      Text("Für echtes HDR: Codec auf \"H.265 + HDR\" stellen und auf der PS5 HDR einschalten. Dann liefert die Konsole 10 Bit, und das Panel nutzt seine 1600 Nits — der einzige echte HDR-Weg, der hier möglich ist.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
