@@ -2689,7 +2689,7 @@ jobs:
               @AppStorage("pxSharpColorEngine") private var colorEngine: Bool = true
               @AppStorage("pxSharpAuto") private var auto: Bool = false
               @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
-              @AppStorage("pxSharpShadow") private var shadow: Double = 0.0
+              @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
               @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
               @AppStorage("pxSharpChroma") private var chroma: Double = 0.0
               @AppStorage("pxSharpCoring") private var coring: Double = 0.04
@@ -2789,18 +2789,18 @@ jobs:
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
-                      brightness = 0.50; shadow = 0.0; chroma = 0.0; coring = 0.04
+                      brightness = 0.50; shadow = 0.12; chroma = 0.0; coring = 0.04
                       deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 10: // TV-Max: alles, was messbar gewinnt — ohne erfundene Details
                       gamut = 1
                       level = 0.65; detail = 0.0; clarity = 0.0
-                      deblock = 0.14; denoise = 0.06; vibrance = 0.06
-                      saturation = 0.53; contrast = 0.52; temp = 0.50
+                      deblock = 0.14; denoise = 0.06; vibrance = 0.04
+                      saturation = 0.52; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 900
-                      clearImage = 0.0; toneMap = 1; localDim = 0.0; deband = 0.30
-                      brightness = 0.52; shadow = 0.0; chroma = 0.0; coring = 0.04
+                      clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
+                      brightness = 0.50; shadow = 0.14; chroma = 0.0; coring = 0.04
                       deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -2896,7 +2896,7 @@ jobs:
                   case 9:
                       return "Der Referenzpfad: BT.709, D65, Sättigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Eine Luma-Schärfung (CAS 0,65), halo-begrenzt, dazu Debanding 0,30 gegen die niedrige Bitrate. Gemessen: +5 % Schärfe, −13 % Banding gegenüber der reinen Quelle, ohne erfundene Details (Energie über der Quell-Nyquistfrequenz: 0,04 %)."
                   case 10:
-                      return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % Sättigung, kein Clipping), Kontrastkurve 1 (+9 % empfundene Schärfe), Debanding 0,30, CAS 0,65. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nächsten kommt — mehr Punch, aber keine erfundenen Details."
+                      return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % Sättigung, kein Clipping), Schattendurchzeichnung 0,14 (greift nur unter 34 % Bildhelligkeit), Debanding 0,30, CAS 0,65. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nächsten kommt — mehr Punch, aber keine erfundenen Details."
                   default:
                       return "Maximale Detail-Schärfung (Textur 2,7 px) bei neutraler Farbe. Nimm ihn, wenn du die PS5-Oberfläche oder Text scharf sehen willst."
                   }
@@ -3427,7 +3427,7 @@ jobs:
                       "pxSharpToneMap": 0,
                       "pxSharpLocalDim": 0.0,
                       "pxSharpBrightness": 0.5,
-                      "pxSharpShadow": 0.0,
+                      "pxSharpShadow": 0.12,
                       "pxSharpTvBrightness": false,
                       "pxSharpChroma": 0.0,
                       "pxSharpCoring": 0.04,
