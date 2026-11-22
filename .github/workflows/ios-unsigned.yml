@@ -133,6 +133,7 @@ jobs:
               private var mfxOut: MTLTexture?
               private var mfxKey = ""
               private var appliedPeak: Double = 0
+              private var appliedPanelFactor: CGFloat = 1.0
               private var lutData: Data?
               private var lutKey: String = ""
               private var colorLUTData: Data?
@@ -235,10 +236,15 @@ jobs:
                   guard let mv = metalView else { return }
                   let scale = window?.screen.scale ?? UIScreen.main.scale
                   if mv.contentScaleFactor != scale { mv.contentScaleFactor = scale }
-                  let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+                  // Panel-Aufloesung: 0,83 = 2266 statt 2732 px (31 % weniger Pixel).
+                  let factor: CGFloat = (UserDefaults.standard.object(forKey: "pxSharpPanel2x") as? Bool ?? false) ? 0.83 : 1.0
+                  appliedPanelFactor = factor
+                  let size = CGSize(width: (bounds.width * scale * factor).rounded(.down),
+                                    height: (bounds.height * scale * factor).rounded(.down))
                   if size.width > 0, size.height > 0, mv.drawableSize != size {
                       mv.drawableSize = size
-                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] drawableSize=%.0fx%.0f", size.width, size.height)
+                      os_log(.default, log: videoViewLog, "[StreamVideoUIView] drawableSize=%.0fx%.0f (Faktor %.2f)",
+                             size.width, size.height, Double(factor))
                   }
                   let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
                   diagLabel.isHidden = !showDiag
@@ -1283,6 +1289,19 @@ jobs:
               }
 
               func draw(in view: MTKView) {
+                  // ---- Panel-Aufloesung (Leistung) -----------------------------------
+                  // 0,83 = 2266 px statt 2732 px: 31 % weniger Pixel zu rechnen. Bei Hitze
+                  // haelt das die 60 fps, kostet rund 6 % Schaerfe. Der Layer skaliert die
+                  // Textur bilinear auf die volle Flaeche — bei 2266 px nicht zu sehen.
+                  let panelFactor: CGFloat = (UserDefaults.standard.object(forKey: "pxSharpPanel2x") as? Bool ?? false) ? 0.83 : 1.0
+                  if abs(panelFactor - appliedPanelFactor) > 0.0001 {
+                      appliedPanelFactor = panelFactor
+                      let scale = window?.screen.scale ?? UIScreen.main.scale
+                      let w = (bounds.width * scale * panelFactor).rounded(.down)
+                      let h = (bounds.height * scale * panelFactor).rounded(.down)
+                      if w > 0, h > 0 { view.drawableSize = CGSize(width: w, height: h) }
+                  }
+
                   // HDR-Peak live nachziehen (Panel-Headroom ändert sich mit der Display-Helligkeit)
                   if hdrActive {
                       let peak = UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600
@@ -2299,6 +2318,16 @@ jobs:
                       o["pxRenderMs"] = String(format: "%.2f", PXScene.shared.renderMs)
                       o["pxScreenBrightness"] = String(format: "%.2f", Double(UIScreen.main.brightness))
                       o["pxPerfLevel"] = String(PXScene.shared.perfLevel)
+                      // Thermischer Zustand des iPads: nominal / fair / serious / critical.
+                      // Damit laesst sich belegen, ob Einbrueche von der Waerme kommen.
+                      switch ProcessInfo.processInfo.thermalState {
+                      case .nominal: o["pxThermal"] = "nominal"
+                      case .fair: o["pxThermal"] = "fair"
+                      case .serious: o["pxThermal"] = "serious"
+                      case .critical: o["pxThermal"] = "critical"
+                      @unknown default: o["pxThermal"] = "?"
+                      }
+                      o["pxLowPower"] = ProcessInfo.processInfo.isLowPowerModeEnabled ? "1" : "0"
                       o["pxBitrateFactor"] = String(format: "%.2f", min(max((PXScene.shared.streamMbps - 7.0) / 15.0, 0.0), 1.0))
                       o["pxSceneDark"] = String(format: "%.3f", PXScene.shared.darkFrac)
                       if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
@@ -2355,6 +2384,7 @@ jobs:
               @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 600
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
+              @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
               @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
               @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
@@ -2663,7 +2693,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 91 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 92 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2917,6 +2947,10 @@ jobs:
                       Toggle("HDR deaktivieren (Test bei Farbfehlern)", isOn: $hdrOff)
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Text("Je größer der Unterschied zwischen Quelle und Panel, desto mehr bringt Scaling. 1:1 zeigt die echte Quelle (kleiner, aber pixelgenau).")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      Toggle("Panel 2× (2266 px statt 2732 px)", isOn: $panel2x)
+                      Text("Je niedriger die Panel-Auflösung, desto mehr Bilder pro Sekunde — und desto weicher die feinste Textur. Aus: volle 2732 px (maximale Schärfe). An: 2266 px, hält 60 fps, wenn das iPad warm wird. Wirkt sofort.")
                           .font(.caption)
                           .foregroundColor(.secondary)
 
