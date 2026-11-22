@@ -3700,6 +3700,20 @@ jobs:
               print('review: anchor not found')
           PATCH_EOF
 
+          python3 - <<'HOST_BITRATE_PATCH'
+          # Vierte Sperre: manuell angelegte Hosts hatten 15000 kbit fest im Code.
+          p = 'ios/Pylux/Views/ConnectInfoEntryView.swift'
+          s = open(p, encoding='utf-8').read()
+          old = 'let bitrate: UInt32 = r.h == 1080 ? 15000 : 10000'
+          new = 'let bitrate: UInt32 = UInt32(max(2000, min(200000, StreamPreferences.load().effectiveBitrate)))'
+          if old in s and 'StreamPreferences.load().effectiveBitrate)))' not in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('host-bitrate: nutzt jetzt die Einstellung')
+          else:
+              print('host-bitrate: nichts zu tun')
+          HOST_BITRATE_PATCH
+
           python3 - <<'CTRL_BITRATE_PATCH'
           # Die angeforderte Bitrate wirklich an die Konsole senden.
           p = 'lib/src/ctrl.c'
