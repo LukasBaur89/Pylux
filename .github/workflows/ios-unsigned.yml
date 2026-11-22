@@ -2695,8 +2695,8 @@ jobs:
               @AppStorage("pxSharpCoring") private var coring: Double = 0.04
               @AppStorage("pxSharpHalo") private var halo: Double = 0.12
               @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
-              @AppStorage("pxSharpScaler") private var scaler: Int = 1
-              @AppStorage("pxSharpEasu") private var easuAmt: Double = 1.0
+              @AppStorage("pxSharpScaler") private var scaler: Int = 0
+              @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -2790,7 +2790,7 @@ jobs:
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
                       brightness = 0.50; shadow = 0.0; chroma = 0.0; coring = 0.04
-                      deconv = 0.0; scaler = 1; easuAmt = 1.0; halo = 0.12
+                      deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 10: // TV-Max: alles, was messbar gewinnt — ohne erfundene Details
@@ -2801,7 +2801,7 @@ jobs:
                       gamma = 1.00; black = 0.0; hdrPeak = 900
                       clearImage = 0.0; toneMap = 1; localDim = 0.0; deband = 0.30
                       brightness = 0.52; shadow = 0.0; chroma = 0.0; coring = 0.04
-                      deconv = 0.0; scaler = 1; easuAmt = 1.0; halo = 0.12
+                      deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 8: // Referenz: reiner Durchlauf, keine Nachbearbeitung
@@ -2894,9 +2894,9 @@ jobs:
                   case 7:
                       return "Kalibriert: BT.709 (kein Nativ-Farbraum), D65, nur +4 % Sättigung, weiches Dimming. So sieht ein abgeglichener Fernseher im Cinema-Modus aus — wenn dir alles andere zu bunt ist, nimm den."
                   case 9:
-                      return "Der Referenzpfad: BT.709, D65, Sättigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Eine Luma-Schärfung (CAS 0,65) plus edge-director-Kernel, beides halo-begrenzt, dazu Debanding 0,30 gegen die niedrige Bitrate. Gemessen: +5 % Schärfe, −13 % Banding gegenüber der reinen Quelle, ohne erfundene Details (Energie über der Quell-Nyquistfrequenz: 0,04 %)."
+                      return "Der Referenzpfad: BT.709, D65, Sättigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Eine Luma-Schärfung (CAS 0,65), halo-begrenzt, dazu Debanding 0,30 gegen die niedrige Bitrate. Gemessen: +5 % Schärfe, −13 % Banding gegenüber der reinen Quelle, ohne erfundene Details (Energie über der Quell-Nyquistfrequenz: 0,04 %)."
                   case 10:
-                      return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % Sättigung, kein Clipping), Kontrastkurve 1 (+9 % empfundene Schärfe), Debanding 0,30, CAS 0,65 + Edge-Director. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nächsten kommt — mehr Punch, aber keine erfundenen Details."
+                      return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % Sättigung, kein Clipping), Kontrastkurve 1 (+9 % empfundene Schärfe), Debanding 0,30, CAS 0,65. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nächsten kommt — mehr Punch, aber keine erfundenen Details."
                   default:
                       return "Maximale Detail-Schärfung (Textur 2,7 px) bei neutraler Farbe. Nimm ihn, wenn du die PS5-Oberfläche oder Text scharf sehen willst."
                   }
@@ -3438,8 +3438,8 @@ jobs:
                       "pxSharpGamut": 0,
                       "pxSharpColorEngine": true,
                       "pxSharpLumaSharpen": true,
-                      "pxSharpScaler": 1,
-                      "pxSharpEasu": 1.0,
+                      "pxSharpScaler": 0,
+                      "pxSharpEasu": 0.6,
                       "pxSharpWB_R": 1.0,
                       "pxSharpWB_G": 1.0,
                       "pxSharpWB_B": 1.0,
