@@ -146,6 +146,8 @@ jobs:
               private var diffTried = false
               private var ldKernel: CIColorKernel?
               private var ldTried = false
+              private var upKernel: CIKernel?
+              private var upTried = false
               private let diagLabel = UILabel()
               private var frameCount = 0
               private var fpsWindowStart = CACurrentMediaTime()
@@ -1195,6 +1197,40 @@ jobs:
                   return ldKernel
               }
 
+              // MARK: - Kanten-Upscaler (Core Image, ohne MetalFX)
+
+              /// Kantenbewusstes Hochskalieren als CIKernel. Basis ist bewusst die
+              /// bilineare Abtastung (immer gueltig), darauf kommt ein Detailzuschlag,
+              /// der auf die lokale Min/Max-Spanne begrenzt wird. Dadurch sind Halos
+              /// konstruktiv ausgeschlossen — anders als bei Lanczos, das ueber Kanten
+              /// hinausschwingt.
+              private func upscaleKernelInstance() -> CIKernel? {
+                  if upTried { return upKernel }
+                  upTried = true
+                  let src = """
+                  kernel vec4 pxUpscale(sampler src, float invScale, float sharp, float clampK) {
+                      vec2 p = destCoord() * invScale;
+                      vec2 b = floor(p) + 0.5;
+                      vec4 c = sample(src, p);
+                      vec4 s0 = sample(src, b + vec2(-0.5, -0.5));
+                      vec4 s1 = sample(src, b + vec2( 0.5, -0.5));
+                      vec4 s2 = sample(src, b + vec2(-0.5,  0.5));
+                      vec4 s3 = sample(src, b + vec2( 0.5,  0.5));
+                      vec4 mn = min(min(s0, s1), min(s2, s3));
+                      vec4 mx = max(max(s0, s1), max(s2, s3));
+                      vec4 avg = (s0 + s1 + s2 + s3) * 0.25;
+                      vec4 detail = c - avg;
+                      vec4 lim = (mx - mn) * clampK;
+                      detail = clamp(detail, -lim, lim);
+                      vec3 o = c.rgb + detail.rgb * sharp;
+                      o = clamp(o, mn.rgb, mx.rgb);
+                      return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  upKernel = CIKernel(source: src)
+                  return upKernel
+              }
+
               private func applyLocalDimming(_ input: CIImage, strength: Float, zone: CGFloat) -> CIImage {
                   guard strength > 0.02, let lc = localDimKernelInstance() else { return input }
                   let ext = input.extent
@@ -1642,10 +1678,29 @@ jobs:
                   switch currentMode {
                   case .fit:
                       let s = min(sx, sy)
-                      image = image.applyingFilter("CILanczosScaleTransform", parameters: [
-                          kCIInputScaleKey: s,
-                          kCIInputAspectRatioKey: 1.0
-                      ])
+                      let useKernelUp = (UserDefaults.standard.object(forKey: "pxSharpUpscale") as? Int ?? 0) == 1
+                      if useKernelUp, let uk = upscaleKernelInstance() {
+                          let outExt = CGRect(x: 0, y: 0,
+                                              width: (src.width * s).rounded(.down),
+                                              height: (src.height * s).rounded(.down))
+                          let upStrength = Float(UserDefaults.standard.object(forKey: "pxSharpUpScale") as? Double ?? 0.60)
+                          if let out = uk.apply(extent: outExt,
+                                                roiCallback: { _, rect in rect.insetBy(dx: -2, dy: -2) },
+                                                arguments: [image, NSNumber(value: 1.0 / s),
+                                                            NSNumber(value: upStrength), NSNumber(value: 0.55)]) {
+                              image = out
+                          } else {
+                              image = image.applyingFilter("CILanczosScaleTransform", parameters: [
+                                  kCIInputScaleKey: s,
+                                  kCIInputAspectRatioKey: 1.0
+                              ])
+                          }
+                      } else {
+                          image = image.applyingFilter("CILanczosScaleTransform", parameters: [
+                              kCIInputScaleKey: s,
+                              kCIInputAspectRatioKey: 1.0
+                          ])
+                      }
                   case .zoom:
                       let s = max(sx, sy)
                       image = image.applyingFilter("CILanczosScaleTransform", parameters: [
@@ -2458,6 +2513,8 @@ jobs:
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
               @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.25
+              @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
+              @AppStorage("pxSharpUpScale") private var upscaleAmount: Double = 0.60
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
               @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
               @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
@@ -2766,7 +2823,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 98 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 99 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3033,8 +3090,8 @@ jobs:
                       sliderRow("Texturtiefe (Struktur-Radius)", value: $texDepth, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", texDepth * 100),
                                 rule: "Je höher, desto größere Strukturen werden betont — Gras, Stoff, Mauerwerk, Rinde (Radius 2,7 bis 5,0 px). Je niedriger, desto mehr Feinstkontur. Über 70 % kann es an harten Kanten säumen.")
-                      Toggle("Kantenbewusstes Hochskalieren (MetalFX)", isOn: $metalFX)
-                      Text("Je größer der Sprung von 1080p auf das Panel, desto mehr bringt ein kantenbewusster Upscaler gegenüber Lanczos: Kanten werden entlang ihrer Richtung rekonstruiert statt weichgezeichnet — die Technik der Fernseher-Upscaler (XR, α9). Kostet etwas Leistung. Bei Farbfehlern wieder ausschalten.")
+                      Toggle("Kanten-Upscaler (CI-Kernel statt Lanczos)", isOn: $upscaleKernel)
+                      Text("Je größer der Sprung von 1080p auf das Panel, desto mehr bringt ein kantenbewusster Upscaler: Die Detailanhebung wird auf die lokale Helligkeitsspanne begrenzt, deshalb sind Halos konstruktiv ausgeschlossen. Aus: Lanczos (Apple-Standard). An: Kernel-Upscaler.")
                           .font(.caption)
                           .foregroundColor(.secondary)
 
