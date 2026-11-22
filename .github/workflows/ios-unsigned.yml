@@ -1887,7 +1887,18 @@ jobs:
                   let h = CVPixelBufferGetHeightOfPlane(pb, 0)
                   let bpr = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
                   guard w > 32, h > 32 else { return }
+                  // 10-Bit-Streams liefern 16-Bit-Worte (0..1023). Der Analysator muss
+                  // das erkennen, sonst waeren alle Szenenwerte um Faktor 4 falsch.
+                  let fmtType = CVPixelBufferGetPixelFormatType(pb)
+                  let isTenBit = (fmtType == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                                  || fmtType == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)
+                  let maxVal = isTenBit ? 1023.0 : 255.0
                   let p = base.assumingMemoryBound(to: UInt8.self)
+                  let p16 = base.assumingMemoryBound(to: UInt16.self)
+                  func luma(_ x: Int, _ y: Int) -> Double {
+                      if isTenBit { return Double(p16[y * (bpr / 2) + x]) / maxVal * 255.0 }
+                      return Double(p[y * bpr + x]) / maxVal * 255.0
+                  }
 
                   var hist = [Int](repeating: 0, count: 256)
                   var n = 0
@@ -1900,14 +1911,14 @@ jobs:
                       let row = y * bpr
                       var x = 4
                       while x < w - 6 {
-                          let v = Int(p[row + x])
+                          let v = Int(luma(x, y))
                           hist[v] += 1
                           n += 1
                           // Rauschen nur in FLACHEN Stellen messen: nur wenn auch der
                           // Pixel 2 Stellen weiter fast gleich ist. Sonst misst man
                           // Textur statt Rauschen.
-                          let v1 = Int(p[row + x + 1])
-                          let v2 = Int(p[row + x + 2])
+                          let v1 = Int(luma(x + 1, y))
+                          let v2 = Int(luma(x + 2, y))
                           let d = abs(v1 - v)
                           if abs(v2 - v) <= 6 && d <= 24 {
                               flatSum += Double(d)
@@ -2638,7 +2649,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 86 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 87 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3185,6 +3196,23 @@ jobs:
           }
           // ---- ENDE PXSHARP_AUDIO_DSP ------------------------------------------------
           PX_AUDIO_EOF
+
+          python3 - <<'TENBIT_PATCH_EOF'
+          # Decoder auf 10-Bit-Ausgabe umstellen. Der HDR-Stream (PQ) hat in 8 Bit
+          # nur 256 Stufen fuer 10000 cd/m2 - das ist unbrauchbar. VideoToolbox
+          # liefert 10 Bit (0..1023 in 16-Bit-Worten), wenn wir es anfordern.
+          p = 'ios/Pylux/Bridge/VideoDecoder.m'
+          s = open(p, encoding='utf-8').read()
+          old = '        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),'
+          new = ('        (id)kCVPixelBufferPixelFormatTypeKey: '
+                 '@(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),')
+          if old in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('decoder: 10 Bit aktiviert')
+          else:
+              print('decoder: Anker nicht gefunden')
+          TENBIT_PATCH_EOF
 
           python3 - <<'METRICS_PATCH_EOF'
           # Stream-Messwerte (Bitrate, Paketverlust) bereitstellen.
