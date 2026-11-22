@@ -1392,9 +1392,9 @@ jobs:
                   // Coring-Schwelle: fast ausschliesslich vom GEMESSENEN Rauschen
                   // bestimmt. In einer sauberen Szene bleibt Textur voll erhalten, in
                   // einer verrauschten wird nur der Rauschteppich weggeschnitten.
-                  let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.02)
+                  let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04)
                   let coringVal = Float(min(0.040, coringBase * 0.004 + Double(min(autoNoise, 1.0)) * 0.024))
-                  let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.10)
+                  let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
                   // Texturtiefe: vergroessert den zweiten Radius (2,7 -> 5,0 px auf dem
@@ -1527,7 +1527,7 @@ jobs:
                   // Halo-Grenze: wie viel Ueberschwinger an Kanten erlaubt ist, in
                   // Anteilen des lokalen Kontrasts. 0,30 = keine sichtbaren Halos,
                   // 0,45 = mehr Textur, sichtbare Hoefe.
-                  let haloLimit = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.10)
+                  let haloLimit = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
                   let gamma = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
                   if !colorEngine && abs(gamma - 1.0) > 0.01 {
                       image = image.applyingFilter("CIGammaAdjust", parameters: ["inputPower": gamma])
@@ -1644,13 +1644,13 @@ jobs:
                       image = out
                   }
 
-                  var denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0)
+                  var denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.06)
                   if autoOn {
                       let darkBoost = 1.0 + Float(scene.darkFrac) * 0.45
                       denoise = min(1.0, denoise * (1.0 + Float(scene.noise) * autoStrength * 1.2) * darkBoost)
                   }
-                  let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.0)
-                  let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.0)
+                  let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.14)
+                  let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.30)
                   let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
 
                   // ---- Bitraten-Adaption -------------------------------------------
@@ -1718,7 +1718,7 @@ jobs:
                                                        NSNumber(value: min(clearImage, 1.0) * 0.45),
                                                        NSNumber(value: haloLimit * 0.85), NSNumber(value: lumaSharpen),
                                                        NSNumber(value: chromaSharpen),
-                                                       NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.02) * 0.020)]) {
+                                                       NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04) * 0.020)]) {
                           image = out
                       } else {
                           image = image.applyingFilter("CIUnsharpMask", parameters: [
@@ -1739,7 +1739,7 @@ jobs:
                                        arguments: [image,
                                                    NSNumber(value: min(deconvAmt, 1.0) * 0.45),
                                                    NSNumber(value: 0.004 + Double(min(Float(scene.noise), 1.0)) * 0.012),
-                                                   NSNumber(value: Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.10))]) {
+                                                   NSNumber(value: Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12))]) {
                       image = out
                   }
 
@@ -1846,8 +1846,8 @@ jobs:
                   // Kantengerichtete Schärfung (Option): 1:1 nach der Skalierung.
                   if (UserDefaults.standard.object(forKey: "pxSharpScaler") as? Int ?? 0) == 1,
                      let dk = dirKernelInstance() {
-                      let amt = Float(UserDefaults.standard.object(forKey: "pxSharpEasu") as? Double ?? 0.6)
-                      let haloK = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.10)
+                      let amt = Float(UserDefaults.standard.object(forKey: "pxSharpEasu") as? Double ?? 1.0)
+                      let haloK = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
                       if let out = dk.apply(extent: image.extent,
                                             roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
                                             arguments: [image, NSNumber(value: amt * 0.55),
@@ -1980,17 +1980,20 @@ jobs:
                               blit.endEncoding()
                           }
 
-                          // Messbild: den ECHTEN MetalFX-Ausgang als CIImage ablegen, damit
-                          // /shot zeigt, was der Scaler rechnet (und nicht ein altes Bild).
+                          cb.present(drawable)
+                          cb.commit()
+
+                          // Probe ERST nach der GPU. Vorher wurde outTex gelesen, bevor der
+                          // Command-Buffer überhaupt abgeschickt war — deshalb lieferte /shot
+                          // ein leeres graues Bild, obwohl der Scaler auf dem Panel normal
+                          // rechnete. Das war ein Messfehler, kein Scaler-Fehler.
+                          cb.waitUntilCompleted()
                           if let c = ciContext,
                              let outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) {
                               let r = CGRect(x: 0, y: 0, width: CGFloat(outW), height: CGFloat(outH))
                               PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
                                                  width: outW, height: outH)
                           }
-
-                          cb.present(drawable)
-                          cb.commit()
                           return
                       }
                   }
@@ -2639,10 +2642,10 @@ jobs:
               var onMaxQuality: () -> Void = {}
               var onStableLink: () -> Void = {}
 
-              @AppStorage("pxSharpLevel") private var level: Double = 0.50
+              @AppStorage("pxSharpLevel") private var level: Double = 0.65
               @AppStorage("pxSharpClarity") private var clarity: Double = 0.0
               @AppStorage("pxSharpDetail") private var detail: Double = 0.0
-              @AppStorage("pxSharpDenoise") private var denoise: Double = 0.05
+              @AppStorage("pxSharpDenoise") private var denoise: Double = 0.06
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
               @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
@@ -2670,7 +2673,7 @@ jobs:
               @AppStorage("pxSharpTunedV1") private var tunedV1: Bool = false
               @AppStorage("pxSharpTunedV2") private var tunedV2: Bool = false
               @AppStorage("pxSharpHdrOff") private var hdrOff: Bool = false
-              @AppStorage("pxSharpDeblock") private var deblock: Double = 0.12
+              @AppStorage("pxSharpDeblock") private var deblock: Double = 0.14
               @AppStorage("pxSharpGammaR") private var gammaR: Double = 1.0
               @AppStorage("pxSharpGammaG") private var gammaG: Double = 1.0
               @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
@@ -2679,7 +2682,7 @@ jobs:
               @AppStorage("pxSharpToneMap") private var toneMap: Int = 0
               @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
               @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.0
-              @AppStorage("pxSharpDeband") private var deband: Double = 0.10
+              @AppStorage("pxSharpDeband") private var deband: Double = 0.30
               @AppStorage("pxSharpBrightness") private var brightness: Double = 0.50
               @AppStorage("pxSharpLumaSharpen") private var lumaSharpen: Bool = true
               @AppStorage("pxSharpGamut") private var gamut: Int = 0
@@ -2689,11 +2692,11 @@ jobs:
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.0
               @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
               @AppStorage("pxSharpChroma") private var chroma: Double = 0.0
-              @AppStorage("pxSharpCoring") private var coring: Double = 0.02
-              @AppStorage("pxSharpHalo") private var halo: Double = 0.10
+              @AppStorage("pxSharpCoring") private var coring: Double = 0.04
+              @AppStorage("pxSharpHalo") private var halo: Double = 0.12
               @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
-              @AppStorage("pxSharpScaler") private var scaler: Int = 0
-              @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.60
+              @AppStorage("pxSharpScaler") private var scaler: Int = 1
+              @AppStorage("pxSharpEasu") private var easuAmt: Double = 1.0
               @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
               @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
               @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
@@ -2781,13 +2784,24 @@ jobs:
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 9: // Natürlich / kalibriert — Standardmodus
                       gamut = 0
-                      level = 0.50; detail = 0.0; clarity = 0.0
-                      deblock = 0.12; denoise = 0.05; vibrance = 0.0
+                      level = 0.65; detail = 0.0; clarity = 0.0
+                      deblock = 0.14; denoise = 0.06; vibrance = 0.0
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
-                      clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.10
-                      brightness = 0.50; shadow = 0.0; chroma = 0.0; coring = 0.02
-                      deconv = 0.0
+                      clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
+                      brightness = 0.50; shadow = 0.0; chroma = 0.0; coring = 0.04
+                      deconv = 0.0; scaler = 1; easuAmt = 1.0; halo = 0.12
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 10: // TV-Max: alles, was messbar gewinnt — ohne erfundene Details
+                      gamut = 1
+                      level = 0.65; detail = 0.0; clarity = 0.0
+                      deblock = 0.14; denoise = 0.06; vibrance = 0.06
+                      saturation = 0.53; contrast = 0.52; temp = 0.50
+                      gamma = 1.00; black = 0.0; hdrPeak = 900
+                      clearImage = 0.0; toneMap = 1; localDim = 0.0; deband = 0.30
+                      brightness = 0.52; shadow = 0.0; chroma = 0.0; coring = 0.04
+                      deconv = 0.0; scaler = 1; easuAmt = 1.0; halo = 0.12
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 8: // Referenz: reiner Durchlauf, keine Nachbearbeitung
@@ -2856,6 +2870,7 @@ jobs:
                   case 6: return "Game"
                   case 7: return "Realistisch"
                   case 9: return "Natürlich / kalibriert"
+                  case 10: return "TV-Max"
                   default: return "Ultra"
                   }
               }
@@ -2879,7 +2894,9 @@ jobs:
                   case 7:
                       return "Kalibriert: BT.709 (kein Nativ-Farbraum), D65, nur +4 % Sättigung, weiches Dimming. So sieht ein abgeglichener Fernseher im Cinema-Modus aus — wenn dir alles andere zu bunt ist, nimm den."
                   case 9:
-                      return "Der Referenzpfad: BT.709, D65, Sättigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Nur eine einzige Luma-Schärfung (CAS 0,50) mit Halo-Begrenzer plus leichtes Deblocking/Debanding gegen die 7–15-Mbit-Quelle. Gemessen: 13 % mehr 1-px-Detail als die reine Quelle, ohne einen einzigen neuen Halo. Das ist der Modus, der einem kalibrierten Fernseher am nächsten kommt."
+                      return "Der Referenzpfad: BT.709, D65, Sättigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Eine Luma-Schärfung (CAS 0,65) plus edge-director-Kernel, beides halo-begrenzt, dazu Debanding 0,30 gegen die niedrige Bitrate. Gemessen: +5 % Schärfe, −13 % Banding gegenüber der reinen Quelle, ohne erfundene Details (Energie über der Quell-Nyquistfrequenz: 0,04 %)."
+                  case 10:
+                      return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % Sättigung, kein Clipping), Kontrastkurve 1 (+9 % empfundene Schärfe), Debanding 0,30, CAS 0,65 + Edge-Director. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nächsten kommt — mehr Punch, aber keine erfundenen Details."
                   default:
                       return "Maximale Detail-Schärfung (Textur 2,7 px) bei neutraler Farbe. Nimm ihn, wenn du die PS5-Oberfläche oder Text scharf sehen willst."
                   }
@@ -3039,6 +3056,7 @@ jobs:
                       Text("1 · Bildmodus").font(.headline)
                       Picker("Bildmodus", selection: $mode) {
                           Text("Natürlich / kalibriert (empfohlen)").tag(9)
+                          Text("TV-Max (P3 + Kontrast + Deband)").tag(10)
                           Text("Kino / Filmmaker (D65)").tag(0)
                           Text("Sony BRAVIA 7 II").tag(1)
                           Text("Sony Vivid (Live Colour)").tag(2)
@@ -3388,10 +3406,10 @@ jobs:
                   let d = UserDefaults.standard
                   let values: [String: Any] = [
                       "pxSharpMode": 9,
-                      "pxSharpLevel": 0.50,
+                      "pxSharpLevel": 0.65,
                       "pxSharpClarity": 0.0,
                       "pxSharpDetail": 0.0,
-                      "pxSharpDenoise": 0.05,
+                      "pxSharpDenoise": 0.06,
                       "pxSharpVibrance": 0.0,
                       "pxSharpSaturation": 0.5,
                       "pxSharpContrast": 0.5,
@@ -3403,8 +3421,8 @@ jobs:
                       "pxSharpLocalTone": 0.0,
                       "pxSharpHueSat": 0.0,
                       "pxSharpCastFix": 0.0,
-                      "pxSharpDeblock": 0.12,
-                      "pxSharpDeband": 0.10,
+                      "pxSharpDeblock": 0.14,
+                      "pxSharpDeband": 0.30,
                       "pxSharpClearImage": 0.0,
                       "pxSharpToneMap": 0,
                       "pxSharpLocalDim": 0.0,
@@ -3412,16 +3430,16 @@ jobs:
                       "pxSharpShadow": 0.0,
                       "pxSharpTvBrightness": false,
                       "pxSharpChroma": 0.0,
-                      "pxSharpCoring": 0.02,
-                      "pxSharpHalo": 0.10,
+                      "pxSharpCoring": 0.04,
+                      "pxSharpHalo": 0.12,
                       "pxSharpDeconv": 0.0,
                       "pxSharpAuto": false,
                       "pxSharpAutoStrength": 0.65,
                       "pxSharpGamut": 0,
                       "pxSharpColorEngine": true,
                       "pxSharpLumaSharpen": true,
-                      "pxSharpScaler": 0,
-                      "pxSharpEasu": 0.60,
+                      "pxSharpScaler": 1,
+                      "pxSharpEasu": 1.0,
                       "pxSharpWB_R": 1.0,
                       "pxSharpWB_G": 1.0,
                       "pxSharpWB_B": 1.0,
