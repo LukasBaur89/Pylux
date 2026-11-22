@@ -1414,6 +1414,8 @@ jobs:
                   }
                   let autoStrength = Float(UserDefaults.standard.object(forKey: "pxSharpAutoStrength") as? Double ?? 0.65)
                   let scene = PXScene.shared
+                  // Lastregel: 0 = alles an, 1 = Klarheit aus, 2 = zusaetzlich Deconvolution aus
+                  let perfLevelNow = scene.perfLevel
                   // TV-Leuchtdichte und Szenen-Automatik in EINEM Durchgang (spart eine
                   // komplette Vollbild-Stufe).
                   var expo = tvComp
@@ -1568,7 +1570,7 @@ jobs:
 
                   // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
                   let deconvAmt = Float(UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0)
-                  if deconvAmt > 0.02, let k = deconvKernelInstance(),
+                  if deconvAmt > 0.02, perfLevelNow < 2, let k = deconvKernelInstance(),
                      let out = k.apply(extent: image.extent,
                                        roiCallback: { _, rect in rect.insetBy(dx: -3, dy: -3) },
                                        arguments: [image,
@@ -1582,7 +1584,7 @@ jobs:
                   // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
                   // ein Drittel der Pixel.
                   let clarityAmt = Float(UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0)
-                  if clarityAmt > 0.02, let lc = diffKernelInstance() {
+                  if clarityAmt > 0.02, perfLevelNow < 1, let lc = diffKernelInstance() {
                       let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
                       let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
                           kCIInputRadiusKey: 2.2
@@ -1605,7 +1607,10 @@ jobs:
                   let localDim = Float(UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.25)
                   if localDim > 0.02 && !hdrActive {
                       let dimScale = 0.30 + 0.70 * Float(min(max(scene.mean / 0.40, 0.0), 1.0))
-                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * dimScale, zone: 36)
+                      // Bei Stufe 2 nur noch halbes Dimming: es ist die teuerste Stufe
+                      // nach der Deconvolution, und der Unterschied ist im Bild klein.
+                      let pd: Float = perfLevelNow >= 2 ? 0.5 : 1.0
+                      image = applyLocalDimming(image, strength: min(localDim, 1.0) * dimScale * pd, zone: 36)
                   }
                   if colorEngine && !hdrActive {
                       image = applyColorEngine(image)
@@ -1892,13 +1897,23 @@ jobs:
               func noteRenderMs(_ ms: Double) {
                   lock.lock()
                   renderMsEma += (ms - renderMsEma) * 0.08
-                  // Lastregel: wenn die GPU ueber das Budget kommt, werden zuerst die
-                  // beiden unsichtbarsten Stufen abgeschaltet (Deband, Klarheit).
-                  // 10 s Sperre, damit es nicht hin- und herschaltet.
-                  if perfLevelStore == 0 && renderMsEma > 22.0 {
+                  // Lastregel in zwei Stufen. WICHTIG: Die Stufe muss im Renderer auch
+                  // gelesen werden (draw() fragt scene.perfLevel ab). Vorher war sie nur
+                  // eine Anzeige und hat nichts abgeschaltet.
+                  //   Stufe 1 (ueber 21 ms): Klarheit aus  — kaum sichtbar
+                  //   Stufe 2 (ueber 26 ms): zusaetzlich Deconvolution aus, Dimming halb
+                  // Rueckweg mit 8 s Sperre, damit es nicht flattert.
+                  let now = CACurrentMediaTime()
+                  if perfLevelStore == 0 && renderMsEma > 21.0 {
                       perfLevelStore = 1
-                      perfCooldown = CACurrentMediaTime() + 10.0
-                  } else if perfLevelStore == 1 && CACurrentMediaTime() > perfCooldown && renderMsEma < 18.5 {
+                      perfCooldown = now + 8.0
+                  } else if perfLevelStore == 1 && renderMsEma > 26.0 {
+                      perfLevelStore = 2
+                      perfCooldown = now + 8.0
+                  } else if perfLevelStore == 2 && now > perfCooldown && renderMsEma < 20.0 {
+                      perfLevelStore = 1
+                      perfCooldown = now + 8.0
+                  } else if perfLevelStore == 1 && now > perfCooldown && renderMsEma < 16.5 {
                       perfLevelStore = 0
                   }
                   lock.unlock()
@@ -2703,7 +2718,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 93 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 94 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
