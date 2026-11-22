@@ -1465,7 +1465,7 @@ jobs:
                   // einer verrauschten wird nur der Rauschteppich weggeschnitten.
                   let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04)
                   let coringVal = Float(min(0.080, coringBase * 0.040 + Double(min(autoNoise, 1.0)) * 0.024))
-                  let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
+                  var haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
                   let master = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
                   let s1 = min(max(level, 0), 1) * 2.10 * sharpDamp * autoDetailScale * master
                   let s2 = min(max(detail, 0), 1) * 1.70 * sharpDamp * autoDetailScale * master
@@ -1475,6 +1475,11 @@ jobs:
                   let texDepth = Float(min(max(UserDefaults.standard.object(forKey: "pxSharpTexDepth") as? Double ?? 0.0, 0.0), 1.0))
                   let r2v = 2.2 + 6.5 * texDepth
                   let s2v = s2 * (1.0 - 0.25 * texDepth)
+                  // Je haerter geschaerft wird, desto enger wird der Ueberschwinger
+                  // begrenzt. Gemessen: bei level 1.0 + detail 0.8 entstanden an Haaren
+                  // vor hellem Himmel dunkle Saeume (1,05 % Unterschwinger).
+                  let strengthNorm = min(1.0, (s1 + s2v) / 2.5)
+                  haloLimitD *= (1.0 - 0.55 * strengthNorm)
                   if s1 > 0.02 || s2 > 0.02 {
                       if engineNew, let k = cas2KernelInstance() {
                           let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -8, dy: -8) }
@@ -1594,7 +1599,9 @@ jobs:
                       autoDetailScale = Float(1.0 - min(0.40, nz * 0.50))
                       // Hitzeschutz: meldet die Lastregel Stufe 2, Schaerfe zuruecknehmen,
                       // bevor Bilder ausfallen.
-                      if sceneNow.perfLevel >= 2 { autoDetailScale *= 0.85 }
+                      let th = ProcessInfo.processInfo.thermalState
+                      if th == .serious { autoDetailScale *= 0.85 }
+                      if th == .critical { autoDetailScale *= 0.60 }
                   }
                   if autoExpo < 0.999 || autoExpo > 1.001 {
                       let f = CGFloat(pow(autoExpo, 1.0 / 2.2))
