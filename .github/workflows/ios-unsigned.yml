@@ -118,6 +118,7 @@ jobs:
 
               private var metalView: MTKView?
               private var ciContext: CIContext?
+              private var hdrContext: CIContext?
               private var commandQueue: MTLCommandQueue?
               private let bufferLock = NSLock()
               private var latestBuffer: CVPixelBuffer?
@@ -178,6 +179,17 @@ jobs:
                       .cacheIntermediates: false,
                       .workingColorSpace: CGColorSpaceCreateDeviceRGB()
                   ])
+                  // HDR braucht einen eigenen Kontext: PQ ist eine ABSOLUTE Helligkeits-
+                  // kodierung. Rechnet Core Image sie in den SDR-Arbeitsraum (DeviceRGB)
+                  // und wieder zurueck, gehen rund sieben Blenden verloren (gemessen:
+                  // 0,2 statt 30 cd/m2). Mit PQ als Arbeitsfarbraum findet keine
+                  // Umrechnung statt - die Codes bleiben unveraendert.
+                  if let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+                      hdrContext = CIContext(mtlDevice: device, options: [
+                          .cacheIntermediates: false,
+                          .workingColorSpace: pq
+                      ])
+                  }
 
                   let mv = MTKView(frame: bounds, device: device)
                   mv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -1753,7 +1765,7 @@ jobs:
                   let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
                   let composited = image.composited(over: canvas)
 
-                  let ctx = ciContext
+                  let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
                   if let c = ctx {
                       PXProbe.shared.set(composited, context: c, space: outSpace,
                                          width: Int(target.width), height: Int(target.height))
@@ -2626,7 +2638,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 85 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 86 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
