@@ -548,13 +548,24 @@ jobs:
                   let mb = bs.reduce(0, +) / Double(bs.count)
                   guard mr > 0.02, mg > 0.02, mb > 0.02 else { pxNote("Bild zu dunkel fuer eine Messung"); return }
 
-                  var gr = mg / mr; var gg = 1.0; var gb = mg / mb
+                  // WICHTIG: Die Messung liest Gamma-kodierte Werte, die Farb-LUT
+                  // multipliziert aber im LINEAREN Licht. Ein Verhaeltnis k im
+                  // Gamma-Raum entspricht k^2.2 linear -- ohne diese Umrechnung kam
+                  // die Korrektur nur zu 45 % an (gemessen: 6 % Reglerweg ergaben
+                  // 1,6 % Bildwirkung).
+                  let kR = mr / mg
+                  let kB = mb / mg
+                  if abs(kR - 1.0) < 0.004 && abs(kB - 1.0) < 0.004 {
+                      pxNote("Weiss ist bereits neutral — nichts zu korrigieren")
+                      return
+                  }
+                  var gr = pow(kR, 2.2); var gg = 1.0; var gb = pow(kB, 2.2)
                   let kn = 0.2126 * gr + 0.7152 * gg + 0.0722 * gb
                   if kn > 0.0001 { gr /= kn; gg /= kn; gb /= kn }
-                  // Begrenzen: nie mehr als +-6 %, sonst wird eine warme Szene kalt gerechnet.
-                  gr = min(max(gr, 0.94), 1.06)
-                  gg = min(max(gg, 0.94), 1.06)
-                  gb = min(max(gb, 0.94), 1.06)
+                  // Begrenzen: linear entspricht 0.85..1.18 etwa +-7 % im Bild.
+                  gr = min(max(gr, 0.85), 1.18)
+                  gg = min(max(gg, 0.85), 1.18)
+                  gb = min(max(gb, 0.85), 1.18)
                   let dbg = UserDefaults.standard
                   let oldR = (dbg.object(forKey: "pxSharpWB_R") as? Double) ?? 1.0
                   let oldG = (dbg.object(forKey: "pxSharpWB_G") as? Double) ?? 1.0
@@ -565,10 +576,6 @@ jobs:
                   let newR = alreadyShifted ? gr : combined.0
                   let newG = alreadyShifted ? gg : combined.1
                   let newB = alreadyShifted ? gb : combined.2
-                  if abs(newR - 1) < 0.004 && abs(newB - 1) < 0.004 {
-                      pxNote("Weiss ist bereits neutral — nichts zu korrigieren")
-                      return
-                  }
                   dbg.set(Double(newR), forKey: "pxSharpWB_R")
                   dbg.set(Double(newG), forKey: "pxSharpWB_G")
                   dbg.set(Double(newB), forKey: "pxSharpWB_B")
