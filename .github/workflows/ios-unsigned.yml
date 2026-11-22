@@ -148,6 +148,8 @@ jobs:
               private var ldTried = false
               private var upKernel: CIKernel?
               private var upTried = false
+              private var toneKernel: CIColorKernel?
+              private var toneTried = false
               private let diagLabel = UILabel()
               private var frameCount = 0
               private var fpsWindowStart = CACurrentMediaTime()
@@ -1231,6 +1233,50 @@ jobs:
                   return upKernel
               }
 
+              // MARK: - Lokale Tonwertspreizung (Object-Based HDR Remaster)
+
+              /// Ein Spitzenfernseher hellt das Bild nicht global auf, sondern RAEUMLICH:
+              /// Partien unter der Szenenmitte werden tiefer, Partien darueber bleiben
+              /// hell. Dadurch entsteht Tiefenwirkung, ohne dass das Bild flau oder
+              /// ausgewaschen wirkt. Die Karte ist stark unscharf (1/16 Aufloesung,
+              /// grosser Radius), damit keine Kantenhoefe entstehen.
+              private func toneKernelInstance() -> CIColorKernel? {
+                  if toneTried { return toneKernel }
+                  toneTried = true
+                  let src = """
+                  kernel vec4 pxLocalTone(__sample c, __sample map, float strength, float ref) {
+                      float l = dot(map.rgb, vec3(0.2126, 0.7152, 0.0722));
+                      float ratio = clamp(l / max(ref, 0.05), 0.30, 2.5);
+                      float g = pow(ratio, strength);
+                      g = clamp(g, 0.78, 1.30);
+                      vec3 o = c.rgb * g;
+                      float m = max(max(o.r, o.g), o.b);
+                      float hi = clamp((m - 0.88) * 4.0, 0.0, 0.60);
+                      o = mix(o, min(o, vec3(0.995)), hi);
+                      return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  toneKernel = CIColorKernel(source: src)
+                  return toneKernel
+              }
+
+              private func applyLocalTone(_ input: CIImage, strength: Float, ref: Float) -> CIImage {
+                  guard strength > 0.01, let k = toneKernelInstance() else { return input }
+                  let ext = input.extent
+                  let s: CGFloat = 1.0 / 16.0
+                  let small = input.transformed(by: CGAffineTransform(scaleX: s, y: s))
+                  let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
+                      kCIInputRadiusKey: 3.0
+                  ]).cropped(to: small.extent)
+                  let up = blurred.transformed(by: CGAffineTransform(scaleX: 1.0 / s, y: 1.0 / s))
+                  if let out = k.apply(extent: ext, arguments: [
+                      input, up, NSNumber(value: strength), NSNumber(value: ref)
+                  ]) {
+                      return out
+                  }
+                  return input
+              }
+
               private func applyLocalDimming(_ input: CIImage, strength: Float, zone: CGFloat) -> CIImage {
                   guard strength > 0.02, let lc = localDimKernelInstance() else { return input }
                   let ext = input.extent
@@ -1503,6 +1549,14 @@ jobs:
                       ])
                   }
 
+                  // ---- Lokale Tonwertspreizung (TV-Technologie) ----------------------
+                  // Wirkt nur auf die Verteilung, nicht auf die Gesamthelligkeit.
+                  let localTone = Float(UserDefaults.standard.object(forKey: "pxSharpLocalTone") as? Double ?? 0.0)
+                  if localTone > 0.01 && !hdrActive {
+                      image = applyLocalTone(image, strength: localTone * 0.35,
+                                             ref: Float(min(max(scene.mean, 0.12), 0.65)))
+                  }
+
                   // ---- Schattendurchzeichnung (Black Stabilizer) --------------------
                   // Manueller Regler + Automatik. Die Automatik greift umso staerker,
                   // je dunkler die Szene ist (Szenenmedian), und nie bei Tageslicht.
@@ -1678,7 +1732,7 @@ jobs:
                   switch currentMode {
                   case .fit:
                       let s = min(sx, sy)
-                      let useKernelUp = (UserDefaults.standard.object(forKey: "pxSharpUpscale") as? Int ?? 0) == 1
+                      let useKernelUp = false   // siehe Kommentar unten: wird vom Panel-Kernel abgedeckt
                       if useKernelUp, let uk = upscaleKernelInstance() {
                           let outExt = CGRect(x: 0, y: 0,
                                               width: (src.width * s).rounded(.down),
@@ -2520,6 +2574,7 @@ jobs:
               @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.25
               @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
               @AppStorage("pxSharpUpScale") private var upscaleAmount: Double = 0.60
+              @AppStorage("pxSharpLocalTone") private var localTone: Double = 0.0
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
               @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
               @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
@@ -2828,7 +2883,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 100 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 101 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3095,10 +3150,9 @@ jobs:
                       sliderRow("Texturtiefe (Struktur-Radius)", value: $texDepth, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", texDepth * 100),
                                 rule: "Je höher, desto größere Strukturen werden betont — Gras, Stoff, Mauerwerk, Rinde (Radius 2,7 bis 5,0 px). Je niedriger, desto mehr Feinstkontur. Über 70 % kann es an harten Kanten säumen.")
-                      Toggle("Kanten-Upscaler (CI-Kernel statt Lanczos)", isOn: $upscaleKernel)
-                      Text("Je größer der Sprung von 1080p auf das Panel, desto mehr bringt ein kantenbewusster Upscaler: Die Detailanhebung wird auf die lokale Helligkeitsspanne begrenzt, deshalb sind Halos konstruktiv ausgeschlossen. Aus: Lanczos (Apple-Standard). An: Kernel-Upscaler.")
-                          .font(.caption)
-                          .foregroundColor(.secondary)
+                      sliderRow("Lokale Tonwertspreizung (Tiefenwirkung)", value: $localTone, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", localTone * 100),
+                                rule: "Je höher, desto stärker werden dunkle Partien tiefer und helle Partien heller — räumlich, nicht global (wie „Object-Based HDR Remaster“ bei Sony). Das erzeugt Tiefenwirkung, ohne das Bild aufzuhellen. Über 60 % können Ränder um sehr helle Flächen entstehen.")
 
                       // ---------------------------------------------------------------- 7
                       // ---------------------------------------------------------------- 7
