@@ -2309,7 +2309,17 @@ jobs:
                   func val(_ n: String) -> String? { items.first(where: { $0.name == n })?.value }
                   let d = UserDefaults.standard
 
-                  if path.hasPrefix("/set"), let k = val("key"), k.hasPrefix("pxSharp"), let v = val("value") {
+                  if path.hasPrefix("/set"), let k = val("key"), let v = val("value"),
+                     k.hasPrefix("pxSharp") || k == "bitrate" {
+                      if k == "bitrate" {
+                          // Stream-Bitrate in kbit/s (0 = automatisch). Wirkt beim naechsten
+                          // Verbinden. Wichtig: 1080p H.265 laeuft "automatisch" nur mit
+                          // 12000 kbit/s — das ist der Deckel, den man hier anheben kann.
+                          var p = StreamPreferences.load()
+                          p.bitrate = max(0, min(50000, Int(v) ?? 0))
+                          p.save()
+                          return "{\"ok\":true,\"bitrate\":\(p.effectiveBitrate),\"pref\":\(p.bitrate)}"
+                      }
                       if v == "true" || v == "false" { d.set(v == "true", forKey: k) }
                       else if let i = Int(v) { d.set(i, forKey: k) }
                       else if let f = Double(v) { d.set(f, forKey: k) }
@@ -2343,6 +2353,11 @@ jobs:
                       o["pxRenderMs"] = String(format: "%.2f", PXScene.shared.renderMs)
                       o["pxScreenBrightness"] = String(format: "%.2f", Double(UIScreen.main.brightness))
                       o["pxPerfLevel"] = String(PXScene.shared.perfLevel)
+                      // Angeforderte Bitrate sichtbar machen: 0 = automatisch (1080p H.265
+                      // = 12000 kbit/s). Genau dieser Automatikwert war der Deckel.
+                      let prefs = StreamPreferences.load()
+                      o["pxBitratePref"] = String(prefs.bitrate)
+                      o["pxRequestedBitrate"] = String(prefs.effectiveBitrate)
                       // Thermischer Zustand des iPads: nominal / fair / serious / critical.
                       // Damit laesst sich belegen, ob Einbrueche von der Waerme kommen.
                       switch ProcessInfo.processInfo.thermalState {
@@ -2718,7 +2733,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 94 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 95 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
