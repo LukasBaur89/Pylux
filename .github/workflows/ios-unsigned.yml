@@ -1185,6 +1185,50 @@ jobs:
               /// Wie pxCAS, aber nur zwei Radien (1,35 px und 2,7 px). Die Panel-Stufe
               /// braucht den dritten Radius nicht — ein eigener Kernel garantiert, dass
               /// die acht zusaetzlichen Samples auch wirklich nicht ausgefuehrt werden.
+              // MARK: - Chroma-Rekonstruktion (4:2:0)
+
+              private var chromaKernel: CIKernel?
+              private var chromaTried = false
+
+              /// Der Stream liefert Farbe nur mit halber Aufloesung (4:2:0): Farbkanten
+              /// sind gemessen dreimal breiter als Helligkeitskanten. Dieser Durchgang
+              /// schaerft NUR den Farbanteil nach, in einem eigenen Band, ohne die
+              /// Luma-Kante anzufassen. Der Chroma-Zweig im CAS-Kernel konnte das nicht,
+              /// weil der anschliessende Clamp den Farbueberschuss wieder entfernt hat.
+              private func chromaKernelInstance() -> CIKernel? {
+                  if chromaTried { return chromaKernel }
+                  chromaTried = true
+                  let src = """
+                  kernel vec4 pxChroma(sampler src, float r, float amount, float coring) {
+                      vec2 p = destCoord();
+                      vec4 c = sample(src, samplerTransform(src, p));
+                      vec2 d = vec2(r, r);
+                      vec3 a = sample(src, samplerTransform(src, p + vec2(-d.x, -d.y))).rgb;
+                      vec3 b = sample(src, samplerTransform(src, p + vec2( 0.0, -d.y))).rgb;
+                      vec3 e = sample(src, samplerTransform(src, p + vec2( d.x, -d.y))).rgb;
+                      vec3 f = sample(src, samplerTransform(src, p + vec2(-d.x,  0.0))).rgb;
+                      vec3 g = sample(src, samplerTransform(src, p + vec2( d.x,  0.0))).rgb;
+                      vec3 h = sample(src, samplerTransform(src, p + vec2(-d.x,  d.y))).rgb;
+                      vec3 i = sample(src, samplerTransform(src, p + vec2( 0.0,  d.y))).rgb;
+                      vec3 j = sample(src, samplerTransform(src, p + vec2( d.x,  d.y))).rgb;
+                      vec3 avg = (a + b + e + f + g + h + i + j) * 0.125;
+                      vec3 L = vec3(0.2126, 0.7152, 0.0722);
+                      float y  = dot(c.rgb, L);
+                      float ya = dot(avg, L);
+                      vec3 cc = c.rgb - vec3(y);
+                      vec3 ca = avg  - vec3(ya);
+                      vec3 delta = cc - ca;
+                      float m = length(delta);
+                      float k = max(0.0, m - coring) / max(m, 1e-5);
+                      vec3 outv = c.rgb + delta * (amount * k);
+                      return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
+                  }
+                  """
+                  chromaKernel = CIKernel(source: src)
+                  if chromaKernel == nil { os_log(.error, log: videoViewLog, "[px] chroma kernel compile failed") }
+                  return chromaKernel
+              }
+
               private func cas2KernelInstance() -> CIKernel? {
                   if cas2Tried { return cas2Kernel }
                   cas2Tried = true
@@ -1781,6 +1825,17 @@ jobs:
                                            arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
                           image = out
                       }
+                  }
+
+                  // ---- Chroma-Rekonstruktion -----------------------------------------
+                  let chromaAmt = Float((UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)
+                                        * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
+                  if !bypassNow, chromaAmt > 0.01, let ck = chromaKernelInstance(),
+                     let out = ck.apply(extent: image.extent,
+                                        roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
+                                        arguments: [image, NSNumber(value: 1.8),
+                                                    NSNumber(value: chromaAmt * 1.8), NSNumber(value: 0.006)]) {
+                      image = out
                   }
 
                   // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
@@ -2774,7 +2829,7 @@ jobs:
               @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
               @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
               @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
-              @AppStorage("pxSharpChroma") private var chroma: Double = 0.0
+              @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
               @AppStorage("pxSharpCoring") private var coring: Double = 0.03
               @AppStorage("pxSharpHalo") private var halo: Double = 0.12
               @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
@@ -2872,7 +2927,7 @@ jobs:
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.20; toneMap = 0; localDim = 0.0; deband = 0.30
-                      brightness = 0.50; shadow = 0.12; chroma = 0.0; coring = 0.03
+                      brightness = 0.50; shadow = 0.12; chroma = 0.30; coring = 0.03
                       deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -2883,7 +2938,7 @@ jobs:
                       saturation = 0.52; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 900
                       clearImage = 0.20; toneMap = 0; localDim = 0.0; deband = 0.30
-                      brightness = 0.50; shadow = 0.14; chroma = 0.0; coring = 0.03
+                      brightness = 0.50; shadow = 0.14; chroma = 0.30; coring = 0.03
                       deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
@@ -3538,7 +3593,7 @@ jobs:
                       "pxSharpBrightness": 0.5,
                       "pxSharpShadow": 0.12,
                       "pxSharpTvBrightness": false,
-                      "pxSharpChroma": 0.0,
+                      "pxSharpChroma": 0.30,
                       "pxSharpCoring": 0.03,
                       "pxSharpHalo": 0.12,
                       "pxSharpDeconv": 0.0,
@@ -3576,7 +3631,7 @@ jobs:
                   var v: [String: Any] = [
                       "pxSharpClarity": 0.0, "pxSharpClearImage": 0.0, "pxSharpDeconv": 0.0,
                       "pxSharpLocalTone": 0.0, "pxSharpLocalDim": 0.0, "pxSharpAuto": false,
-                      "pxSharpChroma": 0.0, "pxSharpHueSat": 0.0, "pxSharpCastFix": 0.0,
+                      "pxSharpChroma": 0.30, "pxSharpHueSat": 0.0, "pxSharpCastFix": 0.0,
                       "pxSharpRange": 0, "pxSharpTvBrightness": false, "pxSharpTemp": 0.5,
                       "pxSharpGamma": 1.0, "pxSharpBlack": 0.0, "pxSharpScaler": 0,
                       "pxSharpEasu": 0.6, "pxSharpCoring": 0.05, "pxSharpHalo": 0.12,
