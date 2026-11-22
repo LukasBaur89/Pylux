@@ -708,9 +708,12 @@ jobs:
                   }
                   let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75
                   let kVib = Double(vib) * 1.10
+                  // Hue-selektives Farbmanagement (wie "Color Detail" bei Sony/LG):
+                  // Blau in Nachtbildern zaehmen, Haut schuetzen, Gruen erhalten.
+                  let hueSat = Double(min(max(UserDefaults.standard.object(forKey: "pxSharpHueSat") as? Double ?? 0.60, 0.0), 1.0))
 
-                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f",
-                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK)
+                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f",
+                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat)
                   if key != colorLUTKey || colorLUTData == nil {
                       let n = 65
                       var data = [Float](repeating: 0, count: n * n * n * 4)
@@ -742,7 +745,24 @@ jobs:
                                   let mx = max(r, max(gg2, b))
                                   let mn = min(r, min(gg2, b))
                                   let satPx = (mx - mn) / max(mx, 0.0001)
-                                  let k = max(0.0, kSat * (1.0 + kVib * (1.0 - satPx)))
+                                  var k = max(0.0, kSat * (1.0 + kVib * (1.0 - satPx)))
+
+                                  // Hue-selektive Saettigung: nicht alles gleich behandeln.
+                                  if hueSat > 0.001, (mx - mn) > 1e-4 {
+                                      let dC = mx - mn
+                                      var hue = 0.0
+                                      if mx == r { hue = 60.0 * ((gg2 - b) / dC) }
+                                      else if mx == gg2 { hue = 60.0 * ((b - r) / dC + 2.0) }
+                                      else { hue = 60.0 * ((r - gg2) / dC + 4.0) }
+                                      if hue < 0 { hue += 360.0 }
+                                      var f = 0.0
+                                      if hue >= 200.0 && hue < 265.0 { f = -0.16 }       // Blau: Nachtbilder
+                                      else if hue >= 265.0 && hue < 330.0 { f = -0.05 }  // Violett
+                                      else if hue >= 15.0 && hue < 50.0 { f = -0.07 }    // Haut/Orange
+                                      else if hue >= 50.0 && hue < 170.0 { f = +0.08 }   // Gruen: Vegetation
+                                      else if hue >= 170.0 && hue < 200.0 { f = -0.07 }  // Cyan
+                                      k *= (1.0 + f * hueSat)
+                                  }
                                   r = y + (r - y) * k
                                   gg2 = y + (gg2 - y) * k
                                   b = y + (b - y) * k
@@ -2575,6 +2595,7 @@ jobs:
               @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
               @AppStorage("pxSharpUpScale") private var upscaleAmount: Double = 0.60
               @AppStorage("pxSharpLocalTone") private var localTone: Double = 0.0
+              @AppStorage("pxSharpHueSat") private var hueSat: Double = 0.60
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
               @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
               @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
@@ -2883,7 +2904,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 101 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 102 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3111,6 +3132,9 @@ jobs:
                       Text("Rechnet Weißabgleich, Sättigung, Gamma, Schwarzpegel und Kontrast in EINER 3D-LUT in linearem Licht. Verhindert Farbstiche und ausgebrannte Kanäle. Eingeschaltet lassen.")
                           .font(.caption)
                           .foregroundColor(.secondary)
+                      sliderRow("Farbcharakter (hue-selektiv)", value: $hueSat, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", hueSat * 100),
+                                rule: "Je höher, desto stärker behandelt die Engine Farbtöne unterschiedlich: Blau und Cyan werden in Nachtbildern zurückgenommen (−16 % / −7 %), Hauttöne geschützt (−7 %), Grün erhalten (+8 %). Genau das machen die Farbmanager guter Fernseher. 0 % = alle Farbtöne gleich (alte Wirkung).")
                       Picker("Farbumfang", selection: $gamut) {
                           Text("BT.709 (korrekt)").tag(0)
                           Text("Display P3 nativ (TV-Look)").tag(1)
