@@ -140,6 +140,8 @@ jobs:
               private var colorLUTKey: String = ""
               private var colorLUTDimension: Int = 33
               private var lutLastBuild: CFTimeInterval = 0
+              /// Von der Bildautomatik gesetzte Daempfung der Detailstufe (1 = voll).
+              private var autoDetailScale: Float = 1.0
               private var casKernel: CIKernel?
               private var casTried = false
               private var dbKernel: CIKernel?
@@ -708,7 +710,8 @@ jobs:
                   // mit weicher Schulter. CIColorControls schneidet bei 1.0 hart ab - in
                   // hellen Szenen waren das gemessen 3,6 % ausgebrannte Pixel.
                   let contrastRawL = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
-                  let contrastK = 0.8 + Double(min(max(contrastRawL, 0), 1)) * 0.4
+                  let cScaled = 0.5 + (Double(contrastRawL) - 0.5) * masterC
+                  let contrastK = 0.8 + min(max(cScaled, 0), 1) * 0.4
                   // Backlight-Emulation: 0.5 = neutral, 0 = -0.8 Blenden, 1 = +0.8 Blenden.
                   let brightGain = pow(2.0, Double(brightRaw - 0.5) * 1.6)
 
@@ -721,8 +724,9 @@ jobs:
                   if kn > 0.0001 {
                       gainR /= kn; gainG /= kn; gainB /= kn
                   }
-                  let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75
-                  let kVib = Double(vib) * 1.10
+                  let masterC = min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)
+                  let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75 * masterC
+                  let kVib = Double(vib) * 1.10 * masterC
                   // Hue-selektives Farbmanagement (wie "Color Detail" bei Sony/LG):
                   // Blau in Nachtbildern zaehmen, Haut schuetzen, Gruen erhalten.
                   let hueSat = Double(min(max(UserDefaults.standard.object(forKey: "pxSharpHueSat") as? Double ?? 0.0, 0.0), 1.0))
@@ -1412,8 +1416,9 @@ jobs:
                   let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04)
                   let coringVal = Float(min(0.080, coringBase * 0.040 + Double(min(autoNoise, 1.0)) * 0.024))
                   let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
-                  let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
-                  let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
+                  let master = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
+                  let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp * autoDetailScale * master
+                  let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp * autoDetailScale * master
                   // Texturtiefe: vergroessert den zweiten Radius (2,7 -> 5,0 px auf dem
                   // Panel). Kleine Radien = Feinststruktur, grosse Radien = Texturtiefe
                   // (Gras, Stoff, Mauerwerk). Kostet keine zusaetzlichen Samples.
@@ -1513,6 +1518,46 @@ jobs:
                   // A/B-Vergleich: schaltet JEDE Nachbearbeitung ab, damit man den
                   // Unterschied zwischen "verarbeitet" und "roh" direkt sieht.
                   let bypassNow = UserDefaults.standard.bool(forKey: "pxSharpBypass")
+
+                  // ---- Bildautomatik ------------------------------------------------
+                  // Misst jede Szene und korrigiert nur das, was messbar danebenliegt:
+                  // ausgebrannte Lichter zuruecknehmen, abgesoffene Schwazen leicht
+                  // anheben, Schaerfe bei Rauschen zuruecknehmen. Bewusst kleine
+                  // Korridore (+-8 %), damit nichts pumpt.
+                  let autoEngine = (UserDefaults.standard.object(forKey: "pxSharpAutoEngine") as? NSNumber)?.boolValue ?? true
+                  var autoExpo: Double = 1.0
+                  var autoLift: Double = 0.0
+                  autoDetailScale = 1.0
+                  if autoEngine && !bypassNow {
+                      let sceneNow = PXScene.shared
+                      let m = Double(sceneNow.mean)
+                      let hi = Double(sceneNow.p90)
+                      let nz = Double(sceneNow.noise)
+                      if hi > 0.94 { autoExpo -= min(0.08, (hi - 0.94) * 1.1) }
+                      if m < 0.13 { autoExpo += min(0.08, (0.13 - m) * 0.9) }
+                      if m < 0.30 { autoLift = min(0.022, (0.30 - m) * 0.10) }
+                      autoDetailScale = Float(1.0 - min(0.40, nz * 0.50))
+                  }
+                  if autoExpo < 0.999 || autoExpo > 1.001 {
+                      let f = CGFloat(pow(autoExpo, 1.0 / 2.2))
+                      image = image.applyingFilter("CIColorMatrix", parameters: [
+                          "inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
+                          "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
+                          "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
+                          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                          "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
+                      ])
+                  }
+                  if autoLift > 0.0005 {
+                      let l = CGFloat(autoLift)
+                      image = image.applyingFilter("CIColorMatrix", parameters: [
+                          "inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),
+                          "inputGVector": CIVector(x: 0, y: 1, z: 0, w: 0),
+                          "inputBVector": CIVector(x: 0, y: 0, z: 1, w: 0),
+                          "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                          "inputBiasVector": CIVector(x: l, y: l, z: l, w: 0)
+                      ])
+                  }
 
                   // Range: PS5 liefert Limited (16-235). Wenn die Kette das nicht macht, wird
                   // das Bild zu dunkel und die Schatten laufen zu.
@@ -1727,7 +1772,7 @@ jobs:
                   // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
                   // echte Kanten statt weicher Pixel bekommt — ebenfalls CAS, damit die
                   // Vorverstärkung keine Halos in die Skalierung schickt.
-                  let clearImage = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0))
+                  let clearImage = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
                   if clearImage > 0.05 {
                       if let k = casKernelInstance(),
                          let out = k.apply(extent: image.extent,
@@ -1749,7 +1794,7 @@ jobs:
                   }
 
                   // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
-                  let deconvAmt = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0))
+                  let deconvAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
                   // Deconvolution läuft IMMER — sie ist die Stufe mit dem größten
                   // Texturgewinn (+44 % gemessen). Sie wird von keiner Lastregel
                   // abgeschaltet, auch nicht bei Hitze.
@@ -1766,7 +1811,7 @@ jobs:
                   // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
                   // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
                   // ein Drittel der Pixel.
-                  let clarityAmt = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0))
+                  let clarityAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
                   if clarityAmt > 0.02, let lc = diffKernelInstance() {
                       let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
                       let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
@@ -2679,6 +2724,8 @@ jobs:
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
               @AppStorage("pxSharpBypass") private var bypass: Bool = false
+              @AppStorage("pxSharpMaster") private var master: Double = 1.0
+              @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
@@ -3064,6 +3111,14 @@ jobs:
                       // man so sofort, was die Regler zusammen bewirken.
                       Toggle("Vergleich: unbearbeitetes Bild (A/B)", isOn: $bypass)
                       Text("An = reine Quelle ohne jede Verarbeitung. Schalte hin und her: was du im Bild siehst, ist der Unterschied, den die Regler machen. Bleibt das Bild gleich, hat der Stream gerade ein Problem, nicht die Einstellung.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+
+                      sliderRow("Gesamtstärke der Bearbeitung", value: $master, range: 0...2, step: 0.05,
+                                display: String(format: "%.0f %%", master * 100),
+                                rule: "Skaliert Schärfe, Detail, Klarheit, Sättigung und Kontrast gemeinsam. 0 % = unbearbeitet, 100 % = wie eingestellt, 200 % = doppelt so stark. Ein Regler für den ganzen Bildeindruck.")
+                      Toggle("Bildautomatik (passt sich jeder Szene an)", isOn: $autoEngine)
+                      Text("Misst Helligkeit, Lichter und Rauschen in jeder Szene und korrigiert nur, was messbar danebenliegt: ausgebrannte Lichter zurück, abgesoffene Schwärzen leicht hoch, Schärfe bei Rauschen zurück. Bewusst kleine Korridore, damit nichts pumpt.")
                           .font(.caption)
                           .foregroundColor(.secondary)
                       // ---------------------------------------------------------------- 1
@@ -3490,6 +3545,8 @@ jobs:
                       "pxSharpPacing": true,
                       "pxSharpPaceHz": 60,
                       "pxSharpBypass": false,
+                      "pxSharpMaster": 1.0,
+                      "pxSharpAutoEngine": true,
                       "pxSharpHdrPeak": 1600,
                       "pxSharpTunedV1": true,
                       "pxSharpTunedV2": true,
