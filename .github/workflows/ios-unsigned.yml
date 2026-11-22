@@ -1570,7 +1570,10 @@ jobs:
 
                   // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
                   let deconvAmt = Float(UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0)
-                  if deconvAmt > 0.02, perfLevelNow < 2, let k = deconvKernelInstance(),
+                  // Deconvolution läuft IMMER — sie ist die Stufe mit dem größten
+                  // Texturgewinn (+44 % gemessen). Sie wird von keiner Lastregel
+                  // abgeschaltet, auch nicht bei Hitze.
+                  if deconvAmt > 0.02, let k = deconvKernelInstance(),
                      let out = k.apply(extent: image.extent,
                                        roiCallback: { _, rect in rect.insetBy(dx: -3, dy: -3) },
                                        arguments: [image,
@@ -1904,16 +1907,25 @@ jobs:
                   //   Stufe 2 (ueber 26 ms): zusaetzlich Deconvolution aus, Dimming halb
                   // Rueckweg mit 8 s Sperre, damit es nicht flattert.
                   let now = CACurrentMediaTime()
-                  if perfLevelStore == 0 && renderMsEma > 21.0 {
+                  // Die Lastregel ist standardmaessig AUS. Sie hat in Build 95 die
+                  // Deconvolution abgeschaltet, sobald das iPad warm wurde — das Bild
+                  // verlor dadurch 25-27 % Textur. Bildqualitaet geht vor Bildrate.
+                  let autoPerf = (UserDefaults.standard.object(forKey: "pxSharpPerfAuto") as? NSNumber)?.boolValue ?? false
+                  if !autoPerf {
+                      perfLevelStore = 0
+                      lock.unlock()
+                      return
+                  }
+                  if perfLevelStore == 0 && renderMsEma > 24.0 {
                       perfLevelStore = 1
                       perfCooldown = now + 8.0
-                  } else if perfLevelStore == 1 && renderMsEma > 26.0 {
+                  } else if perfLevelStore == 1 && renderMsEma > 30.0 {
                       perfLevelStore = 2
                       perfCooldown = now + 8.0
-                  } else if perfLevelStore == 2 && now > perfCooldown && renderMsEma < 20.0 {
+                  } else if perfLevelStore == 2 && now > perfCooldown && renderMsEma < 24.0 {
                       perfLevelStore = 1
                       perfCooldown = now + 8.0
-                  } else if perfLevelStore == 1 && now > perfCooldown && renderMsEma < 16.5 {
+                  } else if perfLevelStore == 1 && now > perfCooldown && renderMsEma < 18.0 {
                       perfLevelStore = 0
                   }
                   lock.unlock()
@@ -2425,6 +2437,7 @@ jobs:
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
+              @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
               @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
               @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
@@ -2519,12 +2532,12 @@ jobs:
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
                       gamut = 0
-                      level = 1.00; detail = 0.95; clarity = 0.28
-                      deblock = 0.30; denoise = 0.12; vibrance = 0.35
-                      saturation = 0.60; contrast = 0.50; temp = 0.500
+                      level = 1.00; detail = 1.00; clarity = 0.38
+                      deblock = 0.16; denoise = 0.06; vibrance = 0.40
+                      saturation = 0.62; contrast = 0.54; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 0.95; toneMap = 2; localDim = 0.30; deband = 0.18
-                      brightness = 0.45; shadow = 0.40; chroma = 0.70; coring = 0.45
+                      clearImage = 1.00; toneMap = 2; localDim = 0.30; deband = 0.12
+                      brightness = 0.47; shadow = 0.32; chroma = 0.80; coring = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -2733,7 +2746,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 95 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 96 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2991,6 +3004,10 @@ jobs:
                           .foregroundColor(.secondary)
                       Toggle("Panel 2× (2266 px statt 2732 px)", isOn: $panel2x)
                       Text("Je niedriger die Panel-Auflösung, desto mehr Bilder pro Sekunde — und desto weicher die feinste Textur. Aus: volle 2732 px (maximale Schärfe). An: 2266 px, hält 60 fps, wenn das iPad warm wird. Wirkt sofort.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      Toggle("Bei Hitze automatisch Schärfe sparen", isOn: $perfAuto)
+                      Text("Je wärmer das iPad, desto eher schaltet die Automatik Klarheit und Dimming ab, um die Bildrate zu halten — das kostet sichtbar Textur. Aus (Standard): die volle Kette läuft immer, auch wenn die Bildrate dadurch sinkt. An: stabilere Bildrate, weicheres Bild bei Hitze.")
                           .font(.caption)
                           .foregroundColor(.secondary)
 
