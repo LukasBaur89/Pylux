@@ -3705,6 +3705,104 @@ jobs:
                   .shadow(color: .black.opacity(0.6), radius: 30, y: 12)
               }
           }
+
+          // MARK: - Konsolenkarte für den Startbildschirm
+
+          /// Grosse, zentrierte Karte mit rundem Verbinden-Knopf. Ein Ziel pro Karte,
+          /// ein Tipp genuegt -- bewusst wie die PlayStation-Startseite gehalten.
+          struct PXConsoleCard: View {
+              let name: String
+              let address: String
+              let isPS5: Bool
+              let isRegistered: Bool
+              let onConnect: () -> Void
+              let onWake: (() -> Void)?
+              let onEdit: (() -> Void)?
+              let onDelete: (() -> Void)?
+
+              var body: some View {
+                  VStack(spacing: 20) {
+                      HStack(alignment: .top, spacing: 12) {
+                          ZStack {
+                              Circle()
+                                  .fill(Color(uiColor: .tertiarySystemFill))
+                                  .frame(width: 46, height: 46)
+                              Text(isPS5 ? "5" : "4")
+                                  .font(.system(size: 20, weight: .bold, design: .rounded))
+                                  .foregroundStyle(.primary)
+                          }
+                          VStack(alignment: .leading, spacing: 3) {
+                              Text(name)
+                                  .font(.system(size: 21, weight: .semibold, design: .rounded))
+                                  .lineLimit(1)
+                              HStack(spacing: 6) {
+                                  Circle()
+                                      .fill(isRegistered ? Color.green : Color.orange)
+                                      .frame(width: 7, height: 7)
+                                  Text(isRegistered ? "Bereit" : "Nicht registriert")
+                                      .font(.system(size: 12))
+                                      .foregroundStyle(.secondary)
+                                  Text(address)
+                                      .font(.system(size: 11, design: .monospaced))
+                                      .foregroundStyle(.tertiary)
+                                      .lineLimit(1)
+                              }
+                          }
+                          Spacer(minLength: 6)
+                          if onEdit != nil || onWake != nil {
+                              Menu {
+                                  if let w = onWake { Button("Aufwecken", action: w) }
+                                  if let e = onEdit { Button("Bearbeiten", action: e) }
+                                  if let d = onDelete { Button("Entfernen", role: .destructive, action: d) }
+                              } label: {
+                                  Image(systemName: "ellipsis.circle.fill")
+                                      .font(.system(size: 24))
+                                      .foregroundStyle(.secondary)
+                              }
+                          }
+                      }
+
+                      Button(action: onConnect) {
+                          ZStack {
+                              Circle()
+                                  .fill(LinearGradient(colors: [Color(red: 0.24, green: 0.52, blue: 1.0),
+                                                                Color(red: 0.08, green: 0.26, blue: 0.80)],
+                                                       startPoint: .topLeading,
+                                                       endPoint: .bottomTrailing))
+                                  .frame(width: 132, height: 132)
+                                  .shadow(color: Color.black.opacity(0.30), radius: 20, y: 10)
+                              Image(systemName: "play.fill")
+                                  .font(.system(size: 46, weight: .bold))
+                                  .foregroundStyle(.white)
+                                  .offset(x: 5)
+                          }
+                      }
+                      .buttonStyle(PXPressStyle())
+
+                      Text("Antippen zum Verbinden")
+                          .font(.system(size: 12))
+                          .foregroundStyle(.secondary)
+                  }
+                  .padding(24)
+                  .frame(maxWidth: 400)
+                  .background(
+                      RoundedRectangle(cornerRadius: 30, style: .continuous)
+                          .fill(Color(uiColor: .secondarySystemBackground))
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 30, style: .continuous)
+                                  .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                          )
+                  )
+              }
+          }
+
+          struct PXPressStyle: ButtonStyle {
+              func makeBody(configuration: Configuration) -> some View {
+                  configuration.label
+                      .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
+                      .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+              }
+          }
           ROW_EOF
 
           python3 - <<'PATCH_EOF'
@@ -3797,6 +3895,75 @@ jobs:
           else:
               print('review: anchor not found')
           PATCH_EOF
+
+          python3 - <<'HERO_UI_PATCH'
+          # Startbildschirm: grosse zentrierte Konsolenkarte statt Liste mit Button oben.
+          p = 'ios/Pylux/Views/RemotePlayView.swift'
+          s = open(p, encoding='utf-8').read()
+          old = '''
+              private var hostListView: some View {
+                  ScrollView {
+                      LazyVStack(spacing: 0) {
+                          ForEach(hostStore.displayHosts) { host in
+                              HostCardView(
+                                  host: host,
+                                  onTap: { hostTriggered(host) },
+                                  onWakeup: host.isRegistered ? { hostStore.wakeupHost(host) } : nil,
+                                  onEdit: {
+                                      if case .manual(let mh) = host {
+                                          manualHostToEdit = mh.manualHost
+                                      }
+                                  },
+                                  onDelete: {
+                                      hostToDelete = host
+                                      showDeleteAlert = true
+                                  }
+                              )
+                          }
+                      }
+                      .padding(.bottom, 96) // room for FAB
+                  }
+              }
+          '''
+          new = '''
+              private var hostListView: some View {
+                  ScrollView {
+                      VStack(spacing: 26) {
+                          ForEach(hostStore.displayHosts) { host in
+                              PXConsoleCard(
+                                  name: host.name ?? "PlayStation",
+                                  address: host.hostAddress,
+                                  isPS5: host.isPS5,
+                                  isRegistered: host.isRegistered,
+                                  onConnect: { hostTriggered(host) },
+                                  onWake: host.isRegistered ? { hostStore.wakeupHost(host) } : nil,
+                                  onEdit: {
+                                      if case .manual(let mh) = host {
+                                          manualHostToEdit = mh.manualHost
+                                      }
+                                  },
+                                  onDelete: {
+                                      hostToDelete = host
+                                      showDeleteAlert = true
+                                  }
+                              )
+                          }
+                      }
+                      .frame(maxWidth: .infinity)
+                      .padding(.horizontal, 20)
+                      .padding(.top, 36)
+                      .padding(.bottom, 110)
+                  }
+                  .frame(maxWidth: .infinity, maxHeight: .infinity)
+              }
+          '''
+          if old in s and 'PXConsoleCard(' not in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('startbildschirm: zentrierte Karte')
+          else:
+              print('startbildschirm: Anker nicht gefunden')
+          HERO_UI_PATCH
 
           python3 - <<'TENBIT_DECODE_PATCH'
           # Sperre: Decoder gab immer 8 Bit aus -- damit war HDR (10 Bit) unmoeglich.
