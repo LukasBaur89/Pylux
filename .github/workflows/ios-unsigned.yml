@@ -1241,7 +1241,10 @@ jobs:
                   if mbpsD > 0.1 {
                       bfD = Float(min(max((mbpsD - 7.0) / 15.0, 0.0), 1.0))
                   }
-                  let sharpDamp = (1.0 - min(autoNoise * 0.45, 0.45)) * (0.55 + 0.45 * bfD)
+                  // Schärfe-Dämpfung bei niedriger Bitrate: vorher wurden bei 8 Mbit nur
+                  // 58 % der eingestellten Schärfe angewendet — das Bild war dadurch weich,
+                  // obwohl der Regler auf 0,95 stand. Jetzt bleiben mindestens 75 %.
+                  let sharpDamp = (1.0 - min(autoNoise * 0.30, 0.25)) * (0.75 + 0.25 * bfD)
                   // Coring-Schwelle: Regler + gemessenes Rauschen der Szene.
                   // Coring-Schwelle: fast ausschliesslich vom GEMESSENEN Rauschen
                   // bestimmt. In einer sauberen Szene bleibt Textur voll erhalten, in
@@ -1415,7 +1418,10 @@ jobs:
                   // komplette Vollbild-Stufe).
                   var expo = tvComp
                   if autoOn && autoStrength > 0.01 {
-                      expo *= 1.0 + (scene.gain - 1.0) * Double(autoStrength)
+                      // Deckel bei +10 %: die Szenen-Automatik hat dunkle Szenen vorher um
+                      // bis zu +23 % aufgehellt. Zusammen mit der Schatten-Anhebung wurde
+                      // das Bild dadurch flau. Nachtszenen DUERFEN dunkel sein.
+                      expo *= min(1.10, 1.0 + (scene.gain - 1.0) * Double(autoStrength))
                   }
                   // Im HDR-Pfad keine SDR-Belichtung: PQ kodiert Helligkeit absolut.
                   if hdrActive { expo = 1.0 }
@@ -1462,7 +1468,11 @@ jobs:
                   let darkFactor = min(max((0.34 - scene.mean) / 0.24, 0.0), 1.0)
                   var shadowAmt = Double(shadowManual) * (0.22 + 0.78 * darkFactor)
                   if autoOn && autoStrength > 0.01 {
-                      shadowAmt = min(1.0, shadowAmt + darkFactor * Double(autoStrength) * 0.85)
+                      // Die Automatik darf die Schatten nur MODERAT anheben. Vorher kam sie
+                      // in Nachtszenen auf 0,95 und hat das Schwarz auf 10/255 gehoben —
+                      // das Bild wirkte flau und die Farben "ausgewaschen". Der Regler
+                      // selbst bleibt voll nutzbar, die Automatik gibt hoechstens 0,22 dazu.
+                      shadowAmt = min(0.85, shadowAmt + min(darkFactor * Double(autoStrength) * 0.85, 0.22))
                   }
                   if !hdrActive, shadowAmt > 0.02, let sk = shadowKernelInstance(),
                      let out = sk.apply(extent: image.extent,
@@ -1491,7 +1501,7 @@ jobs:
                   if mbps > 0.1 {
                       bitrateFactor = Float(min(max((mbps - 7.0) / 15.0, 0.0), 1.0))
                   }
-                  let filterBoost = 1.0 + (1.0 - bitrateFactor) * 1.10   // bis +110 % Filter
+                  let filterBoost = 1.0 + (1.0 - bitrateFactor) * 0.35   // bis +35 % Filter
                   denoise = min(1.0, denoise * filterBoost)
 
                   let aD = denoise > 0.02 ? min(denoise, 1.0) * 0.85 : 0.0
@@ -2693,7 +2703,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 92 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 93 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
