@@ -3448,14 +3448,14 @@ jobs:
                       // ---------------------------------------------------------------- 4
                       Text("4 · Farbe").font(.headline)
                       sliderRow("Sättigung", value: $saturation, range: 0...1, step: 0.05,
-                                display: String(format: "%.0f %%", 100 + (saturation - 0.5) * 60),
-                                rule: "Je höher, desto kräftiger die Farben. 50 % ist neutral. Wird in linearem Licht gerechnet, der Farbton bleibt.")
+                                display: String(format: "%+.0f %%", (saturation - 0.5) * 75),
+                                rule: "0 % ist neutral. Der Wert zeigt die echte Abweichung: +38 % bei Anschlag. Gerechnet wird im YCbCr-Raum, der Farbton bleibt dabei exakt erhalten.")
                       sliderRow("Farbdynamik (Vibrance)", value: $vibrance, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", vibrance * 100),
                                 rule: "Je höher, desto mehr werden blasse Farben angehoben, kräftige bleiben stehen. Der Regler für „natürlich bunt“.")
                       sliderRow("Kontrast", value: $contrast, range: 0...1, step: 0.05,
-                                display: String(format: "%.2f", 0.8 + contrast * 0.4),
-                                rule: "Je höher, desto tiefer die Schwärzen und heller die Lichter. 50 % = 1,00 neutral. Über 65 % verbrennen Lichter (mit weicher Schulter abgefangen).")
+                                display: String(format: "%+.0f %%", (contrast - 0.5) * 40),
+                                rule: "0 % ist neutral. Der Wert ist die echte Kontrastabweichung: +20 % bei Anschlag.")
                       sliderRow("Farbtemperatur", value: $temp, range: 0...1, step: 0.025,
                                 display: String(format: "%.0f K", 6500 + (temp - 0.5) * 8000),
                                 rule: "Je höher, desto kühler (blauer). 6500 K ist D65 und damit der Referenz-Weißpunkt. Darunter wirkt es wärmer (Kerzenlicht).")
@@ -3562,7 +3562,7 @@ jobs:
                           .font(.caption)
                           .foregroundColor(.secondary)
                       sliderRow("Helligkeit (Hintergrundlicht)", value: $brightness, range: 0...1, step: 0.02,
-                                display: String(format: "%+.0f %%", (brightness - 0.5) * 200),
+                                display: String(format: "%+.0f %%", (pow(2.0, (brightness - 0.5) * 1.6) - 1.0) * 100),
                                 rule: "Je höher, desto heller das ganze Bild — linear gerechnet wie die Hintergrundbeleuchtung. 0 % = neutral. Für dunkle Räume 5–10 % darunter.")
                       sliderRow("Lokales Dimming (Mini-LED-Zonen)", value: $localDim, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", localDim * 100),
