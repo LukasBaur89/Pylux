@@ -1254,12 +1254,18 @@ jobs:
                   let haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.30)
                   let s1 = min(max(level, 0), 1) * 1.60 * sharpDamp          // Kanten
                   let s2 = min(max(detail, 0), 1) * 1.10 * sharpDamp         // Textur
+                  // Texturtiefe: vergroessert den zweiten Radius (2,7 -> 5,0 px auf dem
+                  // Panel). Kleine Radien = Feinststruktur, grosse Radien = Texturtiefe
+                  // (Gras, Stoff, Mauerwerk). Kostet keine zusaetzlichen Samples.
+                  let texDepth = Float(min(max(UserDefaults.standard.object(forKey: "pxSharpTexDepth") as? Double ?? 0.25, 0.0), 1.0))
+                  let r2v = 2.7 + 2.3 * texDepth
+                  let s2v = s2 * (1.0 - 0.25 * texDepth)
                   if s1 > 0.02 || s2 > 0.02 {
                       if engineNew, let k = cas2KernelInstance() {
-                          let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -6, dy: -6) }
+                          let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -8, dy: -8) }
                           if let out = k.apply(extent: image.extent, roiCallback: roi,
-                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: 2.7),
-                                                           NSNumber(value: s1), NSNumber(value: s2), NSNumber(value: haloLimitD),
+                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: r2v),
+                                                           NSNumber(value: s1), NSNumber(value: s2v), NSNumber(value: haloLimitD),
                                                            NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true),
                                                            NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.30)),
                                                            NSNumber(value: coringVal)]) {
@@ -1622,6 +1628,10 @@ jobs:
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
+                  // MetalFX-Spatial-Scaler (kantenbewusstes Hochskalieren). Ueber den
+                  // Schalter, Standard aus. Der Ausgang wird fuer die Messung in PXProbe
+                  // gespiegelt — nur so laesst sich per /shot pruefen, ob der Pfad
+                  // korrekt rechnet.
                   let useMFX = (UserDefaults.standard.object(forKey: "pxSharpMetalFX") as? NSNumber)?.boolValue ?? false
                   if useMFX {
                       // Skalierung übernimmt MetalFX am Ende.
@@ -1790,6 +1800,15 @@ jobs:
                                         to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
                                         destinationOrigin: MTLOrigin(x: ox, y: oy, z: 0))
                               blit.endEncoding()
+                          }
+
+                          // Messbild: den ECHTEN MetalFX-Ausgang als CIImage ablegen, damit
+                          // /shot zeigt, was der Scaler rechnet (und nicht ein altes Bild).
+                          if let c = ciContext,
+                             let outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) {
+                              let r = CGRect(x: 0, y: 0, width: CGFloat(outW), height: CGFloat(outH))
+                              PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
+                                                 width: outW, height: outH)
                           }
 
                           cb.present(drawable)
@@ -2438,6 +2457,7 @@ jobs:
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
+              @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.25
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
               @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
               @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
@@ -2746,7 +2766,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 97 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 98 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3010,8 +3030,11 @@ jobs:
                       Text("Je wärmer das iPad, desto eher schaltet die Automatik Klarheit und Dimming ab, um die Bildrate zu halten — das kostet sichtbar Textur. Aus (Standard): die volle Kette läuft immer, auch wenn die Bildrate dadurch sinkt. An: stabilere Bildrate, weicheres Bild bei Hitze.")
                           .font(.caption)
                           .foregroundColor(.secondary)
+                      sliderRow("Texturtiefe (Struktur-Radius)", value: $texDepth, range: 0...1, step: 0.05,
+                                display: String(format: "%.0f %%", texDepth * 100),
+                                rule: "Je höher, desto größere Strukturen werden betont — Gras, Stoff, Mauerwerk, Rinde (Radius 2,7 bis 5,0 px). Je niedriger, desto mehr Feinstkontur. Über 70 % kann es an harten Kanten säumen.")
                       Toggle("Kantenbewusstes Hochskalieren (MetalFX)", isOn: $metalFX)
-                      Text("Je größer der Sprung von 1080p auf das Panel, desto mehr bringt ein kantenbewusster Upscaler gegenüber Lanczos: Kanten werden entlang ihrer Richtung rekonstruiert statt weichgezeichnet — das ist die Technik, die Fernseher-Upscaler (XR, α9) nutzen. Kostet etwas Leistung. Bei Farbfehlern wieder ausschalten.")
+                      Text("Je größer der Sprung von 1080p auf das Panel, desto mehr bringt ein kantenbewusster Upscaler gegenüber Lanczos: Kanten werden entlang ihrer Richtung rekonstruiert statt weichgezeichnet — die Technik der Fernseher-Upscaler (XR, α9). Kostet etwas Leistung. Bei Farbfehlern wieder ausschalten.")
                           .font(.caption)
                           .foregroundColor(.secondary)
 
