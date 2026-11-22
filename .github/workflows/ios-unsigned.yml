@@ -3455,6 +3455,138 @@ jobs:
                   ]
                   for (key, value) in values { d.set(value, forKey: key) }
               }
+
+              /// Setzt einen Bildmodus, ohne die Einstellungen zu öffnen. Wird vom
+              /// Schnellpanel über dem Stream benutzt.
+              static func applyPreset(_ m: Int) {
+                  let d = UserDefaults.standard
+                  var v: [String: Any] = [
+                      "pxSharpClarity": 0.0, "pxSharpClearImage": 0.0, "pxSharpDeconv": 0.0,
+                      "pxSharpLocalTone": 0.0, "pxSharpLocalDim": 0.0, "pxSharpAuto": false,
+                      "pxSharpChroma": 0.0, "pxSharpHueSat": 0.0, "pxSharpCastFix": 0.0,
+                      "pxSharpRange": 0, "pxSharpTvBrightness": false, "pxSharpTemp": 0.5,
+                      "pxSharpGamma": 1.0, "pxSharpBlack": 0.0, "pxSharpScaler": 0,
+                      "pxSharpEasu": 0.6, "pxSharpCoring": 0.05, "pxSharpHalo": 0.12,
+                      "pxSharpDeblock": 0.14, "pxSharpDenoise": 0.06, "pxSharpDeband": 0.30,
+                  ]
+                  switch m {
+                  case 10: // TV-Max
+                      v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.55; v["pxSharpTexDepth"] = 0.20
+                      v["pxSharpSaturation"] = 0.52; v["pxSharpContrast"] = 0.5
+                      v["pxSharpBrightness"] = 0.5; v["pxSharpVibrance"] = 0.04
+                      v["pxSharpGamut"] = 1; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.14
+                  case 8: // Aus / reiner Durchlauf
+                      v["pxSharpLevel"] = 0.0; v["pxSharpDetail"] = 0.0; v["pxSharpTexDepth"] = 0.0
+                      v["pxSharpDeblock"] = 0.0; v["pxSharpDenoise"] = 0.0; v["pxSharpDeband"] = 0.0
+                      v["pxSharpShadow"] = 0.0; v["pxSharpVibrance"] = 0.0
+                      v["pxSharpSaturation"] = 0.5; v["pxSharpContrast"] = 0.5
+                      v["pxSharpBrightness"] = 0.5; v["pxSharpCoring"] = 0.0
+                      v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0
+                  default: // Natürlich
+                      v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.55; v["pxSharpTexDepth"] = 0.20
+                      v["pxSharpSaturation"] = 0.5; v["pxSharpContrast"] = 0.5
+                      v["pxSharpBrightness"] = 0.5; v["pxSharpVibrance"] = 0.0
+                      v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.12
+                  }
+                  v["pxSharpMode"] = m
+                  for (key, value) in v { d.set(value, forKey: key) }
+              }
+          }
+
+          // MARK: - Schnellpanel über dem Stream
+
+          /// Schwebendes Bild-Panel. Schreibt direkt in die UserDefaults, die der
+          /// Renderer in jedem Frame neu liest — jede Änderung ist sofort sichtbar,
+          /// ohne den Stream zu verlassen oder das Spiel zu schließen.
+          struct PXQuickPicturePanel: View {
+              @Binding var isPresented: Bool
+
+              @AppStorage("pxSharpLevel") private var level: Double = 1.0
+              @AppStorage("pxSharpDetail") private var detail: Double = 0.55
+              @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
+              @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
+              @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
+              @AppStorage("pxSharpBrightness") private var brightness: Double = 0.5
+              @AppStorage("pxSharpGamut") private var gamut: Int = 0
+              @AppStorage("pxSharpMode") private var mode: Int = 9
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 15) {
+                      HStack(spacing: 8) {
+                          Text("Bild")
+                              .font(.system(size: 17, weight: .semibold))
+                              .foregroundColor(.white)
+                          Text("wirkt sofort")
+                              .font(.system(size: 11))
+                              .foregroundColor(.white.opacity(0.45))
+                          Spacer()
+                          Button { isPresented = false } label: {
+                              Image(systemName: "xmark.circle.fill")
+                                  .font(.system(size: 24))
+                                  .foregroundColor(.white.opacity(0.55))
+                          }
+                      }
+
+                      Picker("Bildmodus", selection: $mode) {
+                          Text("Natürlich").tag(9)
+                          Text("TV-Max").tag(10)
+                          Text("Aus").tag(8)
+                      }
+                      .pickerStyle(.segmented)
+                      .onChange(of: mode) { m in SharpnessRow.applyPreset(m) }
+
+                      qSlider("Schärfe", value: $level, range: 0...1,
+                              text: String(format: "%.0f %%", level * 100))
+                      qSlider("Detail / Textur", value: $detail, range: 0...1,
+                              text: String(format: "%.0f %%", detail * 100))
+                      qSlider("Schatten", value: $shadow, range: 0...0.5,
+                              text: String(format: "%.0f %%", shadow / 0.5 * 100))
+                      qSlider("Sättigung", value: $saturation, range: 0.30...0.80,
+                              text: String(format: "%+.0f %%", (saturation - 0.5) * 400))
+                      qSlider("Helligkeit", value: $brightness, range: 0.35...0.65,
+                              text: String(format: "%.0f %%", brightness * 200))
+                      qSlider("Kontrast", value: $contrast, range: 0.35...0.65,
+                              text: String(format: "%.0f %%", contrast * 200))
+
+                      Toggle(isOn: Binding(get: { gamut == 1 },
+                                           set: { gamut = $0 ? 1 : 0 })) {
+                          Text("Erweiterte Farben (P3)")
+                              .font(.system(size: 13))
+                              .foregroundColor(.white.opacity(0.85))
+                      }
+                      .toggleStyle(.switch)
+
+                      Text("Tippe daneben, um zu schließen.")
+                          .font(.system(size: 11))
+                          .foregroundColor(.white.opacity(0.35))
+                  }
+                  .padding(18)
+                  .background(
+                      RoundedRectangle(cornerRadius: 18, style: .continuous)
+                          .fill(Color(white: 0.10).opacity(0.96))
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                  .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                          )
+                  )
+                  .shadow(color: .black.opacity(0.55), radius: 26, y: 10)
+              }
+
+              private func qSlider(_ title: String, value: Binding<Double>,
+                                   range: ClosedRange<Double>, text: String) -> some View {
+                  VStack(alignment: .leading, spacing: 3) {
+                      HStack {
+                          Text(title)
+                              .font(.system(size: 12, weight: .medium))
+                              .foregroundColor(.white.opacity(0.75))
+                          Spacer()
+                          Text(text)
+                              .font(.system(size: 12, design: .monospaced))
+                              .foregroundColor(.white.opacity(0.55))
+                      }
+                      Slider(value: value, in: range).tint(.white)
+                  }
+              }
           }
           ROW_EOF
 
@@ -3548,6 +3680,77 @@ jobs:
           else:
               print('review: anchor not found')
           PATCH_EOF
+
+          python3 - <<'QUICKPANEL_PATCH'
+          # Bild-Panel direkt im Stream (ohne die Einstellungen zu verlassen).
+          p = 'ios/Pylux/Views/StreamView.swift'
+          s = open(p, encoding='utf-8').read()
+          changed = []
+
+          anchor = '    @State private var showStats: Bool\n'
+          if 'showPicturePanel' not in s and anchor in s:
+              s = s.replace(anchor, anchor + '    @State private var showPicturePanel = false\n', 1)
+              changed.append('state')
+
+          anchor = '            Spacer()\n\n            // Display mode toggle group'
+          if 'Bild einstellen' not in s and anchor in s:
+              btn = ('            Button {\n'
+                     '                showPicturePanel = true\n'
+                     '            } label: {\n'
+                     '                Image(systemName: "slider.horizontal.3")\n'
+                     '                    .font(.system(size: 15, weight: .medium))\n'
+                     '                    .foregroundColor(.white)\n'
+                     '                    .frame(width: 44, height: 36)\n'
+                     '            }\n'
+                     '            .overlay(\n'
+                     '                RoundedRectangle(cornerRadius: 9)\n'
+                     '                    .stroke(Color.white.opacity(0.45), lineWidth: 1)\n'
+                     '            )\n'
+                     '            .accessibilityLabel("Bild einstellen")\n\n'
+                     '            Spacer()\n\n'
+                     '            // Display mode toggle group')
+              s = s.replace(anchor, btn, 1)
+              changed.append('button')
+
+          anchor = ('            if showOverlay {\n'
+                    '                VStack {\n'
+                    '                    Spacer()\n'
+                    '                    overlayBar\n'
+                    '                }\n'
+                    '                .transition(.move(edge: .bottom))\n'
+                    '            }\n')
+          if 'PXQuickPicturePanel(' not in s and anchor in s:
+              panel = anchor + ('\n'
+                  '            if showPicturePanel {\n'
+                  '                ZStack {\n'
+                  '                    Color.black.opacity(0.45).ignoresSafeArea()\n'
+                  '                        .onTapGesture { showPicturePanel = false }\n'
+                  '                    PXQuickPicturePanel(isPresented: $showPicturePanel)\n'
+                  '                        .frame(maxWidth: 540)\n'
+                  '                        .padding(.horizontal, 20)\n'
+                  '                }\n'
+                  '                .transition(.opacity)\n'
+                  '                .zIndex(15_000)\n'
+                  '            }\n')
+              s = s.replace(anchor, panel, 1)
+              changed.append('panel')
+
+          # Leiste als schwebende Karte statt voller schwarzer Streifen
+          s = s.replace('                    overlayBar\n',
+                        '                    overlayBar\n                        .padding(.horizontal, 22)\n                        .padding(.bottom, 14)\n', 1)
+          s = s.replace('        .background(Color.black.opacity(0.6))\n    }',
+                        '        .background(\n'
+                        '            RoundedRectangle(cornerRadius: 14, style: .continuous)\n'
+                        '                .fill(Color.black.opacity(0.55))\n'
+                        '                .overlay(\n'
+                        '                    RoundedRectangle(cornerRadius: 14, style: .continuous)\n'
+                        '                        .stroke(Color.white.opacity(0.08), lineWidth: 1)\n'
+                        '                )\n'
+                        '        )\n    }', 1)
+
+          open(p, 'w', encoding='utf-8').write(s)
+          print('quickpanel:', changed)
+          QUICKPANEL_PATCH
 
           python3 - <<'BITRATE_PATCH_EOF'
           # Automatik-Bitrate fuer 1080p. Der alte Deckel (12000) begrenzte die
