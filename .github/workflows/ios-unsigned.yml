@@ -2649,7 +2649,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 88 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 89 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3198,18 +3198,28 @@ jobs:
           PX_AUDIO_EOF
 
           python3 - <<'TENBIT_PATCH_EOF'
-          # Decoder auf 10-Bit-Ausgabe umstellen. Der HDR-Stream (PQ) hat in 8 Bit
-          # nur 256 Stufen fuer 10000 cd/m2 - das ist unbrauchbar. VideoToolbox
-          # liefert 10 Bit (0..1023 in 16-Bit-Worten), wenn wir es anfordern.
+          # Decoder auf 10-Bit-Ausgabe (HDR braucht 1024 Stufen), mit 8-Bit-Rueckfall.
           p = 'ios/Pylux/Bridge/VideoDecoder.m'
-          s = open(p, encoding='utf-8').read()
-          old = '        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),'
-          new = ('        (id)kCVPixelBufferPixelFormatTypeKey: '
-                 '@(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),')
-          if old in s:
-              s = s.replace(old, new, 1)
-              open(p, 'w', encoding='utf-8').write(s)
-              print('decoder: 10 Bit aktiviert')
+          src = open(p, encoding='utf-8').read().split(chr(10))
+          out = []
+          patched = 0
+          for l in src:
+              if 'kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange' in l and 'PixelFormatTypeKey' in l:
+                  out.append('        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),')
+                  patched += 1
+                  continue
+              out.append(l)
+              if 'OSStatus err = VTDecompressionSessionCreate' in l:
+                  out.append('    if (err != noErr) {')
+                  out.append('        NSDictionary *a8 = @{')
+                  out.append('            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),')
+                  out.append('            (id)kCVPixelBufferIOSurfacePropertiesKey: @{}')
+                  out.append('        };')
+                  out.append('        err = VTDecompressionSessionCreate(kCFAllocatorDefault, self.formatDesc, NULL, (__bridge CFDictionaryRef)a8, &cb, &_session);')
+                  out.append('    }')
+          if patched:
+              open(p, 'w', encoding='utf-8').write(chr(10).join(out))
+              print('decoder: 10 Bit mit 8-Bit-Rueckfall')
           else:
               print('decoder: Anker nicht gefunden')
           TENBIT_PATCH_EOF
