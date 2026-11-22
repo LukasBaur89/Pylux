@@ -2378,8 +2378,8 @@ jobs:
                   tvBrightness = true
                   chroma = 0.50
                   deconv = 0.95
-                  scaler = 1
-                  easuAmt = 1.0
+                  scaler = 0
+                  easuAmt = 0.85
                   halo = 0.45
                   switch m {
                   case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
@@ -2626,7 +2626,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 84 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 85 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
