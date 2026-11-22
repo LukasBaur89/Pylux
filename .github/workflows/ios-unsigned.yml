@@ -1761,6 +1761,20 @@ jobs:
                       }
                   }
 
+                  // ---- Randsaum entfernen -------------------------------------------
+                  // Die Kernel-Kette (CAS, Deconvolution, Clean, Dither) tastet am Rand
+                  // Nachbarpixel ab. Ausserhalb des Bildes liefert Core Image
+                  // transparentes Schwarz; dadurch rechnet der Kernel dort einen extremen
+                  // Kontrast und schreibt einen 1-3 px breiten hellen Saum an alle vier
+                  // Kanten (gemessen: Rand 61 statt 31 innen, also 2x). Auf dem Panel
+                  // sieht das wie ein leuchtender Rahmen um das Bild aus.
+                  // 4 px beschneiden entfernt den Saum vollstaendig; bei 2732 px Breite
+                  // sind das 0,15 % — unsichtbar.
+                  let saum = image.extent.insetBy(dx: 4, dy: 4)
+                  if saum.width > 16, saum.height > 16 {
+                      image = image.cropped(to: saum)
+                  }
+
                   let canvasRect = CGRect(origin: .zero, size: target)
                   let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
                   let composited = image.composited(over: canvas)
@@ -2649,7 +2663,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 90 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 91 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
