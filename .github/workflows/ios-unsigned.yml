@@ -1622,7 +1622,7 @@ jobs:
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
-                  let useMFX = false
+                  let useMFX = (UserDefaults.standard.object(forKey: "pxSharpMetalFX") as? NSNumber)?.boolValue ?? false
                   if useMFX {
                       // Skalierung übernimmt MetalFX am Ende.
                   } else if pixelPerfect {
@@ -2746,7 +2746,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 96 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 97 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -3008,6 +3008,10 @@ jobs:
                           .foregroundColor(.secondary)
                       Toggle("Bei Hitze automatisch Schärfe sparen", isOn: $perfAuto)
                       Text("Je wärmer das iPad, desto eher schaltet die Automatik Klarheit und Dimming ab, um die Bildrate zu halten — das kostet sichtbar Textur. Aus (Standard): die volle Kette läuft immer, auch wenn die Bildrate dadurch sinkt. An: stabilere Bildrate, weicheres Bild bei Hitze.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      Toggle("Kantenbewusstes Hochskalieren (MetalFX)", isOn: $metalFX)
+                      Text("Je größer der Sprung von 1080p auf das Panel, desto mehr bringt ein kantenbewusster Upscaler gegenüber Lanczos: Kanten werden entlang ihrer Richtung rekonstruiert statt weichgezeichnet — das ist die Technik, die Fernseher-Upscaler (XR, α9) nutzen. Kostet etwas Leistung. Bei Farbfehlern wieder ausschalten.")
                           .font(.caption)
                           .foregroundColor(.secondary)
 
