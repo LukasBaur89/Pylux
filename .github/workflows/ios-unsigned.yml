@@ -2642,9 +2642,9 @@ jobs:
               var onMaxQuality: () -> Void = {}
               var onStableLink: () -> Void = {}
 
-              @AppStorage("pxSharpLevel") private var level: Double = 0.65
+              @AppStorage("pxSharpLevel") private var level: Double = 1.0
               @AppStorage("pxSharpClarity") private var clarity: Double = 0.0
-              @AppStorage("pxSharpDetail") private var detail: Double = 0.0
+              @AppStorage("pxSharpDetail") private var detail: Double = 0.55
               @AppStorage("pxSharpDenoise") private var denoise: Double = 0.06
               @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
               @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
@@ -2660,7 +2660,7 @@ jobs:
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
-              @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.0
+              @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.20
               @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
               @AppStorage("pxSharpUpScale") private var upscaleAmount: Double = 0.60
               @AppStorage("pxSharpLocalTone") private var localTone: Double = 0.0
@@ -2784,24 +2784,24 @@ jobs:
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 9: // Natürlich / kalibriert — Standardmodus
                       gamut = 0
-                      level = 0.65; detail = 0.0; clarity = 0.0
+                      level = 1.0; detail = 0.55; clarity = 0.0
                       deblock = 0.14; denoise = 0.06; vibrance = 0.0
                       saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 600
                       clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
                       brightness = 0.50; shadow = 0.12; chroma = 0.0; coring = 0.04
-                      deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12
+                      deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 10: // TV-Max: alles, was messbar gewinnt — ohne erfundene Details
                       gamut = 1
-                      level = 0.65; detail = 0.0; clarity = 0.0
+                      level = 1.0; detail = 0.55; clarity = 0.0
                       deblock = 0.14; denoise = 0.06; vibrance = 0.04
                       saturation = 0.52; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 900
                       clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.30
                       brightness = 0.50; shadow = 0.14; chroma = 0.0; coring = 0.04
-                      deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12
+                      deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 8: // Referenz: reiner Durchlauf, keine Nachbearbeitung
@@ -3406,9 +3406,9 @@ jobs:
                   let d = UserDefaults.standard
                   let values: [String: Any] = [
                       "pxSharpMode": 9,
-                      "pxSharpLevel": 0.65,
+                      "pxSharpLevel": 1.0,
                       "pxSharpClarity": 0.0,
-                      "pxSharpDetail": 0.0,
+                      "pxSharpDetail": 0.55,
                       "pxSharpDenoise": 0.06,
                       "pxSharpVibrance": 0.0,
                       "pxSharpSaturation": 0.5,
@@ -3417,7 +3417,7 @@ jobs:
                       "pxSharpGamma": 1.0,
                       "pxSharpBlack": 0.0,
                       "pxSharpRange": 0,
-                      "pxSharpTexDepth": 0.0,
+                      "pxSharpTexDepth": 0.20,
                       "pxSharpLocalTone": 0.0,
                       "pxSharpHueSat": 0.0,
                       "pxSharpCastFix": 0.0,
