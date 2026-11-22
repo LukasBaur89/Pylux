@@ -142,6 +142,8 @@ jobs:
               private var lutLastBuild: CFTimeInterval = 0
               /// Von der Bildautomatik gesetzte Daempfung der Detailstufe (1 = voll).
               private var autoDetailScale: Float = 1.0
+              private var lastAutoExpo: Double = 1.0
+
               private var casKernel: CIKernel?
               private var casTried = false
               private var dbKernel: CIKernel?
@@ -840,16 +842,20 @@ jobs:
                                       oR += lift * (1 - oR); oG += lift * (1 - oG); oB += lift * (1 - oB)
                                   }
 
-                                  // Kontrast um 0.5 mit weicher Schulter über 0.85.
-                                  if abs(contrastK - 1.0) > 0.001 {
-                                      func knee(_ x: Double) -> Double {
-                                          let v = (x - 0.5) * contrastK + 0.5
-                                          if v <= 0.80 { return v }
-                                          let over = v - 0.80
-                                          return 0.80 + 0.20 * (over / (over + 0.20))
+                                  // Kontrast um 0.5, danach IMMER eine weiche Schulter ab
+                                  // 0.90. Vorher lief sie nur, wenn der Kontrastregler
+                                  // nicht auf 0.5 stand -- bei neutralem Kontrast schnitt
+                                  // SDR bei 1.0 hart ab, und Himmel/Fenster/Lampen wurden
+                                  // weisse Flaechen ohne Zeichnung.
+                                  func pxKnee(_ x: Double) -> Double {
+                                      var v = (x - 0.5) * contrastK + 0.5
+                                      if v > 0.90 {
+                                          let over = v - 0.90
+                                          v = 0.90 + 0.10 * (over / (over + 0.10))
                                       }
-                                      oR = knee(oR); oG = knee(oG); oB = knee(oB)
+                                      return v
                                   }
+                                  oR = pxKnee(oR); oG = pxKnee(oG); oB = pxKnee(oB)
                                   if abs(gr - 1.0) > 0.001 { oR = pow(oR, Double(gr)) }
                                   if abs(gg - 1.0) > 0.001 { oG = pow(oG, Double(gg)) }
                                   if abs(gb - 1.0) > 0.001 { oB = pow(oB, Double(gb)) }
@@ -1536,7 +1542,15 @@ jobs:
                       if hi > 0.94 { autoExpo -= min(0.08, (hi - 0.94) * 1.1) }
                       if m < 0.13 { autoExpo += min(0.08, (0.13 - m) * 0.9) }
                       if m < 0.30 { autoLift = min(0.022, (0.30 - m) * 0.10) }
+                      // Traegheit: hoechstens 1,5 % pro Bild. Ohne das pumpt die
+                      // Belichtung bei harten Schnitten zwischen zwei Szenen.
+                      let step: Double = 0.015
+                      autoExpo = min(max(autoExpo, lastAutoExpo - step), lastAutoExpo + step)
+                      lastAutoExpo = autoExpo
                       autoDetailScale = Float(1.0 - min(0.40, nz * 0.50))
+                      // Hitzeschutz: meldet die Lastregel Stufe 2, Schaerfe zuruecknehmen,
+                      // bevor Bilder ausfallen.
+                      if sceneNow.perfLevel >= 2 { autoDetailScale *= 0.85 }
                   }
                   if autoExpo < 0.999 || autoExpo > 1.001 {
                       let f = CGFloat(pow(autoExpo, 1.0 / 2.2))
