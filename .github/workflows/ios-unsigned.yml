@@ -2675,7 +2675,7 @@ jobs:
               @AppStorage("pxSharpRange") private var rangeMode: Int = 0
               @AppStorage("pxSharpDiag") private var diag: String = "—"
               @AppStorage("pxSharpShowDiag") private var showDiag: Bool = true
-              @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 600
+              @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 1600
               @AppStorage("pxSharpPacing") private var pacing: Bool = true
               @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
               @AppStorage("pxSharpBypass") private var bypass: Bool = false
@@ -3326,6 +3326,9 @@ jobs:
                           .foregroundColor(.secondary)
                       Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
                       Toggle("HDR deaktivieren (Test bei Farbfehlern)", isOn: $hdrOff)
+                      Text("Für echtes HDR: Codec auf „H.265 + HDR" stellen und auf der PS5 HDR einschalten. Dann liefert die Konsole 10 Bit, und das Panel nutzt seine 1600 Nits — der einzige echte HDR-Weg, der hier möglich ist.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
                       Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
                       Text("Je größer der Unterschied zwischen Quelle und Panel, desto mehr bringt Scaling. 1:1 zeigt die echte Quelle (kleiner, aber pixelgenau).")
                           .font(.caption)
@@ -3487,7 +3490,7 @@ jobs:
                       "pxSharpPacing": true,
                       "pxSharpPaceHz": 60,
                       "pxSharpBypass": false,
-                      "pxSharpHdrPeak": 600,
+                      "pxSharpHdrPeak": 1600,
                       "pxSharpTunedV1": true,
                       "pxSharpTunedV2": true,
                       "pxSharpTunedV3": true,
@@ -3699,6 +3702,63 @@ jobs:
           else:
               print('review: anchor not found')
           PATCH_EOF
+
+          python3 - <<'TENBIT_DECODE_PATCH'
+          # Sperre: Decoder gab immer 8 Bit aus -- damit war HDR (10 Bit) unmoeglich.
+          h = 'ios/Pylux/Bridge/VideoDecoder.h'
+          s = open(h, encoding='utf-8').read()
+          if 'output10Bit' not in s:
+              anchor = '@property (nonatomic, copy, nullable) PyluxVideoDecoderFrameCallback frameCallback;'
+              if anchor in s:
+                  s = s.replace(anchor, anchor + '\n/// 10-Bit-Ausgabe (HDR). Wird nur gesetzt, wenn der Stream HDR liefert.\n@property (nonatomic, assign) BOOL output10Bit;', 1)
+                  open(h, 'w', encoding='utf-8').write(s)
+                  print('header: output10Bit')
+
+          m = 'ios/Pylux/Bridge/VideoDecoder.m'
+          s = open(m, encoding='utf-8').read()
+          changed = []
+          old_fmt = '(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),'
+          new_fmt = '(id)kCVPixelBufferPixelFormatTypeKey: @(self.output10Bit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),'
+          if old_fmt in s and 'self.output10Bit ?' not in s:
+              s = s.replace(old_fmt, new_fmt, 1); changed.append('fmt')
+
+          old_err = '    if (err != noErr) {\n        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[createSession] VTDecompressionSessionCreate FAILED %d", (int)err);\n    }'
+          new_err = ('    if (err != noErr && self.output10Bit) {\n'
+                     '        NSDictionary *attrs8 = @{\n'
+                     '            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),\n'
+                     '            (id)kCVPixelBufferIOSurfacePropertiesKey: @{}\n'
+                     '        };\n'
+                     '        err = VTDecompressionSessionCreate(kCFAllocatorDefault, self.formatDesc, NULL, (__bridge CFDictionaryRef)attrs8, &cb, &_session);\n'
+                     '        os_log(g_vdec_log, "[createSession] 10-bit nicht moeglich, Fallback 8-bit err=%d", (int)err);\n'
+                     '    }\n'
+                     '    if (err != noErr) {\n'
+                     '        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[createSession] VTDecompressionSessionCreate FAILED %d", (int)err);\n'
+                     '    }')
+          if old_err in s and 'Fallback 8-bit' not in s:
+              s = s.replace(old_err, new_err, 1); changed.append('fallback')
+          if changed:
+              open(m, 'w', encoding='utf-8').write(s)
+          print('decoder:', changed)
+
+          # Swift: 10 Bit nur bei HDR-Codec (2)
+          p = 'ios/Pylux/Services/StreamSession.swift'
+          s = open(p, encoding='utf-8').read()
+          old = ('            codec: (connectInfo.videoCodec == 1 || connectInfo.videoCodec == 2)\n'
+                 '                ? PyluxVideoCodec(rawValue: 1)!\n'
+                 '                : PyluxVideoCodec(rawValue: 0)!')
+          new = ('            codec: (connectInfo.videoCodec == 1 || connectInfo.videoCodec == 2)\n'
+                 '                ? PyluxVideoCodec(rawValue: 1)!\n'
+                 '                : PyluxVideoCodec(rawValue: 0)!')
+          cnt = s.count(old)
+          if 'output10Bit = ' not in s and cnt:
+              s = s.replace(old, old, 1)
+              s = s.replace('        var cInfo = ChiakiSessionBridgeConnectInfo()\n        var err: Int32 = 0',
+                            '        // HDR (Codec 2) braucht 10 Bit, sonst ist PQ-Bild stark gebandet.\n'
+                            '        decoder.output10Bit = (connectInfo.videoCodec == 2)\n\n'
+                            '        var cInfo = ChiakiSessionBridgeConnectInfo()\n        var err: Int32 = 0', 2)
+              open(p, 'w', encoding='utf-8').write(s)
+          print('swift: 10bit =', 'output10Bit' in s)
+          TENBIT_DECODE_PATCH
 
           python3 - <<'HOST_BITRATE_PATCH'
           # Vierte Sperre: manuell angelegte Hosts hatten 15000 kbit fest im Code.
