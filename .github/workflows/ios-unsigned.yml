@@ -1684,9 +1684,14 @@ jobs:
                                               width: (src.width * s).rounded(.down),
                                               height: (src.height * s).rounded(.down))
                           let upStrength = Float(UserDefaults.standard.object(forKey: "pxSharpUpScale") as? Double ?? 0.60)
+                          let inv = 1.0 / s
                           if let out = uk.apply(extent: outExt,
-                                                roiCallback: { _, rect in rect.insetBy(dx: -2, dy: -2) },
-                                                arguments: [image, NSNumber(value: 1.0 / s),
+                                                // WICHTIG: der ROI-Rueckruf bekommt Ziel-Koordinaten und
+                                                // muss in QUELL-Koordinaten zurueckgeben (Faktor invScale).
+                                                roiCallback: { _, rect in
+                                                    rect.applying(CGAffineTransform(scaleX: inv, y: inv)).insetBy(dx: -2, dy: -2)
+                                                },
+                                                arguments: [image, NSNumber(value: inv),
                                                             NSNumber(value: upStrength), NSNumber(value: 0.55)]) {
                               image = out
                           } else {
@@ -2823,7 +2828,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 99 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 100 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
