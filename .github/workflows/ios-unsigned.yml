@@ -2708,12 +2708,24 @@ jobs:
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
                       gamut = 0
-                      level = 1.00; detail = 1.00; clarity = 0.38
-                      deblock = 0.16; denoise = 0.06; vibrance = 0.40
-                      saturation = 0.62; contrast = 0.54; temp = 0.500
+                      level = 0.92; detail = 0.95; clarity = 0.24
+                      deblock = 0.20; denoise = 0.08; vibrance = 0.28
+                      saturation = 0.52; contrast = 0.49; temp = 0.500
                       gamma = 1.00; black = 0.0; hdrPeak = 850
-                      clearImage = 1.00; toneMap = 2; localDim = 0.30; deband = 0.12
-                      brightness = 0.47; shadow = 0.32; chroma = 0.80; coring = 0.20
+                      clearImage = 0.85; toneMap = 2; localDim = 0.0; deband = 0.14
+                      brightness = 0.38; shadow = 0.22; chroma = 0.60; coring = 0.62
+                      deconv = 0.30
+                      wbR = 1.00; wbG = 1.00; wbB = 1.00
+                      gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 8: // Referenz: reiner Durchlauf, keine Nachbearbeitung
+                      gamut = 0
+                      level = 0.0; detail = 0.0; clarity = 0.0
+                      deblock = 0.0; denoise = 0.0; vibrance = 0.0
+                      saturation = 0.50; contrast = 0.50; temp = 0.50
+                      gamma = 1.00; black = 0.0; hdrPeak = 600
+                      clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.0
+                      brightness = 0.50; shadow = 0.0; chroma = 0.0; coring = 0.0
+                      deconv = 0.0
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
                   case 4: // LG Vivid (Dynamic QNED Color Pro)
@@ -2766,6 +2778,7 @@ jobs:
                   case 1: return "Sony BRAVIA 7 II"
                   case 2: return "Sony Vivid"
                   case 3: return "LG QNED93"
+                  case 8: return "Referenz (unverfälscht)"
                   case 4: return "LG Vivid"
                   case 6: return "Game"
                   case 7: return "Realistisch"
@@ -2922,7 +2935,7 @@ jobs:
                       HStack {
                           VStack(alignment: .leading, spacing: 1) {
                               Text("PXSharp Bild").font(.headline)
-                              Text("Build 103 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
+                              Text("Build 104 · LG QNED93 Engine").font(.caption2).foregroundColor(.secondary)
                           }
                           Spacer()
                           Button("Notfall-Reset") { resetAll() }
@@ -2957,6 +2970,7 @@ jobs:
                           Text("Ultra (max. Detail)").tag(5)
                           Text("Game (minimal)").tag(6)
                           Text("Realistisch (kalibriert)").tag(7)
+                          Text("Referenz (unverfälscht)").tag(8)
                       }
                       .onChange(of: mode) { m in applyMode(m) }
                       Text(modeTitle + ": " + modeInfo)
@@ -3385,6 +3399,22 @@ jobs:
           else:
               print('review: anchor not found')
           PATCH_EOF
+
+          python3 - <<'BITRATE_PATCH_EOF'
+          # Automatik-Bitrate fuer 1080p anheben. Der alte Wert (12000) war der Deckel,
+          # der die Bildqualitaet monatelang begrenzt hat: die PS5 liefert ueber WLAN
+          # bis ~30 Mbit, wenn man es anfordert.
+          p = 'ios/Pylux/Views/SettingsView.swift'
+          s = open(p, encoding='utf-8').read()
+          old = 'case 1080: return codec == 1 ? 12000 : 15000'
+          new = 'case 1080: return codec == 1 ? 45000 : 30000'
+          if old in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('bitrate auto: 1080p -> 45000 (H.265) / 30000 (H.264)')
+          else:
+              print('bitrate auto: anchor not found')
+          BITRATE_PATCH_EOF
 
           cat > /tmp/pxaudio.txt <<'PX_AUDIO_EOF'
           // ---- PXSHARP_AUDIO_DSP: 5-Band-EQ + 3D-Weite + Soft-Limiter ----------------
