@@ -4179,8 +4179,35 @@ jobs:
 
               /// Setzt einen Bildmodus, ohne die Einstellungen zu öffnen. Wird vom
               /// Schnellpanel über dem Stream benutzt.
+              static let profileKeys = ["pxSharpLevel","pxSharpDetail","pxSharpTexDepth","pxSharpClarity",
+                  "pxSharpClearImage","pxSharpDeconv","pxSharpHalo","pxSharpCoring","pxSharpChroma",
+                  "pxSharpSaturation","pxSharpVibrance","pxSharpContrast","pxSharpTemp","pxSharpBrightness",
+                  "pxSharpShadow","pxSharpDenoise","pxSharpDeblock","pxSharpDeband","pxSharpLocalDim",
+                  "pxSharpAutoStrength"]
+
+              /// Sichert die aktuellen Regler unter dem gerade aktiven Modus.
+              static func saveProfile(_ mode: Int) {
+                  let d = UserDefaults.standard
+                  var dict: [String: Double] = [:]
+                  for k in profileKeys { dict[k] = d.double(forKey: k) }
+                  if let data = try? JSONSerialization.data(withJSONObject: dict) {
+                      d.set(data, forKey: "pxProfile\(mode)")
+                  }
+              }
+
+              /// Laedt ein gesichertes Profil, falls es eines gibt.
+              static func loadProfile(_ mode: Int) {
+                  let d = UserDefaults.standard
+                  guard let data = d.data(forKey: "pxProfile\(mode)"),
+                        let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Double] else { return }
+                  for (k, v) in dict { d.set(v, forKey: k) }
+              }
+
               static func applyPreset(_ m: Int) {
                   let d = UserDefaults.standard
+                  // Beim Wechsel: alten Modus sichern, neuen spaeter wiederherstellen.
+                  let cur = d.integer(forKey: "pxSharpMode")
+                  if cur != m && cur >= 0 { saveProfile(cur) }
                   var v: [String: Any] = [
                       "pxSharpClarity": 0.0, "pxSharpClearImage": 0.0, "pxSharpDeconv": 0.0,
                       "pxSharpLocalTone": 0.0, "pxSharpLocalDim": 0.0, "pxSharpAuto": false,
@@ -4230,6 +4257,8 @@ jobs:
                   v["pxSharpMode"] = m
                   v["pxSharpBypass"] = false
                   for (key, value) in v { d.set(value, forKey: key) }
+                  // Eigenes Profil dieses Modus zurueckholen, falls vorhanden.
+                  loadProfile(m)
               }
           }
 
@@ -4315,7 +4344,7 @@ jobs:
                       // Alle Einstellungen — dieselbe Ansicht wie in den Einstellungen,
                       // nur über dem Spiel.
                       ScrollView {
-                          SharpnessRow()
+                          PXSettingsClean()
                               .padding(.horizontal, 18)
                               .padding(.top, 4)
                               .padding(.bottom, 22)
@@ -4430,6 +4459,142 @@ jobs:
                   configuration.label
                       .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
                       .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+              }
+          }
+
+          // MARK: - Sortierte Einstellungen für das Schnellpanel
+
+          /// Bewusst neu geordnet: erst was schaerfer macht, dann Farbe, dann Licht,
+          /// dann eine eigene Sektion fuer Regler, die das Bild auch verschlechtern
+          /// koennen -- mit Warnung. Ganz unten die Ausgabe.
+          struct PXSettingsClean: View {
+              @AppStorage("pxSharpLevel") private var level: Double = 1.0
+              @AppStorage("pxSharpDetail") private var detail: Double = 0.75
+              @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.35
+              @AppStorage("pxSharpClarity") private var clarity: Double = 0.0
+              @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.20
+              @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
+              @AppStorage("pxSharpHalo") private var halo: Double = 0.15
+              @AppStorage("pxSharpCoring") private var coring: Double = 0.05
+              @AppStorage("pxSharpChroma") private var chroma: Double = 0.5
+              @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
+              @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
+              @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
+              @AppStorage("pxSharpTemp") private var temp: Double = 0.5
+              @AppStorage("pxSharpGamut") private var gamut: Int = 0
+              @AppStorage("pxSharpHlBalance") private var hlBalance: Bool = true
+              @AppStorage("pxSharpBrightness") private var brightness: Double = 0.49
+              @AppStorage("pxSharpShadow") private var shadow: Double = 0.0
+              @AppStorage("pxSharpAuto") private var auto: Bool = false
+              @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.5
+              @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
+              @AppStorage("pxSharpDenoise") private var denoise: Double = 0.06
+              @AppStorage("pxSharpDeblock") private var deblock: Double = 0.14
+              @AppStorage("pxSharpDeband") private var deband: Double = 0.30
+              @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.0
+              @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
+              @AppStorage("pxSharpPacing") private var pacing: Bool = true
+              @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
+              @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 18) {
+
+                      pxHead("1 · Schärfe und Detail", "Nur diese Regler machen das Bild schärfer.")
+                      pxSlider("Bildschärfe (Kanten)", $level, 0...1, pct(level),
+                               "Konturen und Text. Ab 85 % entstehen helle Säume an Kanten.")
+                      pxSlider("Texturdichte (Feinstruktur)", $detail, 0...1, pct(detail),
+                               "Gras, Kies, Stoff, Metall. Der wichtigste Regler für Detail.")
+                      pxSlider("Texturtiefe (grobe Struktur)", $texDepth, 0...1, pct(texDepth),
+                               "Mauerwerk, Fels, Bodenwellen. Zu hoch = fleckig.")
+                      pxSlider("Clear Image (Vor-Schärfung 1080p)", $clearImage, 0...1, pct(clearImage),
+                               "Gibt dem Hochskalieren echte Kanten. 20–30 % ist der gute Bereich.")
+                      pxSlider("Halo-Grenze", $halo, 0.05...0.55, pct(halo),
+                               "Wie viel Überschwinger erlaubt ist. Niedriger = sauberer, höher = knackiger.")
+
+                      pxHead("2 · Farbe und Realismus", "Für natürliche Farben: alles hier auf neutral lassen.")
+                      pxSlider("Sättigung", $saturation, 0.3...0.8, signed(saturation),
+                               "0 % ist neutral. Mehr wird schnell künstlich.")
+                      pxSlider("Farbdynamik (nur blasse Farben)", $vibrance, 0...1, pct(vibrance),
+                               "Hebt nur schwache Farben — wirkt natürlicher als Sättigung.")
+                      pxSlider("Kontrast", $contrast, 0.35...0.65, signedContrast(contrast),
+                               "0 % ist neutral.")
+                      pxSlider("Farbtemperatur", $temp, 0.35...0.65,
+                               String(format: "%.0f K", 6500 + (temp - 0.5) * 8000),
+                               "6500 K ist der Referenz-Weißpunkt.")
+                      Picker("Farbumfang", selection: $gamut) {
+                          Text("BT.709 (realistisch)").tag(0)
+                          Text("DCI-P3 (kräftiger)").tag(1)
+                      }
+                      Toggle("Wolken und Weiß neutral halten", isOn: $hlBalance)
+                      Text("Zieht nur die hellen Flächen auf Weiß. Ohne das bleiben Wolken gelb-creme.")
+                          .font(.caption).foregroundColor(.secondary)
+
+                      pxHead("3 · Licht und Automatik", "Helligkeit und wie viel die App selbst regelt.")
+                      pxSlider("Helligkeit", $brightness, 0.35...0.65,
+                               String(format: "%+.0f %%", (pow(2.0, (brightness - 0.5) * 1.6) - 1.0) * 100),
+                               "0 % ist neutral. Bei zu hellem Bild 3–5 % darunter.")
+                      pxSlider("Schattendurchzeichnung", $shadow, 0...0.6, pct(shadow),
+                               "Nur für dunkle Szenen. Über 30 % wird das Bild flau.")
+                      Toggle("Automatik (Belichtung)", isOn: $auto)
+                      Text("Nimmt Überbelichtung zurück und hellt dunkle Szenen leicht auf. Maximal ±6 %.")
+                          .font(.caption).foregroundColor(.secondary)
+                      if auto {
+                          pxSlider("Automatik-Stärke", $autoStrength, 0.2...1.0, pct(autoStrength),
+                                   "50 % ist ein guter Wert. Höher greift stärker ein.")
+                      }
+                      Toggle("Bildautomatik (Feinabgleich)", isOn: $autoEngine)
+                      Text("Kleine Korrekturen pro Szene: Lichter zurück, Schwärzen leicht hoch, Schärfe bei Rauschen runter. Bewusst klein gehalten.")
+                          .font(.caption).foregroundColor(.secondary)
+
+                      pxHead("4 · Kann das Bild verschlechtern", "Vorsicht: Diese Regler helfen nur bei schlechter Quelle.")
+                      pxSlider("Rauschfilter", $denoise, 0...0.5, pct(denoise),
+                               "Zu hoch = Textur verschwindet.")
+                      pxSlider("MPEG-Blöcke glätten", $deblock, 0...0.5, pct(deblock),
+                               "Zu hoch = matschig.")
+                      pxSlider("Sanfte Verläufe (Deband)", $deband, 0...0.6, pct(deband),
+                               "Hilft gegen Streifen im Himmel. Zu hoch = Textur weg.")
+                      pxSlider("Klarheit (lokaler Kontrast)", $clarity, 0...0.6, pct(clarity),
+                               "Mehr „Pop“, aber flach und teuer in der Rechnung.")
+                      pxSlider("Lokales Dimming", $localDim, 0...1, pct(localDim),
+                               "Hebt in Tests das Schwarz an. Meist aus lassen.")
+                      Toggle("TV-Helligkeit (dunkler machen)", isOn: $tvBrightness)
+
+                      pxHead("5 · Ausgabe", "Bildrate und Rechenlast.")
+                      Toggle("Frame Pacing", isOn: $pacing)
+                      Picker("Bildrate", selection: $paceHz) {
+                          Text("60 Hz").tag(60)
+                          Text("120 Hz").tag(120)
+                      }
+                      Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
+                  }
+              }
+
+              private func pct(_ v: Double) -> String { String(format: "%.0f %%", v * 100) }
+              private func signed(_ v: Double) -> String { String(format: "%+.0f %%", (v - 0.5) * 75) }
+              private func signedContrast(_ v: Double) -> String { String(format: "%+.0f %%", (v - 0.5) * 40) }
+
+              private func pxHead(_ t: String, _ sub: String) -> some View {
+                  VStack(alignment: .leading, spacing: 2) {
+                      Text(t).font(.system(size: 15, weight: .semibold))
+                      Text(sub).font(.caption).foregroundColor(.secondary)
+                  }
+                  .padding(.top, 6)
+              }
+
+              private func pxSlider(_ title: String, _ value: Binding<Double>,
+                                    _ range: ClosedRange<Double>, _ display: String,
+                                    _ rule: String) -> some View {
+                  VStack(alignment: .leading, spacing: 3) {
+                      HStack {
+                          Text(title).font(.system(size: 13))
+                          Spacer()
+                          Text(display).font(.system(size: 12, design: .monospaced))
+                              .foregroundColor(.secondary)
+                      }
+                      Slider(value: value, in: range)
+                      Text(rule).font(.caption2).foregroundColor(.secondary)
+                  }
               }
           }
           ROW_EOF
