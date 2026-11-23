@@ -143,6 +143,12 @@ jobs:
               /// Von der Bildautomatik gesetzte Daempfung der Detailstufe (1 = voll).
               private var autoDetailScale: Float = 1.0
               private var lastAutoExpo: Double = 1.0
+              // Wolken-/Weisspunkt-Abgleich: nur die hellen Bereiche werden neutral
+              // gezogen. Wolken sind in der Realitaet weiss -- das ist der einzige
+              // physikalisch eindeutige Farbanker im Bild.
+              private var hlGainR: Double = 1.0
+              private var hlGainB: Double = 1.0
+              private var hlCounter: Int = 0
 
               private var casKernel: CIKernel?
               private var casTried = false
@@ -482,6 +488,55 @@ jobs:
 
               deinit {
                   displayLink?.invalidate()
+              }
+
+              // MARK: - Wolken-Abgleich
+
+              /// Misst nur die hellen Bereiche (Wolken, Spitzlichter) und zieht sie
+              /// soweit zur Neutralitaet, dass Weiss wieder Weiss ist. Dunkle und
+              /// mittlere Toene bleiben unangetastet -- dort ist eine warme oder kuehle
+              /// Note eine Stilfrage, hier nicht.
+              private func measureHighlightBalance(from img: CIImage) {
+                  guard let ctx = ciContext else { return }
+                  let w = 64, h = 36
+                  let norm = img.transformed(by: CGAffineTransform(translationX: -img.extent.origin.x,
+                                                                   y: -img.extent.origin.y))
+                  guard norm.extent.width > 1, norm.extent.height > 1 else { return }
+                  let small = norm.transformed(by: CGAffineTransform(scaleX: CGFloat(w) / norm.extent.width,
+                                                                     y: CGFloat(h) / norm.extent.height))
+                  guard let cg = ctx.createCGImage(small, from: CGRect(x: 0, y: 0, width: w, height: h)),
+                        let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return }
+                  var buf = [UInt8](repeating: 0, count: w * h * 4)
+                  let drawn = buf.withUnsafeMutableBytes { raw -> Bool in
+                      guard let b2 = CGContext(data: raw.baseAddress, width: w, height: h,
+                                               bitsPerComponent: 8, bytesPerRow: w * 4, space: cs,
+                                               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                      b2.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+                      return true
+                  }
+                  guard drawn else { return }
+                  var rs: [Double] = []; var gs: [Double] = []; var bs: [Double] = []
+                  for i in stride(from: 0, to: w * h * 4, by: 4) {
+                      let R = Double(buf[i]) / 255.0
+                      let G = Double(buf[i + 1]) / 255.0
+                      let B = Double(buf[i + 2]) / 255.0
+                      let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
+                      if y > 0.72 { rs.append(R); gs.append(G); bs.append(B) }
+                  }
+                  // Zu wenige helle Pixel (Nacht, dunkler Raum): nichts tun.
+                  guard rs.count >= 40 else { return }
+                  let mr = rs.reduce(0, +) / Double(rs.count)
+                  let mg = gs.reduce(0, +) / Double(gs.count)
+                  let mb = bs.reduce(0, +) / Double(bs.count)
+                  guard mr > 0.05, mg > 0.05, mb > 0.05 else { return }
+                  // Im Gamma-Raum messen und im Gamma-Raum korrigieren -- konsistent.
+                  var gr = mg / mr
+                  var gb = mg / mb
+                  gr = min(max(gr, 0.94), 1.06)
+                  gb = min(max(gb, 0.94), 1.06)
+                  // Sanft nachziehen, damit nichts springt.
+                  hlGainR = hlGainR * 0.85 + gr * 0.15
+                  hlGainB = hlGainB * 0.85 + gb * 0.15
               }
 
               // MARK: - Weisspunkt-Abgleich
@@ -868,8 +923,8 @@ jobs:
                       && hueSat < 0.001 && castK < 0.001
                   if isNeutral { return input }
 
-                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f",
-                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK)
+                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.4f/%.4f",
+                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK, hlGainR, hlGainB)
                   if key != colorLUTKey || colorLUTData == nil {
                       // Die LUT hat 33^3 = 35.937 Stützpunkte (statt 65^3 = 274.625).
                       // 33er-Würfel sind der Standard für 3D-LUTs, der Unterschied ist
@@ -1021,6 +1076,17 @@ jobs:
                                   var oR = pow(r, 1.0 / 2.2)
                                   var oG = pow(gg2, 1.0 / 2.2)
                                   var oB = pow(b, 1.0 / 2.2)
+
+                                  // Wolken-Abgleich: wirkt nur oberhalb ~62 % Helligkeit,
+                                  // damit Mitten und Schatten unveraendert bleiben.
+                                  if abs(hlGainR - 1.0) > 0.0005 || abs(hlGainB - 1.0) > 0.0005 {
+                                      let yTop = max(oR, max(oG, oB))
+                                      var wH = (yTop - 0.62) / 0.26
+                                      if wH < 0 { wH = 0 }; if wH > 1 { wH = 1 }
+                                      wH = wH * wH * (3 - 2 * wH)
+                                      oR *= (1.0 + (hlGainR - 1.0) * wH)
+                                      oB *= (1.0 + (hlGainB - 1.0) * wH)
+                                  }
 
                                   // Schwarzpegel: echter Lift der Schwärze in der
                                   // Anzeige-Domain. +0.10 hebt Schwarz um 4 %/10 Stufen,
@@ -2117,6 +2183,14 @@ jobs:
                       if !hdrActive { measureWhitePoint(from: image) }
                       else { pxNote("HDR aktiv — Weisspunktabgleich nur fuer SDR") }
                   }
+                  let hlBalance = (UserDefaults.standard.object(forKey: "pxSharpHlBalance") as? NSNumber)?.boolValue ?? true
+                  if hlBalance {
+                      hlCounter += 1
+                      if hlCounter >= 30 {
+                          hlCounter = 0
+                          if !hdrActive { measureHighlightBalance(from: image) }
+                      }
+                  }
                   if colorEngine && !hdrActive && !bypassNow {
                       image = applyColorEngine(image)
                   }
@@ -3004,6 +3078,7 @@ jobs:
               @AppStorage("pxSharpMaster") private var master: Double = 1.0
               @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
               @AppStorage("pxSharpWBNote") private var wbNote: String = ""
+              @AppStorage("pxSharpHlBalance") private var hlBalance: Bool = true
               @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
@@ -3539,6 +3614,10 @@ jobs:
                                       .font(.caption)
                                       .foregroundColor(.green)
                               }
+                              Toggle("Wolken/Weiß neutral halten", isOn: $hlBalance)
+                              Text("Zieht nur die hellen Bereiche (Wolken, Spitzlichter) soweit zur Neutralität, dass Weiß wieder weiß ist. Mitten und Schatten bleiben unangetastet — dort ist eine warme oder kühle Note eine Stilfrage. Ohne das bleiben Wolken gelb-creme, wie im Spiel-Grade.")
+                                  .font(.caption)
+                                  .foregroundColor(.secondary)
                               Button("Weißabgleich zurücksetzen") {
                                   wbR = 1.0; wbG = 1.0; wbB = 1.0; wbPreset = 3
                               }
@@ -3843,6 +3922,7 @@ jobs:
                       "pxSharpPacing": true,
                       "pxSharpPaceHz": 60,
                       "pxSharpBypass": false,
+                      "pxSharpHlBalance": true,
                       "pxSharpMaster": 1.0,
                       "pxSharpAutoEngine": true,
                       "pxSharpHdrPeak": 1600,
