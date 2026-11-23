@@ -1858,7 +1858,7 @@ jobs:
 
               /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
               /// Panel-Auflösung, nie auf dem 1080p-Signal.
-              private func applyDetailStage(_ input: CIImage) -> CIImage {
+              private func applyDetailStage(_ input: CIImage, radiusScale: Float = 1.0) -> CIImage {
                   if UserDefaults.standard.bool(forKey: "pxSharpBypass") { return input }
                   var image = input
                   let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.50)
@@ -1905,9 +1905,10 @@ jobs:
                   haloLimitD *= (1.0 - 0.55 * strengthNorm)
                   if s1 > 0.02 || s2 > 0.02 {
                       if engineNew, let k = cas2KernelInstance() {
-                          let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: -8, dy: -8) }
+                          let halo: CGFloat = CGFloat(-8.0 * radiusScale)
+                          let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: halo, dy: halo) }
                           if let out = k.apply(extent: image.extent, roiCallback: roi,
-                                               arguments: [image, NSNumber(value: 1.35), NSNumber(value: r2v),
+                                               arguments: [image, NSNumber(value: 1.35 * radiusScale), NSNumber(value: r2v * radiusScale),
                                                            NSNumber(value: s1), NSNumber(value: s2v), NSNumber(value: haloLimitD),
                                                            NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true),
                                                            NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)),
@@ -1916,7 +1917,7 @@ jobs:
                           } else {
                               // Fallback: falls der Kernel zur Laufzeit nicht durchlaeuft
                               image = image.applyingFilter("CIUnsharpMask", parameters: [
-                                  kCIInputRadiusKey: 1.4,
+                                  kCIInputRadiusKey: CGFloat(1.4 * radiusScale),
                                   kCIInputIntensityKey: min(level, 1.0) * 1.25
                               ])
                           }
@@ -2377,6 +2378,10 @@ jobs:
                       lastClipShare *= 0.90
                   }
 
+                  // Detailstufe auf QUELLAUFLOESUNG: 2,1 statt 4,2 Mio Pixel.
+                  let detailScale = Float(src.width / max(target.width, 1))
+                  image = applyDetailStage(image, radiusScale: detailScale)
+
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
@@ -2454,8 +2459,7 @@ jobs:
                       }
                   }
 
-                  // Immer schärfen — genau wie im bewährten Build 28. MetalFX skaliert danach.
-                  image = applyDetailStage(image)
+                  // Schaerfung laeuft vor der Skalierung auf Quellaufloesung (siehe oben).
 
                   // Kontrast: 50 % = neutral
                   let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
