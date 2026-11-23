@@ -826,9 +826,12 @@ jobs:
                   // mit weicher Schulter. CIColorControls schneidet bei 1.0 hart ab - in
                   // hellen Szenen waren das gemessen 3,6 % ausgebrannte Pixel.
                   let contrastRawL = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
-                  let masterC = min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)
-                  let cScaled = 0.5 + (Double(contrastRawL) - 0.5) * masterC
-                  let contrastK = 0.8 + min(max(cScaled, 0), 1) * 0.4
+                  // Der Gesamtstaerke-Regler skaliert NUR die Detailstufen, nicht die Farbe.
+                  // Vorher multiplizierte er Saettigung und Kontrast mit: bei 139 % wurde
+                  // aus +7,5 % Saettigung +14 %, und die Schatten kippten ins Orange
+                  // (gemessen B/G 0,73 roh -> 0,54). Wer Schaerfe hochdreht, will nicht
+                  // gleichzeitig mehr Farbe.
+                  let contrastK = 0.8 + Double(min(max(contrastRawL, 0), 1)) * 0.4
                   // Backlight-Emulation: 0.5 = neutral, 0 = -0.8 Blenden, 1 = +0.8 Blenden.
                   let brightGain = pow(2.0, Double(brightRaw - 0.5) * 1.6)
 
@@ -841,8 +844,8 @@ jobs:
                   if kn > 0.0001 {
                       gainR /= kn; gainG /= kn; gainB /= kn
                   }
-                  let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75 * masterC
-                  let kVib = Double(vib) * 1.10 * masterC
+                  let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75
+                  let kVib = Double(vib) * 1.10
                   // Hue-selektives Farbmanagement (wie "Color Detail" bei Sony/LG):
                   // Blau in Nachtbildern zaehmen, Haut schuetzen, Gruen erhalten.
                   let hueSat = Double(min(max(UserDefaults.standard.object(forKey: "pxSharpHueSat") as? Double ?? 0.0, 0.0), 1.0))
