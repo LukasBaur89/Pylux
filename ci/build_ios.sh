@@ -5274,6 +5274,7 @@ find build-iphoneos -name "*.a" -print0 | \
   xargs -0 libtool -static -o build-iphoneos/libchiaki_complete.a
 
 echo "--- Baue App (ohne Signatur) ---"
+cd ios
 xcodebuild -project Pylux.xcodeproj -scheme Pylux \
   -sdk iphoneos -configuration Release \
   -derivedDataPath build-derived \
@@ -5285,6 +5286,7 @@ xcodebuild -project Pylux.xcodeproj -scheme Pylux \
   DEVELOPMENT_TEAM="" \
   build
 
+cd ..
 echo "--- Packe IPA ---"
 APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
 test -d "$APP"
