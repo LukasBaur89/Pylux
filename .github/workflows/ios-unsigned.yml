@@ -903,7 +903,7 @@ jobs:
                       // schob die Schaerfung die Fahrbahn auf Kreideweiss (gemessen:
                       // p99 +23 Stufen, Flaechen ueber 95 % x23).
                       float lumaHi = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
-                      float hiGate = 1.0 - smoothstep(0.72, 0.96, lumaHi);
+                      float hiGate = 1.0 - smoothstep(0.68, 0.94, lumaHi);
                       lim *= (0.25 + 0.75 * hiGate);
                       outv = clamp(outv, mn - lim, mx + lim);
                       return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
@@ -1223,7 +1223,7 @@ jobs:
                                           // wurde der gemessene Weisspunkt (z. B. 0,89)
                                           // auf 1,0 gezogen -- das Bild wurde dadurch
                                           // um 12 % aufgehellt und brannte oben aus.
-                                          var ys = (yOut0 - lvlBlack) / (lvlWhite - lvlBlack) * 0.92
+                                          var ys = (yOut0 - lvlBlack) / (lvlWhite - lvlBlack) * 0.90
                                           if ys < 0 { ys = 0 }
                                           // Weiche Begrenzung: die Spreizung darf die
                                           // Lichter nicht wieder aufreissen.
@@ -2378,10 +2378,6 @@ jobs:
                       lastClipShare *= 0.90
                   }
 
-                  // Detailstufe auf QUELLAUFLOESUNG: 2,1 statt 4,2 Mio Pixel.
-                  let detailScale = Float(src.width / max(target.width, 1))
-                  image = applyDetailStage(image, radiusScale: detailScale)
-
                   let sx = target.width / src.width
                   let sy = target.height / src.height
                   let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
@@ -2459,7 +2455,10 @@ jobs:
                       }
                   }
 
-                  // Schaerfung laeuft vor der Skalierung auf Quellaufloesung (siehe oben).
+                  // Schaerfung auf PANEL-Aufloesung: beim Hineinzoomen bleiben die
+                  // Kanten crisper als bei Quellaufloesung. Die Renderzeit liegt bei
+                  // 13 ms (Budget 16,7) -- die App ist nicht der Bremsklotz, der Stream ist es.
+                  image = applyDetailStage(image)
 
                   // Kontrast: 50 % = neutral
                   let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
@@ -4627,6 +4626,36 @@ jobs:
               open(p, 'w', encoding='utf-8').write(s)
           print('swift: 10bit =', 'output10Bit' in s)
           TENBIT_DECODE_PATCH
+
+          python3 - <<'HDR_ATTACH_PATCH'
+          # HDR: VideoToolbox setzt bei selbst erzeugter Formatbeschreibung keine
+          # Farb-Anhaenge. Ohne diese Markierung erkennt der Renderer PQ nie -> HDR
+          # bleibt aus, selbst wenn die Konsole HDR sendet.
+          p = 'ios/Pylux/Bridge/VideoDecoder.m'
+          s = open(p, encoding='utf-8').read()
+          old = '''    if (layer) {
+                  CMVideoFormatDescriptionRef fmtDesc = NULL;'''
+          new = '''    if (layer) {
+                  // Nur im 10-Bit/HDR-Pfad markieren -- sonst wuerde SDR als PQ gerechnet.
+                  OSType pxFmt = CVPixelBufferGetPixelFormatType(imageBuffer);
+                  if (dec.output10Bit &&
+                      (pxFmt == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                       pxFmt == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)) {
+                      CVBufferSetAttachment(imageBuffer, kCVImageBufferColorPrimariesKey,
+                                            kCVImageBufferColorPrimaries_ITU_R_2020,
+                                            kCVAttachmentMode_ShouldPropagate);
+                      CVBufferSetAttachment(imageBuffer, kCVImageBufferTransferFunctionKey,
+                                            kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
+                                            kCVAttachmentMode_ShouldPropagate);
+                  }
+                  CMVideoFormatDescriptionRef fmtDesc = NULL;'''
+          if old in s and 'kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ' not in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('hdr-attach: gesetzt')
+          else:
+              print('hdr-attach: nichts zu tun')
+          HDR_ATTACH_PATCH
 
           python3 - <<'HOST_BITRATE_PATCH'
           # Vierte Sperre: manuell angelegte Hosts hatten 15000 kbit fest im Code.
