@@ -13,7 +13,8 @@
     scripts:
       - name: Werkzeuge
         script: |
-          brew install cmake ninja protobuf@29 python-setuptools || true
+          brew install cmake ninja protobuf@29 python-setuptools libplacebo || true
+          brew list libplacebo >/dev/null 2>&1 || brew install --force-bottle libplacebo || true
       - name: PXSharp bauen
         script: |
           chmod +x ci/build_ios.sh
