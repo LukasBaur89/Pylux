@@ -287,8 +287,7 @@ jobs:
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] drawableSize=%.0fx%.0f (Faktor %.2f)",
                              size.width, size.height, Double(factor))
                   }
-                  let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
-                  diagLabel.isHidden = !showDiag
+                  diagLabel.isHidden = !(UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true)
                   if showDiag {
                       diagLabel.frame = CGRect(x: 12, y: 12, width: max(200, bounds.width - 24), height: 48)
                   }
@@ -365,7 +364,7 @@ jobs:
                       DispatchQueue.main.async { [weak self] in
                       guard let self = self else { return }
                       let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
-                      if self.diagLabel.isHidden == showDiag { self.diagLabel.isHidden = !showDiag }
+                      self.diagLabel.isHidden = !showDiag
                       self.diagLabel.text = line
                   }
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
@@ -4677,6 +4676,14 @@ jobs:
               s2 = s2.replace('0.001000', '0.000000', 1)
               open(p2, 'w', encoding='utf-8').write(s2)
               print('launchspec: bwLoss 0')
+          p3 = 'lib/src/streamconnection.c'
+          s3 = open(p3, encoding='utf-8').read()
+          if 'launch_spec.rtt = session->rtt_us / 1000;' in s3:
+              s3 = s3.replace('launch_spec.rtt = session->rtt_us / 1000;',
+                  'launch_spec.rtt = session->rtt_us / 1000;\n\tif(launch_spec.rtt > 8) launch_spec.rtt = 8;', 1)
+              open(p3, 'w', encoding='utf-8').write(s3)
+              print('launchspec: rtt begrenzt')
+
 
           LAUNCHSPEC_PATCH
           python3 - <<'KEYFRAME_PATCH'
