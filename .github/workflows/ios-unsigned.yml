@@ -160,6 +160,7 @@ jobs:
               // einen festen Zielwert gibt es also nicht, nur einen Bereich.
               private var midGainR: Double = 1.0
               private var midGainB: Double = 1.0
+              private var hlNearWhiteShare: Double = 0.0
 
               private var casKernel: CIKernel?
               private var casTried = false
@@ -540,6 +541,11 @@ jobs:
                   }
                   // Bereich messen: 2- und 98-Perzentil der Helligkeit.
                   let clipRaw = Double(clipCount) / Double(max(lumas.count, 1))
+                  // Spitzlichtschutz: wie viel Flaeche liegt fast auf Weiss?
+                  var nearWhite = 0
+                  for y in lumas where y >= 0.95 { nearWhite += 1 }
+                  let nwShare = Double(nearWhite) / Double(max(lumas.count, 1))
+                  hlNearWhiteShare = hlNearWhiteShare * 0.85 + nwShare * 0.15
                   if lumas.count > 200 {
                       lumas.sort()
                       let p2 = lumas[Int(Double(lumas.count) * 0.02)]
@@ -1196,9 +1202,13 @@ jobs:
                                   // weisse Flaechen ohne Zeichnung.
                                   func pxKnee(_ x: Double) -> Double {
                                       var v = (x - 0.5) * contrastK + 0.5
-                                      if v > 0.90 {
-                                          let over = v - 0.90
-                                          v = 0.90 + 0.10 * (over / (over + 0.10))
+                                      // Schulter erst ab 0,93 und schmaler. Vorher begann
+                                      // sie bei 0,90 und hat weisse Fassaden zu einer
+                                      // gleichfoermigen Flaeche gestaucht (gemessen:
+                                      // 1,85 % der Flaeche fast weiss UND farblos).
+                                      if v > 0.93 {
+                                          let over = v - 0.93
+                                          v = 0.93 + 0.07 * (over / (over + 0.07))
                                       }
                                       return v
                                   }
@@ -1942,6 +1952,11 @@ jobs:
                       let hi = Double(sceneNow.p90)
                       let nz = Double(sceneNow.noise)
                       if hi > 0.94 { autoExpo -= min(0.08, (hi - 0.94) * 1.1) }
+                      // Spitzlichtschutz nach FLaeCHE, nicht nach p90: p90 bleibt bei
+                      // weissen Fassaden niedrig, waehrend 2 % der Flaeche ausbrennen.
+                      if hlNearWhiteShare > 0.008 {
+                          autoExpo -= min(0.10, (hlNearWhiteShare - 0.008) * 6.0)
+                      }
                       if m < 0.13 { autoExpo += min(0.08, (0.13 - m) * 0.9) }
                       if m < 0.30 { autoLift = min(0.022, (0.30 - m) * 0.10) }
                       // Traegheit: hoechstens 1,5 % pro Bild. Ohne das pumpt die
