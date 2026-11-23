@@ -5245,7 +5245,7 @@ git --no-pager diff --stat | tail -8
 
 echo "--- Abhängigkeiten ---"
 brew install cmake ninja protobuf@29 python-setuptools
-pip3 install --user --break-system-packages 'protobuf>=5,<6'
+pip3 install --user --upgrade --break-system-packages 'protobuf>=5.29.6,<6'
 export PATH="$(brew --prefix)/opt/protobuf@29/bin:$PATH"
 
 echo "--- iOS Toolchain ---"
