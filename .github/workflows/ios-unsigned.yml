@@ -161,6 +161,7 @@ jobs:
               private var midGainR: Double = 1.0
               private var midGainB: Double = 1.0
               private var hlNearWhiteShare: Double = 0.0
+              private var lastClipShare: Double = 0.0
 
               private var casKernel: CIKernel?
               private var casTried = false
@@ -553,6 +554,7 @@ jobs:
                   var nearWhite = 0
                   for y in lumas where y >= 0.95 { nearWhite += 1 }
                   let nwShare = Double(nearWhite) / Double(max(lumas.count, 1))
+                  lastClipShare = lastClipShare * 0.85 + clipRaw * 0.15
                   hlNearWhiteShare = hlNearWhiteShare * 0.85 + nwShare * 0.15
                   if lumas.count > 200 {
                       lumas.sort()
@@ -1989,7 +1991,8 @@ jobs:
                           autoExpo -= min(0.10, (hlNearWhiteShare - 0.008) * 6.0)
                       }
                       if m < 0.13 { autoExpo += min(0.08, (0.13 - m) * 0.9) }
-                      if m < 0.30 { autoLift = min(0.022, (0.30 - m) * 0.10) }
+                      // Lift nur in wirklich dunklen Szenen, sonst hellt er Lichter mit auf.
+                      if m < 0.22 { autoLift = min(0.020, (0.22 - m) * 0.10) }
                       // Traegheit: hoechstens 1,5 % pro Bild. Ohne das pumpt die
                       // Belichtung bei harten Schnitten zwischen zwei Szenen.
                       let step: Double = 0.015
@@ -2106,7 +2109,11 @@ jobs:
                       // Vorher: min(1.30, 1.0 + gain*strength*2.0) -- bei 75 % Staerke waren
                       // das bis zu +30 % Helligkeit. Genau das hat das Bild ueberzogen
                       // (gemessen: p90 205 -> 235, 4,9 % der Flaeche ueber 95 %).
-                      expo *= min(1.12, max(0.88, 1.0 + (scene.gain - 1.0) * Double(autoStrength)))
+                      expo *= min(1.06, max(0.90, 1.0 + (scene.gain - 1.0) * Double(autoStrength)))
+                  }
+                  // Wenn im Bild schon geclippt wird, darf die Automatik NICHT aufhellen.
+                  // Gemessen: bei 75 % Staerke stieg das Clipping von 0,42 auf 4,67 %.
+                  if lastClipShare > 0.006 && expo > 1.0 { expo = 1.0 }
                   }
                   // Im HDR-Pfad keine SDR-Belichtung: PQ kodiert Helligkeit absolut.
                   if hdrActive { expo = 1.0 }
@@ -4033,6 +4040,15 @@ jobs:
                       if UserDefaults.standard.object(forKey: "pxSharpTunedV3") == nil {
                           SharpnessRow.applyCalibratedPreset()
                       }
+                      // Einmalige Migration: die alten Modi 0-10 gibt es im Schnellpanel
+                      // nicht mehr. Steht der Wert noch darauf, bleibt der Schalter leer.
+                      if UserDefaults.standard.object(forKey: "pxSharpTunedV4") == nil {
+                          UserDefaults.standard.set(true, forKey: "pxSharpTunedV4")
+                          if mode != 11 && mode != 12 {
+                              mode = 11
+                              SharpnessRow.applyPreset(11)
+                          }
+                      }
                       if UserDefaults.standard.object(forKey: "pxAudioEQ0") == nil {
                           applyAudioPreset(audioPreset)
                       }
@@ -4208,6 +4224,9 @@ jobs:
                       Picker("Bildmodus", selection: $mode) {
                           Text("OLED Referenz").tag(11)
                           Text("QD-OLED").tag(12)
+                          if mode != 11 && mode != 12 {
+                              Text("Eigener").tag(mode)
+                          }
                       }
                       .pickerStyle(.segmented)
                       .padding(.horizontal, 18)
