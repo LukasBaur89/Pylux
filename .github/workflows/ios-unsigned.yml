@@ -4816,6 +4816,21 @@ jobs:
           print('swift: 10bit =', 'output10Bit' in s)
           TENBIT_DECODE_PATCH
 
+          python3 - <<'QUEUE_PATCH'
+          # Puffer-Reserve fuer hohe Bitraten (Idee aus iPlay5): der Reorder-Queue
+          # verwirft Pakete, wenn er volllaeuft -- bei 65 Mbit sind 256 Eintraege
+          # nur ~36 ms. 1024 Eintraege geben Reserve, ohne Latenz zu kosten.
+          p = 'lib/src/takion.c'
+          s = open(p, encoding='utf-8').read()
+          old = '#define TAKION_REORDER_QUEUE_SIZE_EXP 8 // => 256 entries'
+          new = '#define TAKION_REORDER_QUEUE_SIZE_EXP 10 // => 1024 entries (PXSHARP)'
+          if old in s and 'PXSHARP' not in s.split(old)[0][-200:]:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('takion: queue 1024')
+          else:
+              print('takion: nichts zu tun')
+          QUEUE_PATCH
           python3 - <<'LAUNCHSPEC_PATCH'
           # Die PS5 liest ihre Bitraten-Obergrenze aus dem LaunchSpec-Feld
           # "bwKbpsSent". Community-Ergebnisse: 25000 -> ~15 Mbit, 65000 -> ~63 Mbit,
