@@ -4487,9 +4487,40 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpPacing") private var pacing: Bool = true
     @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
+    @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
+    @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
+    @AppStorage("pxRenderMs") private var liveRender: String = "—"
+    @AppStorage("pxSharpStreamRes") private var streamRes: String = "—"
+    @AppStorage("pxSharpStreamLoss") private var streamLoss: String = "—"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+
+            // Leitung: die Zahlen, an denen man sofort sieht, was der Stream
+            // gerade hergibt. Ganz oben, damit man nicht suchen muss.
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 12) {
+                    Text("Leitung").font(.system(size: 13, weight: .semibold))
+                    Text(streamMbps + " Mbit")
+                        .font(.system(size: 15, weight: .bold, design: .monospaced))
+                        .foregroundColor(streamColor)
+                    Spacer()
+                    Text(streamRes).font(.system(size: 11)).foregroundColor(.secondary)
+                }
+                HStack(spacing: 12) {
+                    Text(liveFPS + " fps").font(.system(size: 11, design: .monospaced))
+                    Text("Bild " + liveRender + " ms").font(.system(size: 11, design: .monospaced))
+                    Text("Verlust " + streamLoss + " %").font(.system(size: 11, design: .monospaced))
+                }
+                .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(uiColor: .tertiarySystemFill))
+            )
 
             pxHead("1 · Schärfe und Detail", "Nur diese Regler machen das Bild schärfer.")
             pxSlider("Bildschärfe (Kanten)", $level, 0...1, pct(level),
@@ -4559,6 +4590,15 @@ struct PXSettingsClean: View {
             }
             Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
         }
+    }
+
+    private var streamColor: Color {
+        let v = Double(streamMbps.replacingOccurrences(of: ",", with: ".")) ?? 0
+        if v <= 0 { return .secondary }
+        if v < 12 { return .red }
+        if v < 25 { return .orange }
+        if v < 45 { return .yellow }
+        return .green
     }
 
     private func pct(_ v: Double) -> String { String(format: "%.0f %%", v * 100) }
@@ -5245,8 +5285,8 @@ git --no-pager diff --stat | tail -8
 
 echo "--- Abhängigkeiten ---"
 brew install cmake ninja protobuf@29 python-setuptools
-pip3 install --user --upgrade --break-system-packages 'protobuf>=5.29.6,<6'
-export PATH="$(brew --prefix)/opt/protobuf@29/bin:$PATH"
+pip3 install --user --break-system-packages 'protobuf>=5.29.6,<6'
+echo "$(brew --prefix)/opt/protobuf@29/bin" >> "$GITHUB_PATH"
 
 echo "--- iOS Toolchain ---"
 cd ios
@@ -5254,27 +5294,29 @@ if [ ! -f ios.toolchain.cmake ]; then
   curl -sL -o ios.toolchain.cmake \
     https://raw.githubusercontent.com/leetal/ios-cmake/master/ios.toolchain.cmake
 fi
+cd ..
 
 echo "--- Baue chiaki-lib ---"
+cd ios
 cmake -S . -B build-iphoneos -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
   -DPLATFORM=OS64 \
   -DCMAKE_BUILD_TYPE=Release \
   -DUSE_LIBIDN2=OFF \
   -DCURL_USE_LIBPSL=OFF \
-  -DCHIAKI_ENABLE_GUI=OFF \
-  -DCHIAKI_ENABLE_CLI=OFF \
-  -DCHIAKI_ENABLE_TESTS=OFF \
-  -DCHIAKI_ENABLE_IOS=ON \
   -DUSE_NGHTTP2=OFF \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build build-iphoneos --config Release --target chiaki-lib
+cd ..
 
 echo "--- Kombiniere statische Libs ---"
+cd ios
 find build-iphoneos -name "*.a" -print0 | \
   xargs -0 libtool -static -o build-iphoneos/libchiaki_complete.a
+cd ..
 
 echo "--- Baue App (ohne Signatur) ---"
+cd ios
 xcodebuild -project Pylux.xcodeproj -scheme Pylux \
   -sdk iphoneos -configuration Release \
   -derivedDataPath build-derived \
@@ -5285,8 +5327,8 @@ xcodebuild -project Pylux.xcodeproj -scheme Pylux \
   CODE_SIGN_IDENTITY="" \
   DEVELOPMENT_TEAM="" \
   build
-
 cd ..
+
 echo "--- Packe IPA ---"
 APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
 test -d "$APP"
