@@ -134,6 +134,7 @@ jobs:
               private var mfxKey = ""
               private var appliedPeak: Double = 0
               private var appliedPanelFactor: CGFloat = 1.0
+              private var appliedPaceHz: Float = 60
               private var lutData: Data?
               private var lutKey: String = ""
               private var colorLUTData: Data?
@@ -401,6 +402,7 @@ jobs:
                   let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
                   let hz = Float(hzPref == 0 ? 60 : hzPref)
                   link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: max(60, hz), preferred: hz)
+                  appliedPaceHz = hz
                   link.add(to: .main, forMode: .common)
                   displayLink = link
               }
@@ -417,7 +419,8 @@ jobs:
                   if let link = displayLink {
                       let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
                       let hz = Float(hzPref == 0 ? 60 : hzPref)
-                      if abs(link.preferredFrameRateRange.preferred - hz) > 0.5 {
+                      if abs(appliedPaceHz - hz) > 0.5 {
+                          appliedPaceHz = hz
                           link.preferredFrameRateRange = CAFrameRateRange(minimum: 60,
                                                                           maximum: max(60, hz),
                                                                           preferred: hz)
