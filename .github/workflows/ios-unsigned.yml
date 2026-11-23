@@ -4663,14 +4663,21 @@ jobs:
           new = ('launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;\n'
                  '\t// PXSHARP: Untergrenze 65000. Die Konsole uebernimmt diesen Wert als'
                  ' Ziel-Bitrate; 25000 (Standard) ergibt nur ~15 Mbit.\n'
-                 '\tif(launch_spec.bw_kbps_sent < 65000)\n'
-                 '\t\tlaunch_spec.bw_kbps_sent = 65000;')
+                 '\tif(launch_spec.bw_kbps_sent < 100000)\n'
+                 '\t\tlaunch_spec.bw_kbps_sent = 100000;')
           if old in s and 'PXSHARP: Untergrenze 65000' not in s:
               s = s.replace(old, new, 1)
               open(p, 'w', encoding='utf-8').write(s)
               print('launchspec: Untergrenze 65000')
           else:
               print('launchspec: nichts zu tun')
+          p2 = 'lib/src/launchspec.c'
+          s2 = open(p2, encoding='utf-8').read()
+          if '0.001000' in s2:
+              s2 = s2.replace('0.001000', '0.000000', 1)
+              open(p2, 'w', encoding='utf-8').write(s2)
+              print('launchspec: bwLoss 0')
+
           LAUNCHSPEC_PATCH
           python3 - <<'KEYFRAME_PATCH'
           # Keyframe-Anforderung: false im Sample-Callback meldet der Konsole ein
