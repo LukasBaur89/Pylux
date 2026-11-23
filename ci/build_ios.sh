@@ -5249,6 +5249,7 @@ pip3 install --user --upgrade --break-system-packages 'protobuf>=5.29.6,<6'
 export PATH="$(brew --prefix)/opt/protobuf@29/bin:$PATH"
 
 echo "--- iOS Toolchain ---"
+cd ios
 if [ ! -f ios.toolchain.cmake ]; then
   curl -sL -o ios.toolchain.cmake \
     https://raw.githubusercontent.com/leetal/ios-cmake/master/ios.toolchain.cmake
@@ -5274,7 +5275,6 @@ find build-iphoneos -name "*.a" -print0 | \
   xargs -0 libtool -static -o build-iphoneos/libchiaki_complete.a
 
 echo "--- Baue App (ohne Signatur) ---"
-cd ios
 xcodebuild -project Pylux.xcodeproj -scheme Pylux \
   -sdk iphoneos -configuration Release \
   -derivedDataPath build-derived \
