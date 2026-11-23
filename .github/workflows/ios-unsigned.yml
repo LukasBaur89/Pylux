@@ -913,6 +913,7 @@ jobs:
                                   // Farbton einmal berechnen -- fuer Hautton-Schutz und
                                   // fuer die hue-selektive Saettigung.
                                   var hueDeg = 0.0
+                                  var memRot = 0.0
                                   if (mx - mn) > 1e-4 {
                                       let dC = mx - mn
                                       if mx == r { hueDeg = 60.0 * ((gg2 - b) / dC) }
@@ -924,11 +925,41 @@ jobs:
                                       // Fernseher nehmen dort Saettigung zurueck, damit
                                       // Gesichter bei hoher Gesamtsaettigung natuerlich
                                       // bleiben. Ohne das werden Hauttoene rot.
-                                      var skinW = 0.0
+                                      // MEMORY-FARBEN. Das Auge prueft drei Farben staendig
+                                      // gegen eine innere Referenz: Haut, Himmel, Vegetation.
+                                      // Verschiebt man sie minimal, wirkt das Bild "falsch",
+                                      // egal wie gut der Rest ist. Deshalb werden genau diese
+                                      // drei Baender sanft zu ihrem bevorzugten Punkt gezogen.
+                                      var memSat = 1.0
+                                      var hueTarget = hueDeg
+                                      var memW = 0.0
+
+                                      // Haut: 15-55 Grad, Mitte 32 Grad
                                       if hueDeg >= 15.0 && hueDeg <= 55.0 {
-                                          skinW = max(0.0, 1.0 - abs(hueDeg - 35.0) / 20.0)
+                                          let w = max(0.0, 1.0 - abs(hueDeg - 32.0) / 20.0)
+                                          if w > memW { memW = w; hueTarget = 32.0 }
+                                          memSat *= (1.0 - 0.20 * w)
                                       }
-                                      k *= (1.0 - 0.22 * skinW)
+                                      // Himmel: 190-250 Grad, Mitte 215 Grad
+                                      if hueDeg >= 190.0 && hueDeg <= 250.0 {
+                                          let w = max(0.0, 1.0 - abs(hueDeg - 215.0) / 30.0)
+                                          if w > memW { memW = w; hueTarget = 215.0 }
+                                          memSat *= (1.0 - 0.14 * w)
+                                      }
+                                      // Vegetation: 75-150 Grad, Mitte 110 Grad
+                                      if hueDeg >= 75.0 && hueDeg <= 150.0 {
+                                          let w = max(0.0, 1.0 - abs(hueDeg - 110.0) / 37.5)
+                                          if w > memW { memW = w; hueTarget = 110.0 }
+                                          memSat *= (1.0 + 0.06 * w)
+                                      }
+                                      k *= memSat
+                                      // Farbton nur leicht ziehen: maximal 3 Grad.
+                                      if memW > 0.01 {
+                                          var dH = hueTarget - hueDeg
+                                          if dH > 180.0 { dH -= 360.0 }
+                                          if dH < -180.0 { dH += 360.0 }
+                                          memRot = max(-3.0, min(3.0, dH * memW * 0.10))
+                                      }
 
                                       if hueSat > 0.001 {
                                           var f = 0.0
@@ -950,6 +981,14 @@ jobs:
                                   var cr = (r - yv) / 1.5748
                                   cb *= k
                                   cr *= k
+                                  if memRot != 0.0 {
+                                      let a = memRot * Double.pi / 180.0
+                                      let ca = cos(a), sa = sin(a)
+                                      let cb2 = cb * ca - cr * sa
+                                      let cr2 = cb * sa + cr * ca
+                                      cb = cb2
+                                      cr = cr2
+                                  }
                                   r  = yv + 1.5748 * cr
                                   b  = yv + 1.8556 * cb
                                   gg2 = (yv - 0.2126 * r - 0.0722 * b) / 0.7152
