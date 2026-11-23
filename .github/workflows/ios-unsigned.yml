@@ -154,6 +154,12 @@ jobs:
               // beginnt bei 0 statt ~24. Das ist der Hauptgrund fuer den flauen Look.
               private var lvlBlack: Double = 0.0
               private var lvlWhite: Double = 1.0
+              // Mitten-Abgleich. Nur aktiv, wenn die Mitten AUSSERHALB des Korridors
+              // liegen, den echte Miami-Aufnahmen zeigen (R/G 0,85-1,08, B/G 0,87-1,05).
+              // Drei reale Ansichten derselben Strasse ergaben B/G 0,869 / 1,052 / 0,901 --
+              // einen festen Zielwert gibt es also nicht, nur einen Bereich.
+              private var midGainR: Double = 1.0
+              private var midGainB: Double = 1.0
 
               private var casKernel: CIKernel?
               private var casTried = false
@@ -546,6 +552,32 @@ jobs:
                           lvlBlack = lvlBlack * 0.85 + blackT * 0.15
                       }
                   }
+                  // Mitten messen (0,35-0,60) -- nur bei ausreichend Bildhelligkeit,
+                  // damit Nachtaufnahmen unangetastet bleiben.
+                  var mR = 0.0; var mG = 0.0; var mB = 0.0; var mCount = 0
+                  var meanSum = 0.0
+                  for i in stride(from: 0, to: w * h * 4, by: 4) {
+                      let R = Double(buf[i]) / 255.0
+                      let G = Double(buf[i + 1]) / 255.0
+                      let B = Double(buf[i + 2]) / 255.0
+                      let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
+                      meanSum += y
+                      if y >= 0.35 && y < 0.60 { mR += R; mG += G; mB += B; mCount += 1 }
+                  }
+                  let meanY = meanSum / Double(w * h)
+                  if meanY > 0.30 && mCount >= 60 && mG > 0.02 {
+                      let rg = mR / mG
+                      let bg = mB / mG
+                      var tR = 1.0
+                      var tB = 1.0
+                      if rg > 1.08 { tR = max(0.93, 1.08 / rg) }
+                      if rg < 0.85 { tR = min(1.07, 0.85 / rg) }
+                      if bg > 1.05 { tB = max(0.93, 1.05 / bg) }
+                      if bg < 0.87 { tB = min(1.07, 0.87 / bg) }
+                      midGainR = midGainR * 0.85 + tR * 0.15
+                      midGainB = midGainB * 0.85 + tB * 0.15
+                  }
+
                   // Zu wenige helle Pixel (Nacht, dunkler Raum): nichts tun.
                   guard rs.count >= 40 else { return }
                   let mr = rs.reduce(0, +) / Double(rs.count)
@@ -946,8 +978,8 @@ jobs:
                       && hueSat < 0.001 && castK < 0.001
                   if isNeutral { return input }
 
-                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.4f/%.4f/%.4f/%.4f",
-                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK, hlGainR, hlGainB, lvlBlack, lvlWhite)
+                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.4f/%.4f/%.4f/%.4f/%.4f/%.4f",
+                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK, hlGainR, hlGainB, lvlBlack, lvlWhite, midGainR, midGainB)
                   if key != colorLUTKey || colorLUTData == nil {
                       // Die LUT hat 33^3 = 35.937 Stützpunkte (statt 65^3 = 274.625).
                       // 33er-Würfel sind der Standard für 3D-LUTs, der Unterschied ist
@@ -1099,6 +1131,18 @@ jobs:
                                   var oR = pow(r, 1.0 / 2.2)
                                   var oG = pow(gg2, 1.0 / 2.2)
                                   var oB = pow(b, 1.0 / 2.2)
+
+                                  // MITTEN-ABGLEICH: wirkt nur in einem Band um die
+                                  // Mitten, nicht in Schatten oder Lichtern, und nur
+                                  // wenn die Mitten ausserhalb des Real-Korridors lagen.
+                                  if abs(midGainR - 1.0) > 0.0005 || abs(midGainB - 1.0) > 0.0005 {
+                                      let yMid = 0.2126 * oR + 0.7152 * oG + 0.0722 * oB
+                                      var wM = 1.0 - abs(yMid - 0.48) / 0.30
+                                      if wM < 0 { wM = 0 }; if wM > 1 { wM = 1 }
+                                      wM = wM * wM * (3 - 2 * wM)
+                                      oR *= (1.0 + (midGainR - 1.0) * wM)
+                                      oB *= (1.0 + (midGainB - 1.0) * wM)
+                                  }
 
                                   // AUTOMATISCHER BEREICH: Schwarz- und Weisspunkt
                                   // spreizen, wie ein Fernseher es bei "Auto" macht.
