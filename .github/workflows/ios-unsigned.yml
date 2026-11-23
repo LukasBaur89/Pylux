@@ -573,6 +573,10 @@ jobs:
                           if clipRaw < 0.0006 {
                               lvlWhite = lvlWhite * 0.85 + whiteT * 0.15
                               lvlBlack = lvlBlack * 0.85 + blackT * 0.15
+                          } else {
+                              // Es clippt: Spreizung aktiv zuruecknehmen, nicht einfrieren.
+                              lvlWhite = lvlWhite * 0.85 + 1.0 * 0.15
+                              lvlBlack = lvlBlack * 0.85 + 0.0 * 0.15
                           }
                       }
                   }
@@ -1196,7 +1200,11 @@ jobs:
                                   if lvlWhite - lvlBlack > 0.05 && (lvlWhite < 0.995 || lvlBlack > 0.002) {
                                       let yOut0 = 0.2126 * oR + 0.7152 * oG + 0.0722 * oB
                                       if yOut0 > 0.002 {
-                                          var ys = (yOut0 - lvlBlack) / (lvlWhite - lvlBlack)
+                                          // Auf 0,92 abbilden, NICHT auf 1,0. Vorher
+                                          // wurde der gemessene Weisspunkt (z. B. 0,89)
+                                          // auf 1,0 gezogen -- das Bild wurde dadurch
+                                          // um 12 % aufgehellt und brannte oben aus.
+                                          var ys = (yOut0 - lvlBlack) / (lvlWhite - lvlBlack) * 0.92
                                           if ys < 0 { ys = 0 }
                                           // Weiche Begrenzung: die Spreizung darf die
                                           // Lichter nicht wieder aufreissen.
@@ -2344,6 +2352,10 @@ jobs:
                           hlCounter = 0
                           if !hdrActive { measureHighlightBalance(from: image) }
                       }
+                  } else {
+                      // Ohne Messung darf ein alter Clip-Wert die Automatik nicht
+                      // dauerhaft blockieren.
+                      lastClipShare *= 0.90
                   }
 
                   let sx = target.width / src.width
