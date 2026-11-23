@@ -530,6 +530,8 @@ jobs:
                   var rs: [Double] = []; var gs: [Double] = []; var bs: [Double] = []
                   var lumas: [Double] = []
                   var clipCount = 0
+                  var hlSatSum = 0.0
+                  var hlSatCount = 0
                   for i in stride(from: 0, to: w * h * 4, by: 4) {
                       let R = Double(buf[i]) / 255.0
                       let G = Double(buf[i + 1]) / 255.0
@@ -537,10 +539,16 @@ jobs:
                       let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
                       lumas.append(y)
                       if y >= 0.995 { clipCount += 1 }
-                      if y > 0.72 { rs.append(R); gs.append(G); bs.append(B) }
+                      if y > 0.72 {
+                          rs.append(R); gs.append(G); bs.append(B)
+                          let hmx = max(R, max(G, B)); let hmn = min(R, min(G, B))
+                          hlSatSum += hmx > 0.01 ? (hmx - hmn) / hmx : 0.0
+                          hlSatCount += 1
+                      }
                   }
                   // Bereich messen: 2- und 98-Perzentil der Helligkeit.
                   let clipRaw = Double(clipCount) / Double(max(lumas.count, 1))
+                  let hlSat = hlSatCount > 0 ? hlSatSum / Double(hlSatCount) : 0.0
                   // Spitzlichtschutz: wie viel Flaeche liegt fast auf Weiss?
                   var nearWhite = 0
                   for y in lumas where y >= 0.95 { nearWhite += 1 }
@@ -579,7 +587,7 @@ jobs:
                       if y >= 0.35 && y < 0.60 { mR += R; mG += G; mB += B; mCount += 1 }
                   }
                   let meanY = meanSum / Double(w * h)
-                  if meanY > 0.30 && mCount >= 60 && mG > 0.02 {
+                  if meanY > 0.32 && mCount >= 60 && mG > 0.02 && hlSat < 0.22 {
                       let rg = mR / mG
                       let bg = mB / mG
                       var tR = 1.0
@@ -594,6 +602,27 @@ jobs:
 
                   // Zu wenige helle Pixel (Nacht, dunkler Raum): nichts tun.
                   guard rs.count >= 40 else { return }
+                  // SONNENUNTERGANG-ERKENNUNG: Wolken sind nahezu farblos (Saettigung
+                  // unter ~0,20). Ist der helle Bereich stark gefaerbt, ist es ein
+                  // Himmel bei Sonnenuntergang -- den darf man NICHT neutralisieren,
+                  // sonst wird der Sonnenuntergang grau gerechnet.
+                  guard hlSat < 0.22 else {
+                      // Nur den Bereich nachziehen, Farbabgleich auslassen.
+                      if lumas.count > 200 {
+                          lumas.sort()
+                          let p2 = lumas[Int(Double(lumas.count) * 0.02)]
+                          let p98 = lumas[Int(Double(lumas.count) * 0.98)]
+                          if p98 > 0.55 && clipRaw < 0.0006 {
+                              var whiteT = min(max(p98, 0.82), 0.93)
+                              var blackT = p2 - 0.008
+                              if blackT < 0 { blackT = 0 }
+                              if blackT > 0.05 { blackT = 0.05 }
+                              lvlWhite = lvlWhite * 0.85 + whiteT * 0.15
+                              lvlBlack = lvlBlack * 0.85 + blackT * 0.15
+                          }
+                      }
+                      return
+                  }
                   let mr = rs.reduce(0, +) / Double(rs.count)
                   let mg = gs.reduce(0, +) / Double(gs.count)
                   let mb = bs.reduce(0, +) / Double(bs.count)
