@@ -5305,6 +5305,10 @@ cmake -S . -B build-iphoneos -G Ninja \
   -DUSE_LIBIDN2=OFF \
   -DCURL_USE_LIBPSL=OFF \
   -DUSE_NGHTTP2=OFF \
+  -DCHIAKI_ENABLE_GUI=OFF \
+  -DCHIAKI_ENABLE_CLI=OFF \
+  -DCHIAKI_ENABLE_TESTS=OFF \
+  -DCHIAKI_ENABLE_IOS=ON \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build build-iphoneos --config Release --target chiaki-lib
 cd ..
