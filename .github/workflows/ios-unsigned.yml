@@ -3244,7 +3244,7 @@ jobs:
               @AppStorage("pxSharpGammaR") private var gammaR: Double = 1.0
               @AppStorage("pxSharpGammaG") private var gammaG: Double = 1.0
               @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
-              @AppStorage("pxSharpMode") private var mode: Int = 9
+              @AppStorage("pxSharpMode") private var mode: Int = 11
               @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.20
               @AppStorage("pxSharpToneMap") private var toneMap: Int = 0
               @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
@@ -3360,6 +3360,24 @@ jobs:
                       deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
                       wbR = 1.00; wbG = 1.00; wbB = 1.00
                       gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+                  case 11: // OLED Referenz (W-OLED, BT.709, D65)
+                      gamut = 0
+                      level = 1.0; detail = 0.90; clarity = 0.35
+                      deblock = 0.14; denoise = 0.06; vibrance = 0.0
+                      saturation = 0.50; contrast = 0.50; temp = 0.50
+                      gamma = 1.00; black = 0.0; hdrPeak = 1000
+                      clearImage = 0.25; toneMap = 0; localDim = 0.0; deband = 0.30
+                      brightness = 0.50; shadow = 0.10; chroma = 0.55; coring = 0.20
+                      deconv = 0.35; scaler = 0; easuAmt = 0.6; halo = 0.18; texDepth = 0.50
+                  case 12: // QD-OLED (RGB-Tandem, DCI-P3, 2500 Nits)
+                      gamut = 1
+                      level = 1.0; detail = 0.95; clarity = 0.40
+                      deblock = 0.14; denoise = 0.06; vibrance = 0.06
+                      saturation = 0.53; contrast = 0.52; temp = 0.50
+                      gamma = 1.00; black = 0.0; hdrPeak = 2500
+                      clearImage = 0.30; toneMap = 0; localDim = 0.0; deband = 0.30
+                      brightness = 0.50; shadow = 0.14; chroma = 0.60; coring = 0.18
+                      deconv = 0.40; scaler = 0; easuAmt = 0.6; halo = 0.20; texDepth = 0.55
                   case 10: // TV-Max: alles, was messbar gewinnt — ohne erfundene Details
                       gamut = 1
                       level = 1.0; detail = 0.55; clarity = 0.0
@@ -3438,6 +3456,8 @@ jobs:
                   case 7: return "Realistisch"
                   case 9: return "Natürlich / kalibriert"
                   case 10: return "TV-Max"
+                  case 11: return "OLED Referenz"
+                  case 12: return "QD-OLED"
                   default: return "Ultra"
                   }
               }
@@ -3510,6 +3530,10 @@ jobs:
                       eq0 = 3.0; eq1 = 1.0; eq2 = 0; eq3 = 4.0; eq4 = 2.0; audio3D = 0.70
                   case 7: // Bose (warm, bassbetont)
                       eq0 = 6.5; eq1 = 5.5; eq2 = -1.0; eq3 = 1.0; eq4 = 2.5; audio3D = 0.35
+                  case 8: // Sony WH-1000XM4 (starker Bass, weite Buehne)
+                      eq0 = 15.0; eq1 = 11.0; eq2 = 1.0; eq3 = 2.0; eq4 = 3.5; audio3D = 0.55
+                  case 9: // Sony WH-1000XM4 maximal (mit Subbass)
+                      eq0 = 18.0; eq1 = 14.0; eq2 = 2.0; eq3 = 2.5; eq4 = 4.0; audio3D = 0.70
                   default: break
                   }
               }
@@ -3581,7 +3605,7 @@ jobs:
               private func eqRow(_ title: String, _ value: Binding<Double>) -> some View {
                   HStack {
                       Text(title).font(.caption)
-                      Slider(value: value, in: -12...12, step: 0.5)
+                      Slider(value: value, in: -18...18, step: 0.5)
                       Text(String(format: "%+.1f dB", value.wrappedValue))
                           .font(.caption2)
                           .foregroundColor(.secondary)
@@ -3937,9 +3961,11 @@ jobs:
                           Text("Sony Bass Boost").tag(5)
                           Text("Dolby Atmos (weit)").tag(6)
                           Text("Bose (warm)").tag(7)
-                          Text("Eigene").tag(8)
+                          Text("Sony WH-1000XM4 (starker Bass)").tag(8)
+                          Text("Sony WH-1000XM4 maximal").tag(9)
+                          Text("Eigene").tag(10)
                       }
-                      .onChange(of: audioPreset) { p in if p < 8 { applyAudioPreset(p) } }
+                      .onChange(of: audioPreset) { p in if p < 10 { applyAudioPreset(p) } }
                       Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. „Sony Spiel“ hebt Tiefbass und Präsenz an, damit Schritte und Schüsse ortbar sind.")
                           .font(.caption)
                           .foregroundColor(.secondary)
@@ -3947,13 +3973,13 @@ jobs:
                                 display: String(format: "%.0f %%", audio3D * 100),
                                 rule: "Je höher, desto breiter die Bühne (Mitten/Seiten-Verbreiterung mit kurzer Laufzeitverzögerung). Über 60 % wird es phasig.")
                       VStack(alignment: .leading, spacing: 8) {
-                          eqRow("Tiefbass 80 Hz", $eq0)
-                          eqRow("Bass 300 Hz", $eq1)
-                          eqRow("Mitten 1 kHz", $eq2)
-                          eqRow("Präsenz 3,2 kHz", $eq3)
-                          eqRow("Höhen 10 kHz", $eq4)
+                          eqRow("Subbass 45 Hz", $eq0)
+                          eqRow("Bass 150 Hz", $eq1)
+                          eqRow("Mitten 600 Hz", $eq2)
+                          eqRow("Präsenz 2,4 kHz", $eq3)
+                          eqRow("Höhen 9 kHz", $eq4)
                       }
-                      Text("Je höher ein Band, desto stärker wird dieser Frequenzbereich angehoben (max. ±12 dB). Gegen dumpfen Klang: Höhen +3. Gegen dröhnenden Bass: 300 Hz −3.")
+                      Text("Je höher ein Band, desto stärker wird dieser Frequenzbereich angehoben (max. ±18 dB). Gegen dumpfen Klang: Höhen +3. Gegen dröhnenden Bass: 300 Hz −3.")
                           .font(.caption)
                           .foregroundColor(.secondary)
 
@@ -4022,7 +4048,7 @@ jobs:
               static func applyCalibratedPreset() {
                   let d = UserDefaults.standard
                   let values: [String: Any] = [
-                      "pxSharpMode": 9,
+                      "pxSharpMode": 11,
                       "pxSharpLevel": 1.0,
                       "pxSharpClarity": 0.0,
                       "pxSharpDetail": 0.55,
@@ -4092,6 +4118,24 @@ jobs:
                       "pxSharpDeblock": 0.14, "pxSharpDenoise": 0.06, "pxSharpDeband": 0.30,
                   ]
                   switch m {
+                  case 11:
+                      v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.90; v["pxSharpTexDepth"] = 0.50
+                      v["pxSharpClarity"] = 0.35; v["pxSharpDeconv"] = 0.35
+                      v["pxSharpClearImage"] = 0.25; v["pxSharpChroma"] = 0.55
+                      v["pxSharpCoring"] = 0.20; v["pxSharpHalo"] = 0.18
+                      v["pxSharpDenoise"] = 0.06; v["pxSharpDeblock"] = 0.14; v["pxSharpDeband"] = 0.30
+                      v["pxSharpSaturation"] = 0.50; v["pxSharpContrast"] = 0.50
+                      v["pxSharpBrightness"] = 0.50; v["pxSharpVibrance"] = 0.0
+                      v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.10
+                  case 12:
+                      v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.95; v["pxSharpTexDepth"] = 0.55
+                      v["pxSharpClarity"] = 0.40; v["pxSharpDeconv"] = 0.40
+                      v["pxSharpClearImage"] = 0.30; v["pxSharpChroma"] = 0.60
+                      v["pxSharpCoring"] = 0.18; v["pxSharpHalo"] = 0.20
+                      v["pxSharpDenoise"] = 0.06; v["pxSharpDeblock"] = 0.14; v["pxSharpDeband"] = 0.30
+                      v["pxSharpSaturation"] = 0.53; v["pxSharpContrast"] = 0.52
+                      v["pxSharpBrightness"] = 0.50; v["pxSharpVibrance"] = 0.06
+                      v["pxSharpGamut"] = 1; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.14
                   case 10: // TV-Max
                       v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.55; v["pxSharpTexDepth"] = 0.20
                       v["pxSharpSaturation"] = 0.52; v["pxSharpContrast"] = 0.5
@@ -4131,7 +4175,7 @@ jobs:
               @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
               @AppStorage("pxSharpBrightness") private var brightness: Double = 0.5
               @AppStorage("pxSharpGamut") private var gamut: Int = 0
-              @AppStorage("pxSharpMode") private var mode: Int = 9
+              @AppStorage("pxSharpMode") private var mode: Int = 11
               @AppStorage("pxSharpMaster") private var master: Double = 1.0
               @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
               @AppStorage("pxSharpWBNote") private var wbNote: String = ""
@@ -4162,9 +4206,8 @@ jobs:
 
                       // Schnellwahl
                       Picker("Bildmodus", selection: $mode) {
-                          Text("Natürlich").tag(9)
-                          Text("TV-Max").tag(10)
-                          Text("Aus").tag(8)
+                          Text("OLED Referenz").tag(11)
+                          Text("QD-OLED").tag(12)
                       }
                       .pickerStyle(.segmented)
                       .padding(.horizontal, 18)
@@ -4724,15 +4767,15 @@ jobs:
 
           static void px_dsp_update(void) {
               NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-              static const float freqs[5] = {80.0f, 300.0f, 1000.0f, 3200.0f, 10000.0f};
+              static const float freqs[5] = {45.0f, 150.0f, 600.0f, 2400.0f, 9000.0f};
               for (int i = 0; i < 5; i++) {
                   NSString *k = [NSString stringWithFormat:@"pxAudioEQ%d", i];
                   float v = (float)[d doubleForKey:k];
-                  if (v < -12.0f) v = -12.0f;
-                  if (v > 12.0f) v = 12.0f;
+                  if (v < -18.0f) v = -18.0f;
+                  if (v > 18.0f) v = 18.0f;
                   if (!g_px_ready || fabsf(v - g_px_db[i]) > 0.05f) {
                       g_px_db[i] = v;
-                      px_band(&g_px_bands[i], 48000.0f, freqs[i], v, 0.9f);
+                      px_band(&g_px_bands[i], 48000.0f, freqs[i], v, 0.75f);
                   }
               }
               float w = (float)[d doubleForKey:@"pxAudio3D"];
@@ -4744,9 +4787,9 @@ jobs:
 
           static inline float px_soft(float x) {
               float a = fabsf(x);
-              if (a <= 0.92f) return x;
-              float over = a - 0.92f;
-              float y = 0.92f + over / (1.0f + over * 3.5f);
+              if (a <= 0.95f) return x;
+              float over = a - 0.95f;
+              float y = 0.95f + over / (1.0f + over * 2.2f);
               return x < 0 ? -y : y;
           }
 
@@ -4771,9 +4814,10 @@ jobs:
                       float mid = (L + R) * 0.5f;
                       float side = (L - R) * 0.5f;
                       g_px_delay[g_px_dpos & 63] = side;
-                      float sd = g_px_delay[(g_px_dpos - 6) & 63];
+                      float sd = g_px_delay[(g_px_dpos - 9) & 63];
                       g_px_dpos++;
-                      side = side * (1.0f + 1.30f * amt) + sd * 0.50f * amt;
+                      // Breitere 3D-Buehne: mehr Seitenanteil und laengerer Haas-Abstand.
+                      side = side * (1.0f + 2.30f * amt) + sd * 0.85f * amt;
                       L = mid + side;
                       R = mid - side;
                   }
