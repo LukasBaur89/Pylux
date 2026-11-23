@@ -528,28 +528,36 @@ jobs:
                   guard drawn else { return }
                   var rs: [Double] = []; var gs: [Double] = []; var bs: [Double] = []
                   var lumas: [Double] = []
+                  var clipCount = 0
                   for i in stride(from: 0, to: w * h * 4, by: 4) {
                       let R = Double(buf[i]) / 255.0
                       let G = Double(buf[i + 1]) / 255.0
                       let B = Double(buf[i + 2]) / 255.0
                       let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
                       lumas.append(y)
+                      if y >= 0.995 { clipCount += 1 }
                       if y > 0.72 { rs.append(R); gs.append(G); bs.append(B) }
                   }
                   // Bereich messen: 2- und 98-Perzentil der Helligkeit.
+                  let clipRaw = Double(clipCount) / Double(max(lumas.count, 1))
                   if lumas.count > 200 {
                       lumas.sort()
                       let p2 = lumas[Int(Double(lumas.count) * 0.02)]
                       let p98 = lumas[Int(Double(lumas.count) * 0.98)]
                       // Nur eingreifen, wenn wirklich Bereich fehlt.
                       if p98 > 0.55 {
-                          var whiteT = min(max(p98, 0.80), 0.97)
-                          if whiteT < 0.86 { whiteT = 0.86 }
+                          // Weissziel hoechstens 0,93. Vorher stand hier 0,97 -- dadurch
+                          // wurde das Bild ueberzogen (gemessen: 2,39 % der Flaeche
+                          // ueber 95 % Helligkeit statt 0,22 % im Rohbild).
+                          var whiteT = min(max(p98, 0.82), 0.93)
                           var blackT = p2 - 0.008
                           if blackT < 0 { blackT = 0 }
                           if blackT > 0.05 { blackT = 0.05 }
-                          lvlWhite = lvlWhite * 0.85 + whiteT * 0.15
-                          lvlBlack = lvlBlack * 0.85 + blackT * 0.15
+                          // Wenn im Rohbild schon geclippt wird, NICHT weiter spreizen.
+                          if clipRaw < 0.0006 {
+                              lvlWhite = lvlWhite * 0.85 + whiteT * 0.15
+                              lvlBlack = lvlBlack * 0.85 + blackT * 0.15
+                          }
                       }
                   }
                   // Mitten messen (0,35-0,60) -- nur bei ausreichend Bildhelligkeit,
@@ -1152,7 +1160,11 @@ jobs:
                                       let yOut0 = 0.2126 * oR + 0.7152 * oG + 0.0722 * oB
                                       if yOut0 > 0.002 {
                                           var ys = (yOut0 - lvlBlack) / (lvlWhite - lvlBlack)
-                                          if ys < 0 { ys = 0 }; if ys > 1 { ys = 1 }
+                                          if ys < 0 { ys = 0 }
+                                          // Weiche Begrenzung: die Spreizung darf die
+                                          // Lichter nicht wieder aufreissen.
+                                          if ys > 0.96 { ys = 0.96 + (ys - 0.96) * 0.30 }
+                                          if ys > 0.995 { ys = 0.995 }
                                           let sc = ys / yOut0
                                           oR *= sc; oG *= sc; oB *= sc
                                       }
