@@ -1408,7 +1408,13 @@ jobs:
                       vec3 delta = cc - ca;
                       float m = length(delta);
                       float k = max(0.0, m - coring) / max(m, 1e-5);
-                      vec3 outv = c.rgb + delta * (amount * k);
+                      // In dunklen Bereichen KEINE Farbschaerfung: dort verstaerkt sie
+                      // nur Farbstiche und Kompressionsrauschen (gemessen: Schatten
+                      // wurden dadurch deutlich waermer). Erst ab 3 % Helligkeit
+                      // einblenden, ab 15 % volle Wirkung.
+                      float lumaC = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+                      float lumaGate = smoothstep(0.03, 0.15, lumaC);
+                      vec3 outv = c.rgb + delta * (amount * k * lumaGate);
                       return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
                   }
                   """
