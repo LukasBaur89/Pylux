@@ -2102,6 +2102,7 @@ jobs:
                   // TV-Leuchtdichte und Szenen-Automatik in EINEM Durchgang (spart eine
                   // komplette Vollbild-Stufe).
                   var expo = tvComp
+                  if lastClipShare > 0.006 && expo > 1.0 { expo = 1.0 }
                   if autoOn && autoStrength > 0.01 {
                       // Deckel bei +10 %: die Szenen-Automatik hat dunkle Szenen vorher um
                       // bis zu +23 % aufgehellt. Zusammen mit der Schatten-Anhebung wurde
@@ -2113,8 +2114,6 @@ jobs:
                   }
                   // Wenn im Bild schon geclippt wird, darf die Automatik NICHT aufhellen.
                   // Gemessen: bei 75 % Staerke stieg das Clipping von 0,42 auf 4,67 %.
-                  if lastClipShare > 0.006 && expo > 1.0 { expo = 1.0 }
-                  }
                   // Im HDR-Pfad keine SDR-Belichtung: PQ kodiert Helligkeit absolut.
                   if hdrActive { expo = 1.0 }
                   if abs(expo - 1.0) > 0.002 {
