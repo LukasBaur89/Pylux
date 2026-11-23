@@ -2586,8 +2586,13 @@ jobs:
                           // beginnt z.B. bei x=406,y=255). Mit bounds=(0,0,1920,1080) wurde
                           // nur eine Ecke gerendert; der Rest der Textur blieb undefinierter
                           // Speicher — genau das war das lila Bild bei MetalFX.
-                          ciContext?.render(image, to: inTex, commandBuffer: cb,
-                                            bounds: image.extent,
+                          let norm = image.transformed(by: CGAffineTransform(
+                              translationX: -image.extent.origin.x,
+                              y: -image.extent.origin.y))
+                          ciContext?.render(norm, to: inTex, commandBuffer: cb,
+                                            bounds: CGRect(x: 0, y: 0,
+                                                           width: CGFloat(Int(src.width)),
+                                                           height: CGFloat(Int(src.height))),
                                             colorSpace: outSpace)
 
                           scaler.colorTexture = inTex
