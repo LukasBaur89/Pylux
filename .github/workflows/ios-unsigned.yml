@@ -4652,6 +4652,26 @@ jobs:
           print('swift: 10bit =', 'output10Bit' in s)
           TENBIT_DECODE_PATCH
 
+          python3 - <<'LAUNCHSPEC_PATCH'
+          # Die PS5 liest ihre Bitraten-Obergrenze aus dem LaunchSpec-Feld
+          # "bwKbpsSent". Community-Ergebnisse: 25000 -> ~15 Mbit, 65000 -> ~63 Mbit,
+          # 100000 -> ~97 Mbit. Wir heben die Untergrenze auf 65000, damit die
+          # angeforderte Rate auch wirklich ankommt.
+          p = 'lib/src/streamconnection.c'
+          s = open(p, encoding='utf-8').read()
+          old = 'launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;'
+          new = ('launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;\n'
+                 '\t// PXSHARP: Untergrenze 65000. Die Konsole uebernimmt diesen Wert als'
+                 ' Ziel-Bitrate; 25000 (Standard) ergibt nur ~15 Mbit.\n'
+                 '\tif(launch_spec.bw_kbps_sent < 65000)\n'
+                 '\t\tlaunch_spec.bw_kbps_sent = 65000;')
+          if old in s and 'PXSHARP: Untergrenze 65000' not in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('launchspec: Untergrenze 65000')
+          else:
+              print('launchspec: nichts zu tun')
+          LAUNCHSPEC_PATCH
           python3 - <<'KEYFRAME_PATCH'
           # Keyframe-Anforderung: false im Sample-Callback meldet der Konsole ein
           # korruptes Bild -> sie sendet ein neues I-Frame. Bekanntes chiaki-Problem:
