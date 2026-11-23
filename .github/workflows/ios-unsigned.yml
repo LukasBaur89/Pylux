@@ -1171,7 +1171,9 @@ jobs:
                                           // Lichter nicht wieder aufreissen.
                                           if ys > 0.96 { ys = 0.96 + (ys - 0.96) * 0.30 }
                                           if ys > 0.995 { ys = 0.995 }
-                                          let sc = ys / yOut0
+                                          var sc = ys / yOut0
+                                          if sc > 1.05 { sc = 1.05 }
+                                          if sc < 0.92 { sc = 0.92 }
                                           oR *= sc; oG *= sc; oB *= sc
                                       }
                                   }
@@ -2072,7 +2074,10 @@ jobs:
                       // Deckel bei +10 %: die Szenen-Automatik hat dunkle Szenen vorher um
                       // bis zu +23 % aufgehellt. Zusammen mit der Schatten-Anhebung wurde
                       // das Bild dadurch flau. Nachtszenen DUERFEN dunkel sein.
-                      expo *= min(1.30, max(0.70, 1.0 + (scene.gain - 1.0) * Double(autoStrength) * 2.0))
+                      // Vorher: min(1.30, 1.0 + gain*strength*2.0) -- bei 75 % Staerke waren
+                      // das bis zu +30 % Helligkeit. Genau das hat das Bild ueberzogen
+                      // (gemessen: p90 205 -> 235, 4,9 % der Flaeche ueber 95 %).
+                      expo *= min(1.12, max(0.88, 1.0 + (scene.gain - 1.0) * Double(autoStrength)))
                   }
                   // Im HDR-Pfad keine SDR-Belichtung: PQ kodiert Helligkeit absolut.
                   if hdrActive { expo = 1.0 }
@@ -2291,6 +2296,12 @@ jobs:
                       if !hdrActive { measureWhitePoint(from: image) }
                       else { pxNote("HDR aktiv — Weisspunktabgleich nur fuer SDR") }
                   }
+                  if colorEngine && !hdrActive && !bypassNow {
+                      image = applyColorEngine(image)
+                  }
+                  // Messung NACH der Farb-LUT: sonst sieht der Spitzlichtschutz die
+                  // Aufhellung durch LUT und Bereichsspreizung nicht -- und genau die
+                  // hat das Bild ueberzogen.
                   let hlBalance = (UserDefaults.standard.object(forKey: "pxSharpHlBalance") as? NSNumber)?.boolValue ?? true
                   if hlBalance {
                       hlCounter += 1
@@ -2298,9 +2309,6 @@ jobs:
                           hlCounter = 0
                           if !hdrActive { measureHighlightBalance(from: image) }
                       }
-                  }
-                  if colorEngine && !hdrActive && !bypassNow {
-                      image = applyColorEngine(image)
                   }
 
                   let sx = target.width / src.width
