@@ -4493,6 +4493,12 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpStreamRes") private var streamRes: String = "—"
     @AppStorage("pxSharpStreamLoss") private var streamLoss: String = "—"
 
+    // Codec und Bitrate liegen im Stream-Preferences-Profil, nicht in
+    // einzelnen UserDefaults-Schluesseln -- deshalb eigener Zustand.
+    @State private var codecIdx: Int = 1
+    @State private var bitrateVal: Int = 30000
+    @State private var resIdx: Int = 3
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
 
@@ -4589,6 +4595,43 @@ struct PXSettingsClean: View {
                 Text("120 Hz").tag(120)
             }
             Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
+
+            pxHead("6 · Verbindung", "Gilt beim nächsten Verbinden.")
+            Picker("Codec", selection: $codecIdx) {
+                Text("H.264 (kompatibel)").tag(0)
+                Text("H.265 (bessere Qualität)").tag(1)
+                Text("H.265 + HDR (nur mit HDR-Spiel)").tag(2)
+            }
+            .onChange(of: codecIdx) { v in
+                var p = StreamPreferences.load()
+                p.codec = v
+                p.save()
+            }
+            Picker("Auflösung", selection: $resIdx) {
+                Text("1080p").tag(3)
+                Text("720p").tag(2)
+                Text("540p").tag(1)
+            }
+            .onChange(of: resIdx) { v in
+                var p = StreamPreferences.load()
+                p.resolutionIndex = v
+                p.save()
+            }
+            Stepper("Bitrate: \(bitrateVal) kbit", value: $bitrateVal, in: 2000...200000, step: 5000)
+                .onChange(of: bitrateVal) { v in
+                    var p = StreamPreferences.load()
+                    p.bitrate = v
+                    p.save()
+                }
+            Text("Die Konsole deckelt selbst — 30000 bis 50000 anfordern reicht. Höhere Werte schaden nicht, bringen aber nichts.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .onAppear {
+            let p = StreamPreferences.load()
+            codecIdx = p.codec
+            bitrateVal = p.bitrate == 0 ? 30000 : p.bitrate
+            resIdx = p.resolutionIndex
         }
     }
 
