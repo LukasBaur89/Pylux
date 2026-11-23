@@ -405,6 +405,19 @@ jobs:
               }
 
               @objc private func displayTick() {
+                  // Frame Pacing live uebernehmen. Vorher wurde der Wert nur beim
+                  // Anlegen des Display-Links gelesen -- der Regler hatte deshalb
+                  // null Wirkung, solange die Sitzung lief.
+                  if let link = displayLink {
+                      let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
+                      let hz = Float(hzPref == 0 ? 60 : hzPref)
+                      if abs(link.preferredFrameRateRange.preferred - hz) > 0.5 {
+                          link.preferredFrameRateRange = CAFrameRateRange(minimum: 60,
+                                                                          maximum: max(60, hz),
+                                                                          preferred: hz)
+                          os_log(.default, log: videoViewLog, "[px] pacing -> %.0f Hz", hz)
+                      }
+                  }
                   guard needsPresent else { return }
                   needsPresent = false
                   metalView?.draw()
@@ -3396,8 +3409,8 @@ jobs:
                   case 12: // QD-OLED (RGB-Tandem, DCI-P3, 2500 Nits)
                       gamut = 1
                       level = 1.0; detail = 0.95; clarity = 0.40
-                      deblock = 0.14; denoise = 0.06; vibrance = 0.06
-                      saturation = 0.53; contrast = 0.52; temp = 0.50
+                      deblock = 0.14; denoise = 0.06; vibrance = 0.0
+                      saturation = 0.50; contrast = 0.50; temp = 0.50
                       gamma = 1.00; black = 0.0; hdrPeak = 2500
                       clearImage = 0.30; toneMap = 0; localDim = 0.0; deband = 0.30
                       brightness = 0.50; shadow = 0.14; chroma = 0.60; coring = 0.18
@@ -3737,7 +3750,7 @@ jobs:
                       sliderRow("Bildschärfe (Kanten, 1 px)", value: $level, range: 0...1, step: 0.05,
                                 display: String(format: "%.0f %%", level * 100),
                                 rule: "Je höher, desto härter werden Konturen. Über 85 % bekommen Kanten einen hellen Saum (Halo).")
-                      Toggle("Nur Helligkeit schärfen (keine Farbsäume)", isOn: $lumaSharpen)
+                      Toggle("Schärfung nur auf Helligkeit (Farbe läuft separat)", isOn: $lumaSharpen)
                       Text("Fernseher schärfen die Helligkeit, nicht die Farbe. Dadurch entstehen an Kanten keine farbigen Ränder.")
                           .font(.caption)
                           .foregroundColor(.secondary)
@@ -4166,8 +4179,8 @@ jobs:
                       v["pxSharpClearImage"] = 0.30; v["pxSharpChroma"] = 0.60
                       v["pxSharpCoring"] = 0.18; v["pxSharpHalo"] = 0.20
                       v["pxSharpDenoise"] = 0.06; v["pxSharpDeblock"] = 0.14; v["pxSharpDeband"] = 0.30
-                      v["pxSharpSaturation"] = 0.53; v["pxSharpContrast"] = 0.52
-                      v["pxSharpBrightness"] = 0.50; v["pxSharpVibrance"] = 0.06
+                      v["pxSharpSaturation"] = 0.50; v["pxSharpContrast"] = 0.50
+                      v["pxSharpBrightness"] = 0.49; v["pxSharpVibrance"] = 0.0
                       v["pxSharpGamut"] = 1; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.14
                   case 10: // TV-Max
                       v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.55; v["pxSharpTexDepth"] = 0.20
@@ -4836,10 +4849,17 @@ jobs:
               int nch = channels > 2 ? 2 : channels;
               float amt = g_px_3d;
 
+              // Headroom: bei starkem Bass- oder 3D-Einsatz den Eingang absenken, damit
+              // der Limiter nicht dauerhaft arbeitet (das klang "schmutzig").
+              float boost = 0.0f;
+              for (int b = 0; b < 3; b++) if (g_px_db[b] > 0) boost += g_px_db[b];
+              float head = 1.0f / (1.0f + boost * 0.012f + amt * 0.20f);
+              if (head < 0.55f) head = 0.55f;
+
               for (size_t i = 0; i < frames; i++) {
                   int16_t *fr = buf + i * channels;
-                  float L = fr[0] / 32768.0f;
-                  float R = nch > 1 ? fr[1] / 32768.0f : L;
+                  float L = fr[0] / 32768.0f * head;
+                  float R = nch > 1 ? fr[1] / 32768.0f * head : L;
 
                   for (int b = 0; b < 5; b++) {
                       L = px_bq(&g_px_bands[b], L, 0);
@@ -4853,7 +4873,9 @@ jobs:
                       float sd = g_px_delay[(g_px_dpos - 9) & 63];
                       g_px_dpos++;
                       // Breitere 3D-Buehne: mehr Seitenanteil und laengerer Haas-Abstand.
-                      side = side * (1.0f + 2.30f * amt) + sd * 0.85f * amt;
+                      // 2,30 war zu viel: mit vollem EQ kam ein unsauberer, dröhnender
+                      // Bass. Jetzt milder und mit geregeltem Seitenanteil.
+                      side = side * (1.0f + 1.45f * amt) + sd * 0.55f * amt;
                       L = mid + side;
                       R = mid - side;
                   }
