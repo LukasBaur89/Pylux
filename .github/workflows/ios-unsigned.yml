@@ -934,23 +934,31 @@ jobs:
                                       var hueTarget = hueDeg
                                       var memW = 0.0
 
-                                      // Haut: 15-55 Grad, Mitte 32 Grad
-                                      if hueDeg >= 15.0 && hueDeg <= 55.0 {
-                                          let w = max(0.0, 1.0 - abs(hueDeg - 32.0) / 20.0)
-                                          if w > memW { memW = w; hueTarget = 32.0 }
-                                          memSat *= (1.0 - 0.20 * w)
-                                      }
-                                      // Himmel: 190-250 Grad, Mitte 215 Grad
-                                      if hueDeg >= 190.0 && hueDeg <= 250.0 {
-                                          let w = max(0.0, 1.0 - abs(hueDeg - 215.0) / 30.0)
-                                          if w > memW { memW = w; hueTarget = 215.0 }
+                                      // HAUT: Farbton 20-45 Grad, Mitte 30. Aber Farbton
+                                      // allein reicht nicht -- Coloristen grenzen Haut
+                                      // zusaetzlich ueber die SAETTIGUNG ein, weil Sand,
+                                      // Stroh, trockenes Gras und gelbe Blueten im selben
+                                      // Hue-Bereich liegen. Ohne diese Grenze wurden im
+                                      // Test 42,5 Prozent des Bildes als "Haut" behandelt
+                                      // und dadurch flach gerechnet.
+                                      if hueDeg >= 20.0 && hueDeg <= 45.0 {
+                                          var w = max(0.0, 1.0 - abs(hueDeg - 30.0) / 12.5)
+                                          if satPx > 0.45 { w *= max(0.0, 1.0 - (satPx - 0.45) / 0.20) }
+                                          if w > memW { memW = w; hueTarget = 30.0 }
                                           memSat *= (1.0 - 0.14 * w)
                                       }
-                                      // Vegetation: 75-150 Grad, Mitte 110 Grad
-                                      if hueDeg >= 75.0 && hueDeg <= 150.0 {
-                                          let w = max(0.0, 1.0 - abs(hueDeg - 110.0) / 37.5)
-                                          if w > memW { memW = w; hueTarget = 110.0 }
-                                          memSat *= (1.0 + 0.06 * w)
+                                      // HIMMEL: 195-245 Grad, Mitte 218
+                                      if hueDeg >= 195.0 && hueDeg <= 245.0 {
+                                          let w = max(0.0, 1.0 - abs(hueDeg - 218.0) / 25.0)
+                                          if w > memW { memW = w; hueTarget = 218.0 }
+                                          memSat *= (1.0 - 0.10 * w)
+                                      }
+                                      // VEGETATION: 95-150 Grad, Mitte 115 (enger als vorher,
+                                      // damit gelbgruene Blueten nicht mitgezogen werden)
+                                      if hueDeg >= 95.0 && hueDeg <= 150.0 {
+                                          let w = max(0.0, 1.0 - abs(hueDeg - 115.0) / 27.5)
+                                          if w > memW { memW = w; hueTarget = 115.0 }
+                                          memSat *= (1.0 + 0.04 * w)
                                       }
                                       k *= memSat
                                       // Farbton nur leicht ziehen: maximal 3 Grad.
