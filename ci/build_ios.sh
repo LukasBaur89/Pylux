@@ -1,0 +1,5293 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
+echo "=== PXSharp Build $BUILD_NUM ==="
+
+echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
+git config --global url."https://github.com/thestr4ng3r/jerasure".insteadOf "https://git.sr.ht/~thestr4ng3r/jerasure"
+git config --global url."https://github.com/thestr4ng3r/gf-complete".insteadOf "https://git.sr.ht/~thestr4ng3r/gf-complete"
+git submodule update --init --recursive             third-party/jerasure third-party/gf-complete third-party/nanopb third-party/curl
+
+echo "--- Branding und Renderer ---"
+set -e
+
+# --- Renderer -------------------------------------------------------------
+cat > ios/Pylux/Views/StreamVideoView.swift <<'SWIFT_SOURCE_EOF'
+// SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+// SwiftUI view for displaying decoded video stream
+//
+// PATCH: Metal/CoreImage render path with Lanczos scaling + sharpening.
+//
+// Only this file needs to be replaced. The decoder keeps feeding the
+// AVSampleBufferDisplayLayer (Picture-in-Picture stays alive); the subclass
+// below intercepts every enqueued sample and hands the CVPixelBuffer to the
+// Metal view sitting on top.
+//
+// Tunables: see the constants at the top of StreamVideoUIView.
+
+import SwiftUI
+import AVFoundation
+import CoreImage
+import CoreVideo
+import Metal
+import MetalFX
+import MetalKit
+import Network
+import os.log
+
+private let videoViewLog = OSLog(subsystem: "com.pylux.stream", category: "StreamVideoView")
+
+struct StreamVideoView: UIViewRepresentable {
+    let aspectRatio: CGFloat
+    var displayMode: DisplayMode = .fit
+    var onViewCreated: ((StreamVideoUIView) -> Void)?
+
+    init(aspectRatio: CGFloat = 16.0 / 9.0, displayMode: DisplayMode = .fit, onViewCreated: ((StreamVideoUIView) -> Void)? = nil) {
+        self.aspectRatio = aspectRatio
+        self.displayMode = displayMode
+        self.onViewCreated = onViewCreated
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(aspectRatio: aspectRatio)
+    }
+
+    func makeUIView(context: Context) -> StreamVideoUIView {
+        let view = StreamVideoUIView()
+        view.coordinator = context.coordinator
+        view.setupDisplayLayer()
+        view.updateVideoGravity(displayMode)
+        onViewCreated?(view)
+        return view
+    }
+
+    func updateUIView(_ uiView: StreamVideoUIView, context: Context) {
+        context.coordinator.aspectRatio = aspectRatio
+        uiView.updateVideoGravity(displayMode)
+    }
+
+    class Coordinator {
+        var aspectRatio: CGFloat
+        var lastLoggedBounds: CGRect?
+        init(aspectRatio: CGFloat) { self.aspectRatio = aspectRatio }
+    }
+}
+
+/// Intercepts sample buffers before they reach the display layer.
+final class SharpeningDisplayLayer: AVSampleBufferDisplayLayer {
+    weak var frameSink: StreamVideoUIView?
+
+    override func enqueue(_ sampleBuffer: CMSampleBuffer) {
+        if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            frameSink?.enqueueFrame(imageBuffer)
+        }
+        // Keep the normal path alive so PiP and the fallback still work.
+        super.enqueue(sampleBuffer)
+    }
+}
+
+/// UIView that hosts the AVSampleBufferDisplayLayer (PiP) and a Metal view on top.
+final class StreamVideoUIView: UIView, MTKViewDelegate {
+    weak var coordinator: StreamVideoView.Coordinator?
+
+    // ---- Tunables ----------------------------------------------------------
+    /// 0.0 = nur skalieren, 0.7 = deutlich, 1.0 = aggressiv
+    var sharpness: Float = 0.7
+    /// true, falls das Bild kopfsteht
+    private let mirrorVertical = false
+    /// false = exakt altes Verhalten
+    private let sharpeningEnabled = true
+    // ------------------------------------------------------------------------
+
+    override class var layerClass: AnyClass { SharpeningDisplayLayer.self }
+
+    private var metalView: MTKView?
+    private var ciContext: CIContext?
+    private var hdrContext: CIContext?
+    private var commandQueue: MTLCommandQueue?
+    private let bufferLock = NSLock()
+    private var latestBuffer: CVPixelBuffer?
+    private var currentMode: DisplayMode = .fit
+    private var loggedFrame = false
+    private var hdrActive = false
+    private var displayLink: CADisplayLink?
+    private var needsPresent = false
+    private var hdrStreak = 0
+    private var mfxScaler: MTLFXSpatialScaler?
+    private var mfxIn: MTLTexture?
+    private var mfxOut: MTLTexture?
+    private var mfxKey = ""
+    private var appliedPeak: Double = 0
+    private var appliedPanelFactor: CGFloat = 1.0
+    private var appliedPaceHz: Float = 60
+    private var lutData: Data?
+    private var lutKey: String = ""
+    private var colorLUTData: Data?
+    private var colorLUTKey: String = ""
+    private var colorLUTDimension: Int = 33
+    private var lutLastBuild: CFTimeInterval = 0
+    /// Von der Bildautomatik gesetzte Daempfung der Detailstufe (1 = voll).
+    private var autoDetailScale: Float = 1.0
+    private var lastAutoExpo: Double = 1.0
+    // Wolken-/Weisspunkt-Abgleich: nur die hellen Bereiche werden neutral
+    // gezogen. Wolken sind in der Realitaet weiss -- das ist der einzige
+    // physikalisch eindeutige Farbanker im Bild.
+    private var hlGainR: Double = 1.0
+    private var hlGainB: Double = 1.0
+    private var hlCounter: Int = 0
+    // Automatischer Bereich (Schwarz-/Weisspunkt). Echte Fotos nutzen den
+    // vollen Wertebereich; unser Stream endet gemessen bei 237 statt 255 und
+    // beginnt bei 0 statt ~24. Das ist der Hauptgrund fuer den flauen Look.
+    private var lvlBlack: Double = 0.0
+    private var lvlWhite: Double = 1.0
+    // Mitten-Abgleich. Nur aktiv, wenn die Mitten AUSSERHALB des Korridors
+    // liegen, den echte Miami-Aufnahmen zeigen (R/G 0,85-1,08, B/G 0,87-1,05).
+    // Drei reale Ansichten derselben Strasse ergaben B/G 0,869 / 1,052 / 0,901 --
+    // einen festen Zielwert gibt es also nicht, nur einen Bereich.
+    private var midGainR: Double = 1.0
+    private var midGainB: Double = 1.0
+    private var hlNearWhiteShare: Double = 0.0
+    private var lastClipShare: Double = 0.0
+    private var lowRateAccum: Double = 0
+
+    private var casKernel: CIKernel?
+    private var casTried = false
+    private var dbKernel: CIKernel?
+    private var dbTried = false
+    private var diffKernel: CIColorKernel?
+    private var diffTried = false
+    private var ldKernel: CIColorKernel?
+    private var ldTried = false
+    private var upKernel: CIKernel?
+    private var upTried = false
+    private var toneKernel: CIColorKernel?
+    private var toneTried = false
+    private let diagLabel = UILabel()
+    private var frameCount = 0
+    private var fpsWindowStart = CACurrentMediaTime()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        commonInit()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
+    private func commonInit() {
+        clipsToBounds = true
+        backgroundColor = .black
+        // Build 106: einmalige Migration auf den kalibrierten Referenzpfad.
+        // Muss hier laufen, nicht in SharpnessRow.onAppear — die Einstellungen
+        // werden meist gar nicht geöffnet, der Stream läuft aber sofort.
+        if UserDefaults.standard.object(forKey: "pxSharpTunedV3") == nil {
+            SharpnessRow.applyCalibratedPreset()
+        }
+        diagLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        diagLabel.textColor = .white
+        diagLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        diagLabel.numberOfLines = 0
+        diagLabel.isUserInteractionEnabled = false
+        diagLabel.text = "diag: warte auf Frames …"
+        addSubview(diagLabel)
+        setupMetal()
+        // Ein-Tipp-Weisspunktabgleich aus dem Panel heraus.
+        NotificationCenter.default.addObserver(self,
+            selector: #selector(pxWhitePointRequested),
+            name: Notification.Name("pxWhitePointMeasure"), object: nil)
+    }
+
+    private func setupMetal() {
+        guard sharpeningEnabled, let device = MTLCreateSystemDefaultDevice() else { return }
+        commandQueue = device.makeCommandQueue()
+        ciContext = CIContext(mtlDevice: device, options: [
+            .cacheIntermediates: false,
+            .workingColorSpace: CGColorSpaceCreateDeviceRGB()
+        ])
+        // HDR braucht einen eigenen Kontext: PQ ist eine ABSOLUTE Helligkeits-
+        // kodierung. Rechnet Core Image sie in den SDR-Arbeitsraum (DeviceRGB)
+        // und wieder zurueck, gehen rund sieben Blenden verloren (gemessen:
+        // 0,2 statt 30 cd/m2). Mit PQ als Arbeitsfarbraum findet keine
+        // Umrechnung statt - die Codes bleiben unveraendert.
+        if let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+            hdrContext = CIContext(mtlDevice: device, options: [
+                .cacheIntermediates: false,
+                .workingColorSpace: pq
+            ])
+        }
+
+        let mv = MTKView(frame: bounds, device: device)
+        mv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // WICHTIG: CIContext schreibt per Shader in das Drawable -> framebufferOnly MUSS false sein,
+        // sonst bleibt die Textur uninitialisiert (lila/grüner Bildschirm).
+        mv.framebufferOnly = false
+        mv.isPaused = true
+        mv.enableSetNeedsDisplay = true
+        mv.isOpaque = true
+        mv.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // SDR bleibt bei 8 Bit — exakt wie im Build, der sauber aussah.
+        mv.colorPixelFormat = .bgra8Unorm
+        // Drawable-Größe selbst bestimmen: sonst kann MTKView mit contentScaleFactor 1
+        // arbeiten und das Bild wird vom Compositor hochskaliert (weich + blockig).
+        mv.autoResizeDrawable = false
+        mv.delegate = self
+        mv.isUserInteractionEnabled = false
+        if let caml = mv.layer as? CAMetalLayer {
+            caml.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+            caml.wantsExtendedDynamicRangeContent = false
+        }
+        if mirrorVertical {
+            mv.transform = CGAffineTransform(scaleX: 1, y: -1)
+        }
+        addSubview(mv)
+        metalView = mv
+        bringSubviewToFront(diagLabel)
+        PXTuner.shared.start()
+        // Kernelstatus sichtbar machen (per Tuner /state abrufbar), damit ein
+        // Compile-Fehler nicht unbemerkt im Fallback haengt.
+        let casOK = casKernelInstance() != nil
+        let dbOK = deblockKernelInstance() != nil
+        let lcOK = diffKernelInstance() != nil
+        let ldOK = localDimKernelInstance() != nil
+        let ceOK = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? NSNumber)?.boolValue ?? true
+        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0)",
+                                  forKey: "pxSharpKernels")
+        os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let mv = metalView else { return }
+        let scale = window?.screen.scale ?? UIScreen.main.scale
+        if mv.contentScaleFactor != scale { mv.contentScaleFactor = scale }
+        // Panel-Aufloesung: 0,83 = 2266 statt 2732 px (31 % weniger Pixel).
+        let factor: CGFloat = (UserDefaults.standard.object(forKey: "pxSharpPanel2x") as? Bool ?? false) ? 0.83 : 1.0
+        appliedPanelFactor = factor
+        let size = CGSize(width: (bounds.width * scale * factor).rounded(.down),
+                          height: (bounds.height * scale * factor).rounded(.down))
+        if size.width > 0, size.height > 0, mv.drawableSize != size {
+            mv.drawableSize = size
+            os_log(.default, log: videoViewLog, "[StreamVideoUIView] drawableSize=%.0fx%.0f (Faktor %.2f)",
+                   size.width, size.height, Double(factor))
+        }
+        let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
+        diagLabel.isHidden = !showDiag
+        if showDiag {
+            diagLabel.frame = CGRect(x: 12, y: 12, width: max(200, bounds.width - 24), height: 48)
+        }
+    }
+
+    func setupDisplayLayer() {
+        guard let avLayer = layer as? SharpeningDisplayLayer else { return }
+        avLayer.frameSink = self
+        avLayer.videoGravity = .resizeAspect
+        avLayer.backgroundColor = UIColor.black.cgColor
+        os_log(.default, log: videoViewLog, "[StreamVideoUIView] setupDisplayLayer ok")
+    }
+
+    func updateVideoGravity(_ mode: DisplayMode) {
+        currentMode = mode
+        if let avLayer = layer as? AVSampleBufferDisplayLayer {
+            let gravity: AVLayerVideoGravity
+            switch mode {
+            case .fit: gravity = .resizeAspect
+            case .zoom: gravity = .resizeAspectFill
+            case .stretch: gravity = .resize
+            }
+            if avLayer.videoGravity != gravity {
+                avLayer.videoGravity = gravity
+                avLayer.flush()
+            }
+        }
+        metalView?.setNeedsDisplay()
+    }
+
+    /// Display layer for attaching to VideoDecoder (PiP).
+    var videoDisplayLayer: AVSampleBufferDisplayLayer? {
+        layer as? AVSampleBufferDisplayLayer
+    }
+
+    // MARK: - Frame input
+
+    func enqueueFrame(_ pixelBuffer: CVPixelBuffer) {
+        guard sharpeningEnabled, metalView != nil else { return }
+        bufferLock.lock()
+        latestBuffer = pixelBuffer
+        bufferLock.unlock()
+        let hdr = pixelBufferIsHDR(pixelBuffer)
+        if hdr != hdrActive {            // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
+            // das Bild bei einzelnen Ausreißern (hell/dunkel).
+            hdrStreak += 1
+            if hdrStreak >= 8 {
+                hdrStreak = 0
+                DispatchQueue.main.async { [weak self] in self?.applyHDR(hdr) }
+            }
+        } else {
+            hdrStreak = 0
+        }
+        if !loggedFrame {
+            loggedFrame = true
+            var parts: [String] = []
+            let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
+            let chars = [UInt8((fmt >> 24) & 255), UInt8((fmt >> 16) & 255), UInt8((fmt >> 8) & 255), UInt8(fmt & 255)]
+            let fmtStr = String(bytes: chars.filter { $0 >= 32 && $0 < 127 }, encoding: .ascii) ?? "?"
+            parts.append("fmt=\(fmtStr)")
+            parts.append("\(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))")
+            if let p = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) {
+                parts.append("prim=\(String(describing: p))")
+            }
+            if let t = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) {
+                parts.append("tf=\(String(describing: t))")
+            }
+            if let m = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) {
+                parts.append("mtx=\(String(describing: m))")
+            }
+            parts.append("hdr=\(hdr ? 1 : 0)")
+            let line = parts.joined(separator: "  ·  ")
+            UserDefaults.standard.set(line, forKey: "pxSharpDiag")
+            DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
+            self.diagLabel.isHidden = !showDiag
+            self.diagLabel.text = line
+        }
+            os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
+                   CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), hdr ? 1 : 0)
+        }
+        if pacingEnabled {
+            needsPresent = true
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.metalView?.setNeedsDisplay()
+            }
+        }
+    }
+
+    // MARK: - Frame Pacing
+
+    private var pacingEnabled: Bool {
+        UserDefaults.standard.object(forKey: "pxSharpPacing") as? Bool ?? true
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { startDisplayLink() } else { stopDisplayLink() }
+    }
+
+    private func startDisplayLink() {
+        guard displayLink == nil, metalView != nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(displayTick))
+        // 60 Hz statt 120: die Quelle (PS5 Remote Play) liefert 60 fps. Bei
+        // preferred 120 tickt der Link doppelt so oft wie Frames ankommen, was
+        // pro Frame ein zusaetzliches Present mit identischem Bild erzeugt —
+        // sichtbar als Mikro-Ruckler und unnoetige GPU-Last. Mit 60 Hz liegt
+        // Present und Frame im Verhaeltnis 1:1.
+        let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
+        let hz = Float(hzPref == 0 ? 60 : hzPref)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: max(60, hz), preferred: hz)
+        appliedPaceHz = hz
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    private func stopDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func displayTick() {
+        // Frame Pacing live uebernehmen. Vorher wurde der Wert nur beim
+        // Anlegen des Display-Links gelesen -- der Regler hatte deshalb
+        // null Wirkung, solange die Sitzung lief.
+        if let link = displayLink {
+            let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
+            let hz = Float(hzPref == 0 ? 60 : hzPref)
+            if abs(appliedPaceHz - hz) > 0.5 {
+                appliedPaceHz = hz
+                link.preferredFrameRateRange = CAFrameRateRange(minimum: 60,
+                                                                maximum: max(60, hz),
+                                                                preferred: hz)
+                os_log(.default, log: videoViewLog, "[px] pacing -> %.0f Hz", hz)
+            }
+        }
+        guard needsPresent else { return }
+        needsPresent = false
+        metalView?.draw()
+    }
+
+    // MARK: - MetalFX
+
+    /// Apple MetalFX Spatial Scaler: kantenbewusste Rekonstruktion statt Lanczos.
+    /// Nur wenn per Schalter aktiviert und vom Gerät unterstützt.
+    private func ensureMetalFX(device: MTLDevice, input: CGSize, output: CGSize) -> Bool {
+        let key = "\(Int(input.width))x\(Int(input.height))->\(Int(output.width))x\(Int(output.height))"
+        if key == mfxKey, mfxScaler != nil, mfxIn != nil, mfxOut != nil { return true }
+        guard input.width >= 2, input.height >= 2, output.width >= 2, output.height >= 2 else { return false }
+        guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else { return false }
+
+        let desc = MTLFXSpatialScalerDescriptor()
+        desc.inputWidth = Int(input.width)
+        desc.inputHeight = Int(input.height)
+        desc.outputWidth = Int(output.width)
+        desc.outputHeight = Int(output.height)
+        desc.colorTextureFormat = .bgra8Unorm
+        desc.outputTextureFormat = .bgra8Unorm
+        desc.colorProcessingMode = .perceptual
+
+        guard let scaler = desc.makeSpatialScaler(device: device) else { return false }
+
+        let inDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                              width: Int(input.width),
+                                                              height: Int(input.height),
+                                                              mipmapped: false)
+        inDesc.usage = [.shaderRead, .renderTarget]
+        inDesc.storageMode = .private
+
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                               width: Int(output.width),
+                                                               height: Int(output.height),
+                                                               mipmapped: false)
+        outDesc.usage = [.shaderRead, .renderTarget]
+        outDesc.storageMode = .private
+
+        guard let it = device.makeTexture(descriptor: inDesc),
+              let ot = device.makeTexture(descriptor: outDesc) else { return false }
+
+        mfxIn = it
+        mfxOut = ot
+        mfxScaler = scaler
+        mfxKey = key
+        os_log(.default, log: videoViewLog, "[StreamVideoUIView] MetalFX %dx%d -> %dx%d",
+               Int(input.width), Int(input.height), Int(output.width), Int(output.height))
+        return true
+    }
+
+    // MARK: - HDR / EDR
+
+    /// HDR nur, wenn der Buffer wirklich PQ/BT.2020 meldet.
+    /// 10 Bit allein reicht NICHT — sonst wird SDR-Inhalt als PQ gerendert und wirkt dunkel.
+    private func pixelBufferIsHDR(_ pb: CVPixelBuffer) -> Bool {
+        if UserDefaults.standard.bool(forKey: "pxSharpHdrOff") { return false }
+        if let prim = CVBufferCopyAttachment(pb, kCVImageBufferColorPrimariesKey, nil) {
+            if String(describing: prim).contains("2020") { return true }
+        }
+        if let tf = CVBufferCopyAttachment(pb, kCVImageBufferTransferFunctionKey, nil) {
+            let s = String(describing: tf)
+            if s.contains("2084") || s.contains("PQ") { return true }
+        }
+        return false
+    }
+
+    private func applyHDR(_ on: Bool) {
+        guard on != hdrActive else { return }
+        hdrActive = on
+        guard let mv = metalView, let caml = mv.layer as? CAMetalLayer else { return }
+        if on {
+            mv.colorPixelFormat = .rgba16Float
+            caml.wantsExtendedDynamicRangeContent = true
+            caml.colorspace = CGColorSpace(name: CGColorSpace.itur_2100_PQ)
+            caml.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005,
+                                                 maxLuminance: Float(UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600),
+                                                 opticalOutputScale: 100)
+            appliedPeak = UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600
+            os_log(.default, log: videoViewLog, "[StreamVideoUIView] HDR/EDR an")
+        } else {
+            mv.colorPixelFormat = .bgra8Unorm
+            caml.wantsExtendedDynamicRangeContent = false
+            caml.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+            caml.edrMetadata = nil
+            os_log(.default, log: videoViewLog, "[StreamVideoUIView] HDR/EDR aus")
+        }
+    }
+
+    // MARK: - MTKViewDelegate
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+    deinit {
+        displayLink?.invalidate()
+    }
+
+    // MARK: - Wolken-Abgleich
+
+    /// Misst nur die hellen Bereiche (Wolken, Spitzlichter) und zieht sie
+    /// soweit zur Neutralitaet, dass Weiss wieder Weiss ist. Dunkle und
+    /// mittlere Toene bleiben unangetastet -- dort ist eine warme oder kuehle
+    /// Note eine Stilfrage, hier nicht.
+    private func measureHighlightBalance(from img: CIImage) {
+        guard let ctx = ciContext else { return }
+        let w = 64, h = 36
+        let norm = img.transformed(by: CGAffineTransform(translationX: -img.extent.origin.x,
+                                                         y: -img.extent.origin.y))
+        guard norm.extent.width > 1, norm.extent.height > 1 else { return }
+        let small = norm.transformed(by: CGAffineTransform(scaleX: CGFloat(w) / norm.extent.width,
+                                                           y: CGFloat(h) / norm.extent.height))
+        guard let cg = ctx.createCGImage(small, from: CGRect(x: 0, y: 0, width: w, height: h)),
+              let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return }
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn = buf.withUnsafeMutableBytes { raw -> Bool in
+            guard let b2 = CGContext(data: raw.baseAddress, width: w, height: h,
+                                     bitsPerComponent: 8, bytesPerRow: w * 4, space: cs,
+                                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            b2.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return }
+        var rs: [Double] = []; var gs: [Double] = []; var bs: [Double] = []
+        var lumas: [Double] = []
+        var clipCount = 0
+        var hlSatSum = 0.0
+        var hlSatCount = 0
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            let R = Double(buf[i]) / 255.0
+            let G = Double(buf[i + 1]) / 255.0
+            let B = Double(buf[i + 2]) / 255.0
+            let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
+            lumas.append(y)
+            if y >= 0.995 { clipCount += 1 }
+            if y > 0.72 {
+                rs.append(R); gs.append(G); bs.append(B)
+                let hmx = max(R, max(G, B)); let hmn = min(R, min(G, B))
+                hlSatSum += hmx > 0.01 ? (hmx - hmn) / hmx : 0.0
+                hlSatCount += 1
+            }
+        }
+        // Bereich messen: 2- und 98-Perzentil der Helligkeit.
+        let clipRaw = Double(clipCount) / Double(max(lumas.count, 1))
+        let hlSat = hlSatCount > 0 ? hlSatSum / Double(hlSatCount) : 0.0
+        // Spitzlichtschutz: wie viel Flaeche liegt fast auf Weiss?
+        var nearWhite = 0
+        for y in lumas where y >= 0.95 { nearWhite += 1 }
+        let nwShare = Double(nearWhite) / Double(max(lumas.count, 1))
+        lastClipShare = lastClipShare * 0.85 + clipRaw * 0.15
+        hlNearWhiteShare = hlNearWhiteShare * 0.85 + nwShare * 0.15
+        if lumas.count > 200 {
+            lumas.sort()
+            let p2 = lumas[Int(Double(lumas.count) * 0.02)]
+            let p98 = lumas[Int(Double(lumas.count) * 0.98)]
+            // Nur eingreifen, wenn wirklich Bereich fehlt.
+            if p98 > 0.55 {
+                // Weissziel hoechstens 0,93. Vorher stand hier 0,97 -- dadurch
+                // wurde das Bild ueberzogen (gemessen: 2,39 % der Flaeche
+                // ueber 95 % Helligkeit statt 0,22 % im Rohbild).
+                var whiteT = min(max(p98, 0.82), 0.93)
+                var blackT = p2 - 0.008
+                if blackT < 0 { blackT = 0 }
+                if blackT > 0.05 { blackT = 0.05 }
+                // Wenn im Rohbild schon geclippt wird, NICHT weiter spreizen.
+                if clipRaw < 0.0006 {
+                    lvlWhite = lvlWhite * 0.85 + whiteT * 0.15
+                    lvlBlack = lvlBlack * 0.85 + blackT * 0.15
+                } else {
+                    // Es clippt: Spreizung aktiv zuruecknehmen, nicht einfrieren.
+                    lvlWhite = lvlWhite * 0.85 + 1.0 * 0.15
+                    lvlBlack = lvlBlack * 0.85 + 0.0 * 0.15
+                }
+            }
+        }
+        // Mitten messen (0,35-0,60) -- nur bei ausreichend Bildhelligkeit,
+        // damit Nachtaufnahmen unangetastet bleiben.
+        var mR = 0.0; var mG = 0.0; var mB = 0.0; var mCount = 0
+        var meanSum = 0.0
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            let R = Double(buf[i]) / 255.0
+            let G = Double(buf[i + 1]) / 255.0
+            let B = Double(buf[i + 2]) / 255.0
+            let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
+            meanSum += y
+            if y >= 0.35 && y < 0.60 { mR += R; mG += G; mB += B; mCount += 1 }
+        }
+        let meanY = meanSum / Double(w * h)
+        if meanY > 0.32 && mCount >= 60 && mG > 0.02 && hlSat < 0.22 {
+            let rg = mR / mG
+            let bg = mB / mG
+            var tR = 1.0
+            var tB = 1.0
+            if rg > 1.08 { tR = max(0.93, 1.08 / rg) }
+            if rg < 0.85 { tR = min(1.07, 0.85 / rg) }
+            if bg > 1.05 { tB = max(0.93, 1.05 / bg) }
+            if bg < 0.87 { tB = min(1.07, 0.87 / bg) }
+            midGainR = midGainR * 0.85 + tR * 0.15
+            midGainB = midGainB * 0.85 + tB * 0.15
+        }
+
+        // Zu wenige helle Pixel (Nacht, dunkler Raum): nichts tun.
+        guard rs.count >= 40 else { return }
+        // SONNENUNTERGANG-ERKENNUNG: Wolken sind nahezu farblos (Saettigung
+        // unter ~0,20). Ist der helle Bereich stark gefaerbt, ist es ein
+        // Himmel bei Sonnenuntergang -- den darf man NICHT neutralisieren,
+        // sonst wird der Sonnenuntergang grau gerechnet.
+        guard hlSat < 0.22 else {
+            // Nur den Bereich nachziehen, Farbabgleich auslassen.
+            if lumas.count > 200 {
+                lumas.sort()
+                let p2 = lumas[Int(Double(lumas.count) * 0.02)]
+                let p98 = lumas[Int(Double(lumas.count) * 0.98)]
+                if p98 > 0.55 && clipRaw < 0.0006 {
+                    var whiteT = min(max(p98, 0.82), 0.93)
+                    var blackT = p2 - 0.008
+                    if blackT < 0 { blackT = 0 }
+                    if blackT > 0.05 { blackT = 0.05 }
+                    lvlWhite = lvlWhite * 0.85 + whiteT * 0.15
+                    lvlBlack = lvlBlack * 0.85 + blackT * 0.15
+                }
+            }
+            return
+        }
+        let mr = rs.reduce(0, +) / Double(rs.count)
+        let mg = gs.reduce(0, +) / Double(gs.count)
+        let mb = bs.reduce(0, +) / Double(bs.count)
+        guard mr > 0.05, mg > 0.05, mb > 0.05 else { return }
+        // Im Gamma-Raum messen und im Gamma-Raum korrigieren -- konsistent.
+        var gr = mg / mr
+        var gb = mg / mb
+        gr = min(max(gr, 0.94), 1.06)
+        gb = min(max(gb, 0.94), 1.06)
+        // Sanft nachziehen, damit nichts springt.
+        hlGainR = hlGainR * 0.85 + gr * 0.15
+        hlGainB = hlGainB * 0.85 + gb * 0.15
+    }
+
+    // MARK: - Weisspunkt-Abgleich
+
+    private var pendingWhitePoint = false
+
+    @objc private func pxWhitePointRequested() {
+        // Doppeltes Ausloesen ignorieren, solange eine Messung aussteht.
+        if !pendingWhitePoint {
+            pendingWhitePoint = true
+        }
+    }
+
+    private func pxNote(_ text: String) {
+        UserDefaults.standard.set(text, forKey: "pxSharpWBNote")
+    }
+
+    /// Misst den Farbstich in den hellen, nahezu neutralen Flaechen und
+    /// schreibt die Kanalverstaerkung so, dass Weiss wieder weiss ist.
+    /// Laeuft einmalig auf Tastendruck -- kein Dauerregler, kein Pumpen.
+    private func measureWhitePoint(from img: CIImage) {
+        guard let ctx = ciContext else { pxNote("Kein Bildspeicher verfuegbar"); return }
+        let w = 96, h = 54
+        let norm = img.transformed(by: CGAffineTransform(translationX: -img.extent.origin.x,
+                                                         y: -img.extent.origin.y))
+        guard norm.extent.width > 1, norm.extent.height > 1 else { pxNote("Kein Bild"); return }
+        let sx = CGFloat(w) / norm.extent.width
+        let sy = CGFloat(h) / norm.extent.height
+        let small = norm.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+        let rect = CGRect(x: 0, y: 0, width: w, height: h)
+        guard let cg = ctx.createCGImage(small, from: rect),
+              let cs = CGColorSpace(name: CGColorSpace.sRGB) else {
+            pxNote("Messung fehlgeschlagen"); return
+        }
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn = buf.withUnsafeMutableBytes { raw -> Bool in
+            guard let bctx = CGContext(data: raw.baseAddress, width: w, height: h,
+                                       bitsPerComponent: 8, bytesPerRow: w * 4,
+                                       space: cs,
+                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                return false
+            }
+            bctx.draw(cg, in: rect)
+            return true
+        }
+        guard drawn else { pxNote("Messung fehlgeschlagen"); return }
+
+        var rs: [Double] = []; var gs: [Double] = []; var bs: [Double] = []
+        for i in stride(from: 0, to: w * h * 4, by: 4) {
+            let R = Double(buf[i]) / 255.0
+            let G = Double(buf[i + 1]) / 255.0
+            let B = Double(buf[i + 2]) / 255.0
+            let mx = max(R, max(G, B)); let mn = min(R, min(G, B))
+            let sat = mx > 0.01 ? (mx - mn) / mx : 0.0
+            let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
+            if sat < 0.12 && y > 0.45 { rs.append(R); gs.append(G); bs.append(B) }
+        }
+        guard rs.count >= 40 else {
+            pxNote("Keine neutralen Flaechen im Bild — auf eine weisse oder graue Flaeche zielen")
+            return
+        }
+        let mr = rs.reduce(0, +) / Double(rs.count)
+        let mg = gs.reduce(0, +) / Double(gs.count)
+        let mb = bs.reduce(0, +) / Double(bs.count)
+        guard mr > 0.02, mg > 0.02, mb > 0.02 else { pxNote("Bild zu dunkel fuer eine Messung"); return }
+
+        // WICHTIG: Die Messung liest Gamma-kodierte Werte, die Farb-LUT
+        // multipliziert aber im LINEAREN Licht. Ein Verhaeltnis k im
+        // Gamma-Raum entspricht k^2.2 linear -- ohne diese Umrechnung kam
+        // die Korrektur nur zu 45 % an (gemessen: 6 % Reglerweg ergaben
+        // 1,6 % Bildwirkung).
+        let kR = mr / mg
+        let kB = mb / mg
+        if abs(kR - 1.0) < 0.004 && abs(kB - 1.0) < 0.004 {
+            pxNote("Weiss ist bereits neutral — nichts zu korrigieren")
+            return
+        }
+        var gr = pow(kR, 2.2); var gg = 1.0; var gb = pow(kB, 2.2)
+        let kn = 0.2126 * gr + 0.7152 * gg + 0.0722 * gb
+        if kn > 0.0001 { gr /= kn; gg /= kn; gb /= kn }
+        // Begrenzen: linear entspricht 0.85..1.18 etwa +-7 % im Bild.
+        gr = min(max(gr, 0.85), 1.18)
+        gg = min(max(gg, 0.85), 1.18)
+        gb = min(max(gb, 0.85), 1.18)
+        let dbg = UserDefaults.standard
+        let oldR = (dbg.object(forKey: "pxSharpWB_R") as? Double) ?? 1.0
+        let oldG = (dbg.object(forKey: "pxSharpWB_G") as? Double) ?? 1.0
+        let oldB = (dbg.object(forKey: "pxSharpWB_B") as? Double) ?? 1.0
+        let combined = (gr * oldR, gg * oldG, gb * oldB)
+        // Doppel-Korrektur verhindern: wenn schon stark korrigiert wurde, erst zurueck auf 1.
+        let alreadyShifted = abs(oldR - 1) > 0.005 || abs(oldB - 1) > 0.005
+        let newR = alreadyShifted ? gr : combined.0
+        let newG = alreadyShifted ? gg : combined.1
+        let newB = alreadyShifted ? gb : combined.2
+        dbg.set(Double(newR), forKey: "pxSharpWB_R")
+        dbg.set(Double(newG), forKey: "pxSharpWB_G")
+        dbg.set(Double(newB), forKey: "pxSharpWB_B")
+        dbg.set(0, forKey: "pxSharpCastFix")
+        let pct = (newR - 1) * 100
+        let pctB = (newB - 1) * 100
+        pxNote(String(format: "Weisspunkt gesetzt: Rot %+.1f %%, Blau %+.1f %% (aus %d Messpunkten)",
+                      pct, pctB, rs.count))
+        os_log(.default, log: videoViewLog, "[px] whitepoint R=%.4f G=%.4f B=%.4f n=%d",
+               newR, newG, newB, rs.count)
+    }
+
+    /// Kalibrierungs-LUT: Gamma pro Kanal (R/G/B). Das ist der Teil, den ein
+    /// kalibrierter Fernseher über seine CMS-Ebene macht. Wird nur gebaut, wenn
+    /// mindestens ein Kanal von 1.00 abweicht, und dann gecacht.
+    private func applyCalibration(_ input: CIImage) -> CIImage {
+        let gr = Float(UserDefaults.standard.object(forKey: "pxSharpGammaR") as? Double ?? 1.0)
+        let gg = Float(UserDefaults.standard.object(forKey: "pxSharpGammaG") as? Double ?? 1.0)
+        let gb = Float(UserDefaults.standard.object(forKey: "pxSharpGammaB") as? Double ?? 1.0)
+        if abs(gr - 1) < 0.002 && abs(gg - 1) < 0.002 && abs(gb - 1) < 0.002 { return input }
+
+        let key = String(format: "%.3f/%.3f/%.3f", gr, gg, gb)
+        if key != lutKey || lutData == nil {
+            let n = 32
+            var data = [Float](repeating: 0, count: n * n * n * 4)
+            var i = 0
+            for b in 0..<n {
+                for g in 0..<n {
+                    for r in 0..<n {
+                        let cr = pow(Float(r) / Float(n - 1), gr)
+                        let cg = pow(Float(g) / Float(n - 1), gg)
+                        let cb = pow(Float(b) / Float(n - 1), gb)
+                        data[i + 0] = min(max(cr, 0), 1)
+                        data[i + 1] = min(max(cg, 0), 1)
+                        data[i + 2] = min(max(cb, 0), 1)
+                        data[i + 3] = 1
+                        i += 4
+                    }
+                }
+            }
+            lutData = data.withUnsafeBufferPointer { Data(buffer: $0) }
+            lutKey = key
+        }
+        guard let lut = lutData else { return input }
+        return input.applyingFilter("CIColorCube", parameters: [
+            "inputCubeDimension": 32,
+            "inputCubeData": lut
+        ])
+    }
+
+    /// CAS = Contrast Adaptive Sharpening (nach AMD FidelityFX). Der Unterschied zu
+    /// CIUnsharpMask: die Verstärkung wird pro Pixel an den lokalen Kontrast angepasst
+    /// und das Ergebnis hart auf den lokalen Wertebereich begrenzt. Dadurch entstehen
+    /// keine hellen/dunklen Säume (Halos) an Kanten — das ist der Grund, warum
+    /// UnsharpMask künstlich aussieht.
+    private func casKernelInstance() -> CIKernel? {
+        if casTried { return casKernel }
+        casTried = true
+        let src = """
+        kernel vec4 pxCAS(sampler src, float r1, float r2, float r3, float s1, float s2, float s3, float clampK, float lumaOnly, float chromaS, float coring) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec2 d1 = vec2(r1, r1);
+            vec4 a1 = sample(src, samplerTransform(src, p + vec2(-d1.x, -d1.y)));
+            vec4 b1 = sample(src, samplerTransform(src, p + vec2( 0.0, -d1.y)));
+            vec4 c1 = sample(src, samplerTransform(src, p + vec2( d1.x, -d1.y)));
+            vec4 d1s = sample(src, samplerTransform(src, p + vec2(-d1.x,  0.0)));
+            vec4 e1 = sample(src, samplerTransform(src, p + vec2( d1.x,  0.0)));
+            vec4 f1 = sample(src, samplerTransform(src, p + vec2(-d1.x,  d1.y)));
+            vec4 g1 = sample(src, samplerTransform(src, p + vec2( 0.0,  d1.y)));
+            vec4 h1 = sample(src, samplerTransform(src, p + vec2( d1.x,  d1.y)));
+            vec2 d2 = vec2(r2, r2);
+            vec4 a2 = sample(src, samplerTransform(src, p + vec2(-d2.x, -d2.y)));
+            vec4 b2 = sample(src, samplerTransform(src, p + vec2( 0.0, -d2.y)));
+            vec4 c2 = sample(src, samplerTransform(src, p + vec2( d2.x, -d2.y)));
+            vec4 d2s = sample(src, samplerTransform(src, p + vec2(-d2.x,  0.0)));
+            vec4 e2 = sample(src, samplerTransform(src, p + vec2( d2.x,  0.0)));
+            vec4 f2 = sample(src, samplerTransform(src, p + vec2(-d2.x,  d2.y)));
+            vec4 g2 = sample(src, samplerTransform(src, p + vec2( 0.0,  d2.y)));
+            vec4 h2 = sample(src, samplerTransform(src, p + vec2( d2.x,  d2.y)));
+
+            vec4 a3, b3, c3, d3s, e3, f3, g3, h3;
+            vec3 avg3 = vec3(0.0);
+            if (s3 > 0.001) {
+                a3 = sample(src, samplerTransform(src, p + vec2(-r3, -r3)));
+                b3 = sample(src, samplerTransform(src, p + vec2( 0.0, -r3)));
+                c3 = sample(src, samplerTransform(src, p + vec2( r3, -r3)));
+                d3s = sample(src, samplerTransform(src, p + vec2(-r3,  0.0)));
+                e3 = sample(src, samplerTransform(src, p + vec2( r3,  0.0)));
+                f3 = sample(src, samplerTransform(src, p + vec2(-r3,  r3)));
+                g3 = sample(src, samplerTransform(src, p + vec2( 0.0,  r3)));
+                h3 = sample(src, samplerTransform(src, p + vec2( r3,  r3)));
+                avg3 = (b3.rgb + d3s.rgb + e3.rgb + g3.rgb
+                      + a3.rgb + c3.rgb + f3.rgb + h3.rgb) * 0.125;
+            }
+
+            vec3 mn = min(min(min(b1.rgb, d1s.rgb), min(e1.rgb, g1.rgb)),
+                          min(min(a1.rgb, c1.rgb), min(f1.rgb, h1.rgb)));
+            vec3 mx = max(max(max(b1.rgb, d1s.rgb), max(e1.rgb, g1.rgb)),
+                          max(max(a1.rgb, c1.rgb), max(f1.rgb, h1.rgb)));
+
+            vec3 avg1 = (b1.rgb + d1s.rgb + e1.rgb + g1.rgb
+                       + a1.rgb + c1.rgb + f1.rgb + h1.rgb) * 0.125;
+            vec3 avg2 = (b2.rgb + d2s.rgb + e2.rgb + g2.rgb
+                       + a2.rgb + c2.rgb + f2.rgb + h2.rgb) * 0.125;
+
+            vec3 range = mx - mn;
+            // Echte Kante (hoher Kontrast) -> kaum Verstärkung, Textur -> volle.
+            vec3 adapt = vec3(1.0) - clamp(range * 4.0, vec3(0.0), vec3(1.0));
+            vec3 edge;
+            vec3 tex;
+            if (lumaOnly > 0.5) {
+                // Nur die Helligkeit schaerfen, Farbe unangetastet. Verhindert
+                // farbige Saeume an Kanten (das machen Fernseher genauso).
+                vec3 L = vec3(0.299, 0.587, 0.114);
+                float lc2 = dot(c.rgb, L);
+                float la1 = dot(avg1, L);
+                float la2 = dot(avg2, L);
+                float a = dot(adapt, vec3(0.333333));
+                float q1 = lc2 - la1;
+                float q2 = lc2 - la2;
+                float q3 = lc2 - dot(avg3, L);
+                q1 = sign(q1) * max(0.0, abs(q1) - coring);
+                q2 = sign(q2) * max(0.0, abs(q2) - coring);
+                q3 = sign(q3) * max(0.0, abs(q3) - coring);
+                float de = q1 * (s1 * (0.45 + 0.55 * a));
+                float dt = q2 * s2;
+                float dc = q3 * s3;
+                edge = vec3(de);
+                tex = vec3(dt + dc);
+                if (chromaS > 0.001) {
+                    vec3 cc = c.rgb - vec3(lc2);
+                    vec3 ca = avg2 - vec3(la2);
+                    tex += (cc - ca) * chromaS;
+                }
+            } else {
+                edge = (c.rgb - avg1) * (s1 * (0.45 + 0.55 * adapt));
+                tex  = (c.rgb - avg2) * s2 + (c.rgb - avg3) * s3;
+            }
+            // Banding-Schutz: Treppenstufen sind Kanten mit 1-4 Stufen Amplitude.
+            // smoothstep blendet die Schaerfung dort aus, laesst Textur stehen.
+            float bandC = dot(range, vec3(0.299, 0.587, 0.114));
+            float bandGuard = smoothstep(0.0025, 0.020, bandC);
+            // STRUKTUR-GATTER: Nur dort verstaerken, wo wirklich Struktur ist.
+            // Vorher wurde in leeren Flaechen (Himmel, Wand, Haut) genauso
+            // geschaerft wie an Kanten -- dadurch bekamen 11 Prozentpunkte
+            // vorher glatter Flaeche Rauschen. Gemessen: Rauschen x1.29.
+            float structure = smoothstep(0.004, 0.028, bandC);
+            float edgeGain = mix(0.35, 1.0, structure);
+            vec3 outv = c.rgb + (edge * edgeGain + tex * structure) * bandGuard;
+            vec3 lim  = range * clampK + 0.003;
+            // In hellen Bereichen weniger Ueberschwinger erlauben. Vorher
+            // schob die Schaerfung die Fahrbahn auf Kreideweiss (gemessen:
+            // p99 +23 Stufen, Flaechen ueber 95 % x23).
+            float lumaHi = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float hiGate = 1.0 - smoothstep(0.68, 0.94, lumaHi);
+            lim *= (0.25 + 0.75 * hiGate);
+            outv = clamp(outv, mn - lim, mx + lim);
+            return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        casKernel = CIKernel(source: src)
+        if casKernel == nil { os_log(.error, log: videoViewLog, "[px] CAS kernel compile failed") }
+        return casKernel
+    }
+
+    /// Kantenerhaltendes Deblocking: mittelt nur Nachbarn, die innerhalb einer
+    /// Schwelle liegen. Blockkanten (kleine Sprünge) werden geglättet, echte Kanten
+    /// (große Sprünge) bleiben stehen. CIMedianFilter hat vorher 19 % Schärfe gekostet.
+    private func deblockKernelInstance() -> CIKernel? {
+        if dbTried { return dbKernel }
+        dbTried = true
+        let src = """
+        kernel vec4 pxDeblock(sampler src, float r, float thr, float amount) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            float lc = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+            vec4 s0 = sample(src, samplerTransform(src, p + vec2(-r, -r)));
+            vec4 s1 = sample(src, samplerTransform(src, p + vec2( 0.0, -r)));
+            vec4 s2 = sample(src, samplerTransform(src, p + vec2( r, -r)));
+            vec4 s3 = sample(src, samplerTransform(src, p + vec2(-r,  0.0)));
+            vec4 s4 = sample(src, samplerTransform(src, p + vec2( r,  0.0)));
+            vec4 s5 = sample(src, samplerTransform(src, p + vec2(-r,  r)));
+            vec4 s6 = sample(src, samplerTransform(src, p + vec2( 0.0, r)));
+            vec4 s7 = sample(src, samplerTransform(src, p + vec2( r,  r)));
+            float w0 = clamp(1.0 - abs(dot(s0.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            float w1 = clamp(1.0 - abs(dot(s1.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            float w2 = clamp(1.0 - abs(dot(s2.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            float w3 = clamp(1.0 - abs(dot(s3.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            float w4 = clamp(1.0 - abs(dot(s4.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            float w5 = clamp(1.0 - abs(dot(s5.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            float w6 = clamp(1.0 - abs(dot(s6.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            float w7 = clamp(1.0 - abs(dot(s7.rgb, vec3(0.299,0.587,0.114)) - lc) / thr, 0.0, 1.0);
+            vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3
+                     + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+            float wsum = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+            vec3 avg = wsum > 0.0001 ? sum / wsum : c.rgb;
+            vec3 outp = mix(c.rgb, avg, clamp(amount, 0.0, 1.0));
+            return vec4(clamp(outp, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        dbKernel = CIKernel(source: src)
+        if dbKernel == nil { os_log(.error, log: videoViewLog, "[px] deblock kernel compile failed") }
+        return dbKernel
+    }
+
+    /// Bild + k * (Bild - Weichzeichner). Wird fuer "Klarheit" benutzt: der
+    /// Weichzeichner laeuft auf 1/8 Aufloesung (billig), die Differenz wird in
+    /// einem einzigen 1:1-Durchgang addiert.
+    private func diffKernelInstance() -> CIColorKernel? {
+        if diffTried { return diffKernel }
+        diffTried = true
+        let src = """
+        kernel vec4 pxLocalContrast(__sample a, __sample blur, float k, float limit) {
+            vec3 d = (a.rgb - blur.rgb) * k;
+            vec3 lo = a.rgb - vec3(limit) * (0.30 + 0.70 * a.rgb);
+            vec3 hi = a.rgb + vec3(limit) * (0.35 + 0.65 * (1.0 - a.rgb));
+            vec3 o = clamp(a.rgb + d, lo, hi);
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), a.a);
+        }
+        """
+        diffKernel = CIColorKernel(source: src)
+        return diffKernel
+    }
+
+    /// Farb-Engine: EINE 3D-LUT für Weißabgleich, Sättigung, Vibrance, Gamma,
+    /// Schwarzpegel und Kanal-Kalibrierung. Alles in linearem Licht.
+    ///
+    /// Warum das der Kern des "unnatürlichen Bildes" war:
+    /// - CIVibrance hat im Gamma-Raum gemessen den Farbton verschoben (R/G fiel
+    ///   bei Amount 0.70 von 0.938 auf 0.854 — das Bild wurde grünlich).
+    /// - Der Temperatur-Regler hat einzelne Kanäle über 1.0 geschoben: bei 0.80
+    ///   waren 16.5 % aller Pixel geclippt.
+    /// - Der Schwarzpegel war ein reiner Offset und hat Highlights verbrannt
+    ///   (bei 0.10: 8.9 % Clipping).
+    /// Hier wird alles um die Luma-Achse gerechnet und am Ende per Pixel
+    /// weich begrenzt, statt Kanäle einzeln abzuschneiden.
+    private func applyColorEngine(_ input: CIImage) -> CIImage {
+        let gr = Float(UserDefaults.standard.object(forKey: "pxSharpGammaR") as? Double ?? 1.0)
+        let gg = Float(UserDefaults.standard.object(forKey: "pxSharpGammaG") as? Double ?? 1.0)
+        let gb = Float(UserDefaults.standard.object(forKey: "pxSharpGammaB") as? Double ?? 1.0)
+        let g = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
+        let satRaw = Float(UserDefaults.standard.object(forKey: "pxSharpSaturation") as? Double ?? 0.5)
+        let vib = Float(UserDefaults.standard.object(forKey: "pxSharpVibrance") as? Double ?? 0.0)
+        let tempRaw = Float(UserDefaults.standard.object(forKey: "pxSharpTemp") as? Double ?? 0.5)
+        let wbRr = Float(UserDefaults.standard.object(forKey: "pxSharpWB_R") as? Double ?? 1.0)
+        let wbGr = Float(UserDefaults.standard.object(forKey: "pxSharpWB_G") as? Double ?? 1.0)
+        let wbBr = Float(UserDefaults.standard.object(forKey: "pxSharpWB_B") as? Double ?? 1.0)
+        let black = Float(UserDefaults.standard.object(forKey: "pxSharpBlack") as? Double ?? 0.0)
+        let brightRaw = Float(UserDefaults.standard.object(forKey: "pxSharpBrightness") as? Double ?? 0.5)
+        // Farbumfang: 0 = BT.709 korrekt, 1 = auf Display P3 erweitert (TV "Nativ").
+        let gamutNative = (UserDefaults.standard.object(forKey: "pxSharpGamut") as? Int ?? 0) != 0
+        // Kontrast ebenfalls in der LUT rechnen, aber in der Anzeige-Domain und
+        // mit weicher Schulter. CIColorControls schneidet bei 1.0 hart ab - in
+        // hellen Szenen waren das gemessen 3,6 % ausgebrannte Pixel.
+        let contrastRawL = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
+        // Der Gesamtstaerke-Regler skaliert NUR die Detailstufen, nicht die Farbe.
+        // Vorher multiplizierte er Saettigung und Kontrast mit: bei 139 % wurde
+        // aus +7,5 % Saettigung +14 %, und die Schatten kippten ins Orange
+        // (gemessen B/G 0,73 roh -> 0,54). Wer Schaerfe hochdreht, will nicht
+        // gleichzeitig mehr Farbe.
+        let contrastK = 0.8 + Double(min(max(contrastRawL, 0), 1)) * 0.4
+        // Backlight-Emulation: 0.5 = neutral, 0 = -0.8 Blenden, 1 = +0.8 Blenden.
+        let brightGain = pow(2.0, Double(brightRaw - 0.5) * 1.6)
+
+        // Weißabgleich: Temperatur als Kanalverhältnis, gegen Luma normalisiert.
+        let t = Double(tempRaw - 0.5) * 2.0
+        var gainR = Double(1.0 - 0.22 * t) * Double(wbRr)
+        var gainG = Double(wbGr)
+        var gainB = Double(1.0 + 0.22 * t) * Double(wbBr)
+        let kn = 0.2126 * gainR + 0.7152 * gainG + 0.0722 * gainB
+        if kn > 0.0001 {
+            gainR /= kn; gainG /= kn; gainB /= kn
+        }
+        let kSat = 1.0 + (Double(satRaw) - 0.5) * 0.75
+        let kVib = Double(vib) * 1.10
+        // Hue-selektives Farbmanagement (wie "Color Detail" bei Sony/LG):
+        // Blau in Nachtbildern zaehmen, Haut schuetzen, Gruen erhalten.
+        let hueSat = Double(min(max(UserDefaults.standard.object(forKey: "pxSharpHueSat") as? Double ?? 0.0, 0.0), 1.0))
+        // Weissepunkt-Korrektur der Mittentoene (0 = aus)
+        let castK = Double(min(max(UserDefaults.standard.object(forKey: "pxSharpCastFix") as? Double ?? 0.0, 0.0), 1.0))
+
+        // ---- Identitaets-Fast-Path -----------------------------------------
+        // Im kalibrierten Modus sind ALLE Parameter neutral. Dann ist die
+        // 65^3-LUT rechnerisch die Identitaet (gamma 2.2 hin, 1/2.2 zurueck,
+        // Faktor 1.0). Sie trotzdem zu bauen kostet 275k Samples pro Frame und
+        // kann durch die Quantisierung der LUT minimal Banding einfuehren.
+        // Also: nichts tun.
+        let isNeutral = abs(gr - 1) < 0.001 && abs(gg - 1) < 0.001 && abs(gb - 1) < 0.001
+            && abs(g - 1) < 0.001
+            && abs(satRaw - 0.5) < 0.001 && abs(vib) < 0.001
+            && abs(tempRaw - 0.5) < 0.001
+            && abs(wbRr - 1) < 0.001 && abs(wbGr - 1) < 0.001 && abs(wbBr - 1) < 0.001
+            && abs(black) < 0.001 && abs(brightRaw - 0.5) < 0.001
+            && !gamutNative && abs(contrastRawL - 0.5) < 0.001
+            && hueSat < 0.001 && castK < 0.001
+        if isNeutral { return input }
+
+        let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.4f/%.4f/%.4f/%.4f/%.4f/%.4f",
+                         gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK, hlGainR, hlGainB, lvlBlack, lvlWhite, midGainR, midGainB)
+        if key != colorLUTKey || colorLUTData == nil {
+            // Die LUT hat 33^3 = 35.937 Stützpunkte (statt 65^3 = 274.625).
+            // 33er-Würfel sind der Standard für 3D-LUTs, der Unterschied ist
+            // unsichtbar — der Aufbau kostet aber nur ein Achtel.
+            // Zusätzlich: höchstens alle 80 ms neu bauen. Während man einen
+            // Farbregler zieht, ändert sich der Schlüssel in jedem Frame; ohne
+            // diese Drosselung wurde 60-mal pro Sekunde eine komplette LUT
+            // gerechnet — genau das war das Ruckeln beim Einstellen.
+            let now = CACurrentMediaTime()
+            if colorLUTData == nil || now - lutLastBuild > 0.08 {
+                lutLastBuild = now
+                let n = 33
+                var data = [Float](repeating: 0, count: n * n * n * 4)
+                var idx = 0
+                for bi in 0..<n {
+                    for gi in 0..<n {
+                        for ri in 0..<n {
+                        // Eingang ist gamma-kodiert (sRGB/DeviceRGB) -> linear
+                        var r = pow(Double(ri) / Double(n - 1), 2.2) * gainR * brightGain
+                        var gg2 = pow(Double(gi) / Double(n - 1), 2.2) * gainG * brightGain
+                        var b = pow(Double(bi) / Double(n - 1), 2.2) * gainB * brightGain
+
+                        if gamutNative {
+                            // Linearer sRGB -> Display P3. Das ist exakt das, was
+                            // ein Fernseher mit "Farbumfang: Nativ" macht: er nutzt
+                            // seine echten Primaries statt auf BT.709 zu begrenzen.
+                            // Display-P3 -> sRGB. Das ist die Richtung, die ein
+                            // Fernseher mit "Farbumfang: Nativ" macht: dieselben
+                            // Zahlen auf weiteren Primaries = kraeftigere Farbe.
+                            // (Die umgekehrte Matrix wuerde ENTsaettigen.)
+                            let r0 = r, g0 = gg2, b0 = b
+                            r  =  1.224940 * r0 - 0.224940 * g0
+                            gg2 = -0.042056 * r0 + 1.042056 * g0
+                            b  = -0.019638 * r0 - 0.078636 * g0 + 1.098274 * b0
+                            r = max(r, 0); gg2 = max(gg2, 0); b = max(b, 0)
+                        }
+
+                        let y = 0.2126 * r + 0.7152 * gg2 + 0.0722 * b
+                        let mx = max(r, max(gg2, b))
+                        let mn = min(r, min(gg2, b))
+                        let satPx = (mx - mn) / max(mx, 0.0001)
+                        var k = max(0.0, kSat * (1.0 + kVib * (1.0 - satPx)))
+
+                        // Farbton einmal berechnen -- fuer Hautton-Schutz und
+                        // fuer die hue-selektive Saettigung.
+                        var hueDeg = 0.0
+                        var memRot = 0.0
+                        if (mx - mn) > 1e-4 {
+                            let dC = mx - mn
+                            if mx == r { hueDeg = 60.0 * ((gg2 - b) / dC) }
+                            else if mx == gg2 { hueDeg = 60.0 * ((b - r) / dC + 2.0) }
+                            else { hueDeg = 60.0 * ((r - gg2) / dC + 4.0) }
+                            if hueDeg < 0 { hueDeg += 360.0 }
+
+                            // AUTOMATISCHER HAUTTON-SCHUTZ (15-55 Grad). Gute
+                            // Fernseher nehmen dort Saettigung zurueck, damit
+                            // Gesichter bei hoher Gesamtsaettigung natuerlich
+                            // bleiben. Ohne das werden Hauttoene rot.
+                            // MEMORY-FARBEN. Das Auge prueft drei Farben staendig
+                            // gegen eine innere Referenz: Haut, Himmel, Vegetation.
+                            // Verschiebt man sie minimal, wirkt das Bild "falsch",
+                            // egal wie gut der Rest ist. Deshalb werden genau diese
+                            // drei Baender sanft zu ihrem bevorzugten Punkt gezogen.
+                            var memSat = 1.0
+                            var hueTarget = hueDeg
+                            var memW = 0.0
+
+                            // HAUT: Farbton 20-45 Grad, Mitte 30. Aber Farbton
+                            // allein reicht nicht -- Coloristen grenzen Haut
+                            // zusaetzlich ueber die SAETTIGUNG ein, weil Sand,
+                            // Stroh, trockenes Gras und gelbe Blueten im selben
+                            // Hue-Bereich liegen. Ohne diese Grenze wurden im
+                            // Test 42,5 Prozent des Bildes als "Haut" behandelt
+                            // und dadurch flach gerechnet.
+                            if hueDeg >= 20.0 && hueDeg <= 45.0 {
+                                var w = max(0.0, 1.0 - abs(hueDeg - 30.0) / 12.5)
+                                if satPx > 0.45 { w *= max(0.0, 1.0 - (satPx - 0.45) / 0.20) }
+                                if w > memW { memW = w; hueTarget = 30.0 }
+                                memSat *= (1.0 - 0.14 * w)
+                            }
+                            // HIMMEL: 195-245 Grad, Mitte 218
+                            if hueDeg >= 195.0 && hueDeg <= 245.0 {
+                                let w = max(0.0, 1.0 - abs(hueDeg - 218.0) / 25.0)
+                                if w > memW { memW = w; hueTarget = 218.0 }
+                                memSat *= (1.0 - 0.10 * w)
+                            }
+                            // VEGETATION: 95-150 Grad, Mitte 115 (enger als vorher,
+                            // damit gelbgruene Blueten nicht mitgezogen werden)
+                            if hueDeg >= 95.0 && hueDeg <= 150.0 {
+                                let w = max(0.0, 1.0 - abs(hueDeg - 115.0) / 27.5)
+                                if w > memW { memW = w; hueTarget = 115.0 }
+                                memSat *= (1.0 + 0.04 * w)
+                            }
+                            k *= memSat
+                            // Farbton nur leicht ziehen: maximal 3 Grad.
+                            if memW > 0.01 {
+                                var dH = hueTarget - hueDeg
+                                if dH > 180.0 { dH -= 360.0 }
+                                if dH < -180.0 { dH += 360.0 }
+                                memRot = max(-3.0, min(3.0, dH * memW * 0.10))
+                            }
+
+                            if hueSat > 0.001 {
+                                var f = 0.0
+                                if hueDeg >= 200.0 && hueDeg < 265.0 { f = -0.16 }
+                                else if hueDeg >= 265.0 && hueDeg < 330.0 { f = -0.05 }
+                                else if hueDeg >= 50.0 && hueDeg < 170.0 { f = +0.08 }
+                                else if hueDeg >= 170.0 && hueDeg < 200.0 { f = -0.07 }
+                                k *= (1.0 + f * hueSat)
+                            }
+                        }
+
+                        // SAETTIGUNG IM YCbCr-RAUM: Cb und Cr mit demselben
+                        // Faktor skalieren erhaelt den Farbton exakt
+                        // (Hue = atan2(Cr,Cb)). Die alte RGB-Variante verschob
+                        // den Ton gemessen um 2,5 Grad im Mittel und 6,9 Grad
+                        // in den obersten 5 Prozent.
+                        let yv = y
+                        var cb = (b - yv) / 1.8556
+                        var cr = (r - yv) / 1.5748
+                        cb *= k
+                        cr *= k
+                        if memRot != 0.0 {
+                            let a = memRot * Double.pi / 180.0
+                            let ca = cos(a), sa = sin(a)
+                            let cb2 = cb * ca - cr * sa
+                            let cr2 = cb * sa + cr * ca
+                            cb = cb2
+                            cr = cr2
+                        }
+                        r  = yv + 1.5748 * cr
+                        b  = yv + 1.8556 * cb
+                        gg2 = (yv - 0.2126 * r - 0.0722 * b) / 0.7152
+
+                        if abs(g - 1.0) > 0.001 {
+                            r = pow(max(r, 0), Double(g))
+                            gg2 = pow(max(gg2, 0), Double(g))
+                            b = pow(max(b, 0), Double(g))
+                        }
+
+                        // Weiche Begrenzung pro Pixel (nicht pro Kanal): Farbe bleibt,
+                        // nur die Helligkeit wird gestaucht. Kein Kanalschnitt.
+                        let m2 = max(r, max(gg2, b))
+                        if m2 > 1.0 {
+                            r /= m2; gg2 /= m2; b /= m2
+                        }
+                        r = min(max(r, 0), 1); gg2 = min(max(gg2, 0), 1); b = min(max(b, 0), 1)
+
+                        var oR = pow(r, 1.0 / 2.2)
+                        var oG = pow(gg2, 1.0 / 2.2)
+                        var oB = pow(b, 1.0 / 2.2)
+
+                        // MITTEN-ABGLEICH: wirkt nur in einem Band um die
+                        // Mitten, nicht in Schatten oder Lichtern, und nur
+                        // wenn die Mitten ausserhalb des Real-Korridors lagen.
+                        if abs(midGainR - 1.0) > 0.0005 || abs(midGainB - 1.0) > 0.0005 {
+                            let yMid = 0.2126 * oR + 0.7152 * oG + 0.0722 * oB
+                            var wM = 1.0 - abs(yMid - 0.48) / 0.30
+                            if wM < 0 { wM = 0 }; if wM > 1 { wM = 1 }
+                            wM = wM * wM * (3 - 2 * wM)
+                            oR *= (1.0 + (midGainR - 1.0) * wM)
+                            oB *= (1.0 + (midGainB - 1.0) * wM)
+                        }
+
+                        // AUTOMATISCHER BEREICH: Schwarz- und Weisspunkt
+                        // spreizen, wie ein Fernseher es bei "Auto" macht.
+                        // Gleichmaessige Skalierung aller Kanaele -> Farbton
+                        // bleibt unveraendert.
+                        if lvlWhite - lvlBlack > 0.05 && (lvlWhite < 0.995 || lvlBlack > 0.002) {
+                            let yOut0 = 0.2126 * oR + 0.7152 * oG + 0.0722 * oB
+                            if yOut0 > 0.002 {
+                                // Auf 0,92 abbilden, NICHT auf 1,0. Vorher
+                                // wurde der gemessene Weisspunkt (z. B. 0,89)
+                                // auf 1,0 gezogen -- das Bild wurde dadurch
+                                // um 12 % aufgehellt und brannte oben aus.
+                                var ys = (yOut0 - lvlBlack) / (lvlWhite - lvlBlack) * 0.90
+                                if ys < 0 { ys = 0 }
+                                // Weiche Begrenzung: die Spreizung darf die
+                                // Lichter nicht wieder aufreissen.
+                                if ys > 0.96 { ys = 0.96 + (ys - 0.96) * 0.30 }
+                                if ys > 0.995 { ys = 0.995 }
+                                var sc = ys / yOut0
+                                if sc > 1.05 { sc = 1.05 }
+                                if sc < 0.92 { sc = 0.92 }
+                                oR *= sc; oG *= sc; oB *= sc
+                            }
+                        }
+
+                        // Wolken-Abgleich: wirkt nur oberhalb ~62 % Helligkeit,
+                        // damit Mitten und Schatten unveraendert bleiben.
+                        if abs(hlGainR - 1.0) > 0.0005 || abs(hlGainB - 1.0) > 0.0005 {
+                            let yTop = max(oR, max(oG, oB))
+                            var wH = (yTop - 0.62) / 0.26
+                            if wH < 0 { wH = 0 }; if wH > 1 { wH = 1 }
+                            wH = wH * wH * (3 - 2 * wH)
+                            oR *= (1.0 + (hlGainR - 1.0) * wH)
+                            oB *= (1.0 + (hlGainB - 1.0) * wH)
+                        }
+
+                        // Schwarzpegel: echter Lift der Schwärze in der
+                        // Anzeige-Domain. +0.10 hebt Schwarz um 4 %/10 Stufen,
+                        // ohne die Lichter zu verbrennen (weil (1-x) mitläuft).
+                        if abs(black) > 0.0005 {
+                            let lift = Double(black) * 0.25
+                            oR += lift * (1 - oR); oG += lift * (1 - oG); oB += lift * (1 - oB)
+                        }
+
+                        // Kontrast um 0.5, danach IMMER eine weiche Schulter ab
+                        // 0.90. Vorher lief sie nur, wenn der Kontrastregler
+                        // nicht auf 0.5 stand -- bei neutralem Kontrast schnitt
+                        // SDR bei 1.0 hart ab, und Himmel/Fenster/Lampen wurden
+                        // weisse Flaechen ohne Zeichnung.
+                        func pxKnee(_ x: Double) -> Double {
+                            var v = (x - 0.5) * contrastK + 0.5
+                            // Schulter erst ab 0,93 und schmaler. Vorher begann
+                            // sie bei 0,90 und hat weisse Fassaden zu einer
+                            // gleichfoermigen Flaeche gestaucht (gemessen:
+                            // 1,85 % der Flaeche fast weiss UND farblos).
+                            if v > 0.93 {
+                                let over = v - 0.93
+                                v = 0.93 + 0.07 * (over / (over + 0.07))
+                            }
+                            return v
+                        }
+                        oR = pxKnee(oR); oG = pxKnee(oG); oB = pxKnee(oB)
+                        if abs(gr - 1.0) > 0.001 { oR = pow(oR, Double(gr)) }
+                        if abs(gg - 1.0) > 0.001 { oG = pow(oG, Double(gg)) }
+                        if abs(gb - 1.0) > 0.001 { oB = pow(oB, Double(gb)) }
+
+                        // Weissepunkt-Korrektur der Mittentoene: In Nachtszenen
+                        // liegt ein Blaustich von 2-4 % ueber den Stufen 96-127.
+                        // Eine Glockenkurve ueber der Helligkeit nimmt dort Blau
+                        // heraus, ohne Schatten und Lichter anzutasten.
+                        if castK > 0.001 {
+                            let lW = 0.2126 * oR + 0.7152 * oG + 0.0722 * oB
+                            let dW = (lW - 0.36) / 0.20
+                            let w = exp(-dW * dW)
+                            oB *= (1.0 - castK * 0.12 * w)
+                            oR *= (1.0 + castK * 0.04 * w)
+                        }
+
+                        data[idx + 0] = Float(min(max(oR, 0), 1))
+                        data[idx + 1] = Float(min(max(oG, 0), 1))
+                        data[idx + 2] = Float(min(max(oB, 0), 1))
+                        data[idx + 3] = 1
+                        idx += 4
+                    }
+                }
+            }
+            colorLUTData = data.withUnsafeBufferPointer { Data(buffer: $0) }
+            colorLUTKey = key
+            colorLUTDimension = n
+            }
+        }
+        guard let lut = colorLUTData else { return input }
+        return input.applyingFilter("CIColorCube", parameters: [
+            "inputCubeDimension": colorLUTDimension,
+            "inputCubeData": lut
+        ])
+    }
+
+    private var shadowKernel: CIColorKernel?
+    private var shadowTried = false
+
+    /// Schattendurchzeichnung ("Black Stabilizer"): hebt NUR die dunklen
+    /// Bereiche an, multiplikativ - echtes Schwarz bleibt schwarz. Das ist die
+    /// Funktion, die auf Fernsehern Nachtszenen lesbar macht, ohne sie grau zu
+    /// waschen.
+    private func shadowKernelInstance() -> CIColorKernel? {
+        if shadowTried { return shadowKernel }
+        shadowTried = true
+        let src = """
+        kernel vec4 pxShadow(__sample c, float amount, float knee, float lift) {
+            float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+            float w = 1.0 - smoothstep(0.0, knee, l);
+            float ww = w * w;
+            // Multiplikativ fuer die Schattenzeichnung ...
+            vec3 o = c.rgb * (1.0 + amount * ww);
+            // ... plus ein kleiner additiver Anteil, damit auch reines Schwarz
+            // in dunklen Szenen Information bekommt (ein Fernseher hebt dort
+            // die Hintergrundbeleuchtung an, nicht die Verstaerkung).
+            o += vec3(lift * ww);
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        shadowKernel = CIColorKernel(source: src)
+        if shadowKernel == nil { os_log(.error, log: videoViewLog, "[px] shadow kernel compile failed") }
+        return shadowKernel
+    }
+
+    private var dirKernel: CIKernel?
+    private var dirTried = false
+
+    /// Kantengerichtete Schaerfung (1:1, nach der Skalierung).
+    /// Umweg um das Koordinatenproblem eines echten EASU-Skalierers: die
+    /// Geometrie kommt von Lanczos, die Kantenrichtung wird danach genutzt.
+    /// Abgetastet wird ENTLANG der Kante — dort, wo sich nichts aendert.
+    /// Das verstaerkt den Verlauf einer schraegen Kante, ohne quer dazu
+    /// Ueberschwinger zu erzeugen.
+    private func dirKernelInstance() -> CIKernel? {
+        if dirTried { return dirKernel }
+        dirTried = true
+        let src = """
+        kernel vec4 pxDir(sampler src, float amount, float radius, float clampK) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec3 L = vec3(0.299, 0.587, 0.114);
+            float lc = dot(c.rgb, L);
+            vec4 lft = sample(src, samplerTransform(src, p + vec2(-1.0, 0.0)));
+            vec4 rgt = sample(src, samplerTransform(src, p + vec2( 1.0, 0.0)));
+            vec4 up  = sample(src, samplerTransform(src, p + vec2( 0.0,-1.0)));
+            vec4 dn  = sample(src, samplerTransform(src, p + vec2( 0.0, 1.0)));
+            float gx = dot(rgt.rgb, L) - dot(lft.rgb, L);
+            float gy = dot(dn.rgb, L) - dot(up.rgb, L);
+            float g = length(vec2(gx, gy));
+            vec3 o = c.rgb;
+            if (g > 0.003 && amount > 0.01) {
+                vec2 dir = vec2(-gy, gx) / max(g, 0.0001);
+                vec4 a = sample(src, samplerTransform(src, p + dir * radius));
+                vec4 b = sample(src, samplerTransform(src, p - dir * radius));
+                float la = dot(a.rgb, L);
+                float lb = dot(b.rgb, L);
+                float along = (la + lb) * 0.5;
+                // Detail entlang der Kante: der zentrale Pixel soll sich vom
+                // Mittel der Nachbarn ENTLANG unterscheiden -> verstaerken.
+                float d = (lc - along) * clamp(g * 3.0, 0.0, 1.0);
+                o = c.rgb + vec3(d * amount);
+            }
+            vec3 mn = min(min(lft.rgb, rgt.rgb), min(up.rgb, dn.rgb));
+            vec3 mx = max(max(lft.rgb, rgt.rgb), max(up.rgb, dn.rgb));
+            vec3 lim = (mx - mn) * clampK + 0.002;
+            o = clamp(o, mn - lim, mx + lim);
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        dirKernel = CIKernel(source: src)
+        if dirKernel == nil { os_log(.error, log: videoViewLog, "[px] dir kernel compile failed") }
+        return dirKernel
+    }
+
+    private var easuKernel: CIKernel?
+    private var easuTried = false
+
+    /// Kantengerichtete Skalierung (EASU-Prinzip, AMD FSR 1.0).
+    /// Statt isotrop zu interpolieren wird die lokale Kantenrichtung bestimmt
+    /// und bevorzugt ENTLANG der Kante abgetastet. Dadurch bleibt eine schraege
+    /// Kante scharf, statt ueber zwei Pixel zu verschmieren.
+    private func easuKernelInstance() -> CIKernel? {
+        if easuTried { return easuKernel }
+        easuTried = true
+        let src = """
+        kernel vec4 pxEASU(sampler src, float s, float amount) {
+            vec2 dst = destCoord();
+            vec2 sp = dst / s;
+            vec2 ip = floor(sp);
+            vec2 fp = sp - ip;
+
+            vec4 c00 = sample(src, samplerTransform(src, ip + vec2(0.0, 0.0)));
+            vec4 c10 = sample(src, samplerTransform(src, ip + vec2(1.0, 0.0)));
+            vec4 c01 = sample(src, samplerTransform(src, ip + vec2(0.0, 1.0)));
+            vec4 c11 = sample(src, samplerTransform(src, ip + vec2(1.0, 1.0)));
+            vec4 cl  = sample(src, samplerTransform(src, ip + vec2(-1.0, 0.0)));
+            vec4 cr  = sample(src, samplerTransform(src, ip + vec2(2.0, 0.0)));
+            vec4 cu  = sample(src, samplerTransform(src, ip + vec2(0.0, -1.0)));
+            vec4 cd  = sample(src, samplerTransform(src, ip + vec2(0.0, 2.0)));
+
+            vec4 base = mix(mix(c00, c10, fp.x), mix(c01, c11, fp.x), fp.y);
+
+            vec3 w = vec3(0.299, 0.587, 0.114);
+            float gx = (dot(cr.rgb, w) + dot(c11.rgb, w)) - (dot(cl.rgb, w) + dot(c00.rgb, w));
+            float gy = (dot(cd.rgb, w) + dot(c11.rgb, w)) - (dot(cu.rgb, w) + dot(c00.rgb, w));
+            float g = length(vec2(gx, gy));
+
+            if (g > 0.004 && amount > 0.01) {
+                vec2 dir = vec2(-gy, gx) / max(g, 0.0001);
+                vec4 a1 = sample(src, samplerTransform(src, sp + dir * 0.5));
+                vec4 a2 = sample(src, samplerTransform(src, sp - dir * 0.5));
+                vec4 along = (a1 + a2) * 0.5;
+                float k = clamp(g * 2.5, 0.0, 1.0) * amount;
+                base = mix(base, along, k * 0.55);
+            }
+
+            vec3 mn = min(min(c00.rgb, c10.rgb), min(c01.rgb, c11.rgb));
+            vec3 mx = max(max(c00.rgb, c10.rgb), max(c01.rgb, c11.rgb));
+            vec3 lim = (mx - mn) * 0.25 + 0.002;
+            base.rgb = clamp(base.rgb, mn - lim, mx + lim);
+            return vec4(clamp(base.rgb, vec3(0.0), vec3(1.0)), 1.0);
+        }
+        """
+        easuKernel = CIKernel(source: src)
+        if easuKernel == nil { os_log(.error, log: videoViewLog, "[px] easu kernel compile failed") }
+        return easuKernel
+    }
+
+    private var deconvKernel: CIKernel?
+    private var deconvTried = false
+
+    /// Kanten-Rekonstruktion (Deconvolution) bei Quellaufloesung.
+    /// Das Spiel glaettet Kanten (TAA/FXAA) schon VOR der Kodierung — das ist
+    /// ein bekannter Weichzeichner von ~1 px. Ein 3x3-Laplace-Operator ist die
+    /// diskrete Umkehrung eines solchen Gauß-Blurs: er zieht genau die Stufe
+    /// zurueck, die durch die Glaettung entstanden ist.
+    /// Zwei Sicherungen: Coring (Rauschen wird nicht verstaerkt) und die
+    /// Halo-Begrenzung (kein Ueberschwingen ueber den lokalen Bereich).
+    private func deconvKernelInstance() -> CIKernel? {
+        if deconvTried { return deconvKernel }
+        deconvTried = true
+        let src = """
+        kernel vec4 pxDeconv(sampler src, float k, float coring, float clampK) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec4 u = sample(src, samplerTransform(src, p + vec2( 0.0, -1.0)));
+            vec4 d = sample(src, samplerTransform(src, p + vec2( 0.0,  1.0)));
+            vec4 l = sample(src, samplerTransform(src, p + vec2(-1.0,  0.0)));
+            vec4 r = sample(src, samplerTransform(src, p + vec2( 1.0,  0.0)));
+            vec3 L = vec3(0.299, 0.587, 0.114);
+            float lap = 4.0 * dot(c.rgb, L)
+                      - dot(u.rgb, L) - dot(d.rgb, L) - dot(l.rgb, L) - dot(r.rgb, L);
+            lap = sign(lap) * max(0.0, abs(lap) - coring);
+            vec3 mn = min(min(u.rgb, d.rgb), min(l.rgb, r.rgb));
+            vec3 mx = max(max(u.rgb, d.rgb), max(l.rgb, r.rgb));
+            vec3 lim = (mx - mn) * clampK + 0.002;
+            vec3 o = clamp(c.rgb + vec3(lap * k), mn - lim, mx + lim);
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        deconvKernel = CIKernel(source: src)
+        if deconvKernel == nil { os_log(.error, log: videoViewLog, "[px] deconv kernel compile failed") }
+        return deconvKernel
+    }
+
+    private var ditherKernel: CIColorKernel?
+    private var ditherTried = false
+
+    /// Dithering vor der 8-Bit-Ausgabe. Ein Panel mit 10 Bit braucht das nicht;
+    /// unser Ausgang hat 8 Bit — ohne Dither entstehen in langen Verlaeufen
+    /// sichtbare Stufen. Weisses Rauschen mit ±0,6 Stufen ist unsichtbar,
+    /// zerstoert aber die Stufenkanten (klassische Fernseher-Technik).
+    private func ditherKernelInstance() -> CIColorKernel? {
+        if ditherTried { return ditherKernel }
+        ditherTried = true
+        let src = """
+        kernel vec4 pxDither(__sample c, float amp) {
+            vec2 p = destCoord();
+            float h = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+            float h2 = fract(sin(dot(p + vec2(37.0, 17.0), vec2(12.9898, 78.233))) * 43758.5453);
+            float d = (h + h2 - 1.0) * amp;
+            return vec4(clamp(c.rgb + vec3(d), vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        ditherKernel = CIColorKernel(source: src)
+        if ditherKernel == nil { os_log(.error, log: videoViewLog, "[px] dither kernel compile failed") }
+        return ditherKernel
+    }
+
+    private var cleanKernel: CIKernel?
+    private var cleanTried = false
+
+    /// Rauschfilter + Deblocking + Deband in EINEM Durchgang.
+    /// Drei getrennte Paesse kosteten drei Vollbild-Zwischenbilder (je 8,3 MB
+    /// bei 1080p). Ein Durchgang mit drei Ringen spart zwei davon.
+    private func cleanKernelInstance() -> CIKernel? {
+        if cleanTried { return cleanKernel }
+        cleanTried = true
+        let src = """
+        kernel vec4 pxClean(sampler src,
+                            float r1, float t1, float a1,
+                            float r2, float t2, float a2,
+                            float r3, float t3, float a3) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec3 L = vec3(0.299, 0.587, 0.114);
+            float lc = dot(c.rgb, L);
+            vec3 o = c.rgb;
+            if (a1 > 0.001) {
+                vec4 s0 = sample(src, samplerTransform(src, p + vec2(r1*-1.0, r1*-1.0)));
+                vec4 s1 = sample(src, samplerTransform(src, p + vec2(r1*0.0, r1*-1.0)));
+                vec4 s2 = sample(src, samplerTransform(src, p + vec2(r1*1.0, r1*-1.0)));
+                vec4 s3 = sample(src, samplerTransform(src, p + vec2(r1*-1.0, r1*0.0)));
+                vec4 s4 = sample(src, samplerTransform(src, p + vec2(r1*1.0, r1*0.0)));
+                vec4 s5 = sample(src, samplerTransform(src, p + vec2(r1*-1.0, r1*1.0)));
+                vec4 s6 = sample(src, samplerTransform(src, p + vec2(r1*0.0, r1*1.0)));
+                vec4 s7 = sample(src, samplerTransform(src, p + vec2(r1*1.0, r1*1.0)));
+                float w0 = clamp(1.0 - abs(dot(s0.rgb, L) - lc) / t1, 0.0, 1.0);
+                float w1 = clamp(1.0 - abs(dot(s1.rgb, L) - lc) / t1, 0.0, 1.0);
+                float w2 = clamp(1.0 - abs(dot(s2.rgb, L) - lc) / t1, 0.0, 1.0);
+                float w3 = clamp(1.0 - abs(dot(s3.rgb, L) - lc) / t1, 0.0, 1.0);
+                float w4 = clamp(1.0 - abs(dot(s4.rgb, L) - lc) / t1, 0.0, 1.0);
+                float w5 = clamp(1.0 - abs(dot(s5.rgb, L) - lc) / t1, 0.0, 1.0);
+                float w6 = clamp(1.0 - abs(dot(s6.rgb, L) - lc) / t1, 0.0, 1.0);
+                float w7 = clamp(1.0 - abs(dot(s7.rgb, L) - lc) / t1, 0.0, 1.0);
+                float ws = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+                vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3 + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+                vec3 avg = ws > 0.0001 ? sum / ws : c.rgb;
+                o = mix(o, avg, clamp(a1, 0.0, 1.0));
+            }
+            if (a2 > 0.001) {
+                vec4 s0 = sample(src, samplerTransform(src, p + vec2(r2*-1.0, r2*-1.0)));
+                vec4 s1 = sample(src, samplerTransform(src, p + vec2(r2*0.0, r2*-1.0)));
+                vec4 s2 = sample(src, samplerTransform(src, p + vec2(r2*1.0, r2*-1.0)));
+                vec4 s3 = sample(src, samplerTransform(src, p + vec2(r2*-1.0, r2*0.0)));
+                vec4 s4 = sample(src, samplerTransform(src, p + vec2(r2*1.0, r2*0.0)));
+                vec4 s5 = sample(src, samplerTransform(src, p + vec2(r2*-1.0, r2*1.0)));
+                vec4 s6 = sample(src, samplerTransform(src, p + vec2(r2*0.0, r2*1.0)));
+                vec4 s7 = sample(src, samplerTransform(src, p + vec2(r2*1.0, r2*1.0)));
+                float w0 = clamp(1.0 - abs(dot(s0.rgb, L) - lc) / t2, 0.0, 1.0);
+                float w1 = clamp(1.0 - abs(dot(s1.rgb, L) - lc) / t2, 0.0, 1.0);
+                float w2 = clamp(1.0 - abs(dot(s2.rgb, L) - lc) / t2, 0.0, 1.0);
+                float w3 = clamp(1.0 - abs(dot(s3.rgb, L) - lc) / t2, 0.0, 1.0);
+                float w4 = clamp(1.0 - abs(dot(s4.rgb, L) - lc) / t2, 0.0, 1.0);
+                float w5 = clamp(1.0 - abs(dot(s5.rgb, L) - lc) / t2, 0.0, 1.0);
+                float w6 = clamp(1.0 - abs(dot(s6.rgb, L) - lc) / t2, 0.0, 1.0);
+                float w7 = clamp(1.0 - abs(dot(s7.rgb, L) - lc) / t2, 0.0, 1.0);
+                float ws = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+                vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3 + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+                vec3 avg = ws > 0.0001 ? sum / ws : c.rgb;
+                o = mix(o, avg, clamp(a2, 0.0, 1.0));
+            }
+            if (a3 > 0.001) {
+                vec4 s0 = sample(src, samplerTransform(src, p + vec2(r3*-1.0, r3*-1.0)));
+                vec4 s1 = sample(src, samplerTransform(src, p + vec2(r3*0.0, r3*-1.0)));
+                vec4 s2 = sample(src, samplerTransform(src, p + vec2(r3*1.0, r3*-1.0)));
+                vec4 s3 = sample(src, samplerTransform(src, p + vec2(r3*-1.0, r3*0.0)));
+                vec4 s4 = sample(src, samplerTransform(src, p + vec2(r3*1.0, r3*0.0)));
+                vec4 s5 = sample(src, samplerTransform(src, p + vec2(r3*-1.0, r3*1.0)));
+                vec4 s6 = sample(src, samplerTransform(src, p + vec2(r3*0.0, r3*1.0)));
+                vec4 s7 = sample(src, samplerTransform(src, p + vec2(r3*1.0, r3*1.0)));
+                float w0 = clamp(1.0 - abs(dot(s0.rgb, L) - lc) / t3, 0.0, 1.0);
+                float w1 = clamp(1.0 - abs(dot(s1.rgb, L) - lc) / t3, 0.0, 1.0);
+                float w2 = clamp(1.0 - abs(dot(s2.rgb, L) - lc) / t3, 0.0, 1.0);
+                float w3 = clamp(1.0 - abs(dot(s3.rgb, L) - lc) / t3, 0.0, 1.0);
+                float w4 = clamp(1.0 - abs(dot(s4.rgb, L) - lc) / t3, 0.0, 1.0);
+                float w5 = clamp(1.0 - abs(dot(s5.rgb, L) - lc) / t3, 0.0, 1.0);
+                float w6 = clamp(1.0 - abs(dot(s6.rgb, L) - lc) / t3, 0.0, 1.0);
+                float w7 = clamp(1.0 - abs(dot(s7.rgb, L) - lc) / t3, 0.0, 1.0);
+                float ws = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+                vec3 sum = s0.rgb * w0 + s1.rgb * w1 + s2.rgb * w2 + s3.rgb * w3 + s4.rgb * w4 + s5.rgb * w5 + s6.rgb * w6 + s7.rgb * w7;
+                vec3 avg = ws > 0.0001 ? sum / ws : c.rgb;
+                o = mix(o, avg, clamp(a3, 0.0, 1.0));
+            }
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        cleanKernel = CIKernel(source: src)
+        if cleanKernel == nil { os_log(.error, log: videoViewLog, "[px] clean kernel compile failed") }
+        return cleanKernel
+    }
+
+    private var cas2Kernel: CIKernel?
+    private var cas2Tried = false
+
+    /// Wie pxCAS, aber nur zwei Radien (1,35 px und 2,7 px). Die Panel-Stufe
+    /// braucht den dritten Radius nicht — ein eigener Kernel garantiert, dass
+    /// die acht zusaetzlichen Samples auch wirklich nicht ausgefuehrt werden.
+    // MARK: - Chroma-Rekonstruktion (4:2:0)
+
+    private var chromaKernel: CIKernel?
+    private var chromaTried = false
+
+    /// Der Stream liefert Farbe nur mit halber Aufloesung (4:2:0): Farbkanten
+    /// sind gemessen dreimal breiter als Helligkeitskanten. Dieser Durchgang
+    /// schaerft NUR den Farbanteil nach, in einem eigenen Band, ohne die
+    /// Luma-Kante anzufassen. Der Chroma-Zweig im CAS-Kernel konnte das nicht,
+    /// weil der anschliessende Clamp den Farbueberschuss wieder entfernt hat.
+    private func chromaKernelInstance() -> CIKernel? {
+        if chromaTried { return chromaKernel }
+        chromaTried = true
+        let src = """
+        kernel vec4 pxChroma(sampler src, float r, float amount, float coring) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec2 d = vec2(r, r);
+            vec3 a = sample(src, samplerTransform(src, p + vec2(-d.x, -d.y))).rgb;
+            vec3 b = sample(src, samplerTransform(src, p + vec2( 0.0, -d.y))).rgb;
+            vec3 e = sample(src, samplerTransform(src, p + vec2( d.x, -d.y))).rgb;
+            vec3 f = sample(src, samplerTransform(src, p + vec2(-d.x,  0.0))).rgb;
+            vec3 g = sample(src, samplerTransform(src, p + vec2( d.x,  0.0))).rgb;
+            vec3 h = sample(src, samplerTransform(src, p + vec2(-d.x,  d.y))).rgb;
+            vec3 i = sample(src, samplerTransform(src, p + vec2( 0.0,  d.y))).rgb;
+            vec3 j = sample(src, samplerTransform(src, p + vec2( d.x,  d.y))).rgb;
+            vec3 avg = (a + b + e + f + g + h + i + j) * 0.125;
+            vec3 L = vec3(0.2126, 0.7152, 0.0722);
+            float y  = dot(c.rgb, L);
+            float ya = dot(avg, L);
+            vec3 cc = c.rgb - vec3(y);
+            vec3 ca = avg  - vec3(ya);
+            vec3 delta = cc - ca;
+            float m = length(delta);
+            float k = max(0.0, m - coring) / max(m, 1e-5);
+            // In dunklen Bereichen KEINE Farbschaerfung: dort verstaerkt sie
+            // nur Farbstiche und Kompressionsrauschen (gemessen: Schatten
+            // wurden dadurch deutlich waermer). Erst ab 3 % Helligkeit
+            // einblenden, ab 15 % volle Wirkung.
+            float lumaC = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float lumaGate = smoothstep(0.03, 0.15, lumaC);
+            vec3 outv = c.rgb + delta * (amount * k * lumaGate);
+            return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        chromaKernel = CIKernel(source: src)
+        if chromaKernel == nil { os_log(.error, log: videoViewLog, "[px] chroma kernel compile failed") }
+        return chromaKernel
+    }
+
+    private func cas2KernelInstance() -> CIKernel? {
+        if cas2Tried { return cas2Kernel }
+        cas2Tried = true
+        let src = """
+        kernel vec4 pxCAS2(sampler src, float r1, float r2, float s1, float s2, float clampK, float lumaOnly, float chromaS, float coring) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec2 d1 = vec2(r1, r1);
+            vec4 a1 = sample(src, samplerTransform(src, p + vec2(-d1.x, -d1.y)));
+            vec4 b1 = sample(src, samplerTransform(src, p + vec2( 0.0, -d1.y)));
+            vec4 c1 = sample(src, samplerTransform(src, p + vec2( d1.x, -d1.y)));
+            vec4 d1s = sample(src, samplerTransform(src, p + vec2(-d1.x,  0.0)));
+            vec4 e1 = sample(src, samplerTransform(src, p + vec2( d1.x,  0.0)));
+            vec4 f1 = sample(src, samplerTransform(src, p + vec2(-d1.x,  d1.y)));
+            vec4 g1 = sample(src, samplerTransform(src, p + vec2( 0.0,  d1.y)));
+            vec4 h1 = sample(src, samplerTransform(src, p + vec2( d1.x,  d1.y)));
+            vec2 d2 = vec2(r2, r2);
+            vec4 a2 = sample(src, samplerTransform(src, p + vec2(-d2.x, -d2.y)));
+            vec4 b2 = sample(src, samplerTransform(src, p + vec2( 0.0, -d2.y)));
+            vec4 c2 = sample(src, samplerTransform(src, p + vec2( d2.x, -d2.y)));
+            vec4 d2s = sample(src, samplerTransform(src, p + vec2(-d2.x,  0.0)));
+            vec4 e2 = sample(src, samplerTransform(src, p + vec2( d2.x,  0.0)));
+            vec4 f2 = sample(src, samplerTransform(src, p + vec2(-d2.x,  d2.y)));
+            vec4 g2 = sample(src, samplerTransform(src, p + vec2( 0.0,  d2.y)));
+            vec4 h2 = sample(src, samplerTransform(src, p + vec2( d2.x,  d2.y)));
+
+            vec3 mn = min(min(min(b1.rgb, d1s.rgb), min(e1.rgb, g1.rgb)),
+                          min(min(a1.rgb, c1.rgb), min(f1.rgb, h1.rgb)));
+            vec3 mx = max(max(max(b1.rgb, d1s.rgb), max(e1.rgb, g1.rgb)),
+                          max(max(a1.rgb, c1.rgb), max(f1.rgb, h1.rgb)));
+            vec3 avg1 = (b1.rgb + d1s.rgb + e1.rgb + g1.rgb
+                       + a1.rgb + c1.rgb + f1.rgb + h1.rgb) * 0.125;
+            vec3 avg2 = (b2.rgb + d2s.rgb + e2.rgb + g2.rgb
+                       + a2.rgb + c2.rgb + f2.rgb + h2.rgb) * 0.125;
+            vec3 range = mx - mn;
+            vec3 adapt = vec3(1.0) - clamp(range * 4.0, vec3(0.0), vec3(1.0));
+            vec3 edge;
+            vec3 tex;
+            if (lumaOnly > 0.5) {
+                vec3 L = vec3(0.299, 0.587, 0.114);
+                float lc2 = dot(c.rgb, L);
+                float a = dot(adapt, vec3(0.333333));
+                // CORING: alles unter dem Rauschpegel wird auf Null gesetzt,
+                // echte Textur bleibt — Schaerfe ohne Rauschverstaerkung.
+                float v1 = lc2 - dot(avg1, L);
+                float v2 = lc2 - dot(avg2, L);
+                v1 = sign(v1) * max(0.0, abs(v1) - coring);
+                v2 = sign(v2) * max(0.0, abs(v2) - coring);
+                edge = vec3(v1 * (s1 * (0.45 + 0.55 * a)));
+                tex  = vec3(v2 * s2);
+                if (chromaS > 0.001) {
+                    vec3 cc = c.rgb - vec3(lc2);
+                    vec3 ca = avg2 - vec3(dot(avg2, L));
+                    tex += (cc - ca) * chromaS;
+                }
+            } else {
+                vec3 w1 = c.rgb - avg1;
+                vec3 w2 = c.rgb - avg2;
+                w1 = sign(w1) * max(vec3(0.0), abs(w1) - coring);
+                w2 = sign(w2) * max(vec3(0.0), abs(w2) - coring);
+                edge = w1 * (s1 * (0.45 + 0.55 * adapt));
+                tex  = w2 * s2;
+            }
+            // Banding-Schutz: Treppenstufen sind Kanten mit 1-4 Stufen Amplitude.
+            // smoothstep blendet die Schaerfung dort aus, laesst Textur stehen.
+            float bandC = dot(range, vec3(0.299, 0.587, 0.114));
+            float bandGuard = smoothstep(0.0025, 0.020, bandC);
+            vec3 outv = c.rgb + (edge + tex) * bandGuard;
+            vec3 lim  = range * clampK + 0.003;
+            outv = clamp(outv, mn - lim, mx + lim);
+            return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        cas2Kernel = CIKernel(source: src)
+        if cas2Kernel == nil { os_log(.error, log: videoViewLog, "[px] cas2 kernel compile failed") }
+        return cas2Kernel
+    }
+
+    /// Lokales Dimming (Mini-LED-Emulation). Ein echter Mini-LED-Fernseher dimmt
+    /// die Hintergrundbeleuchtung zonenweise: dunkle Bildbereiche bekommen weniger
+    /// Licht, helle bleiben stehen. Ergebnis sind tiefe Schwärzen und ein deutlich
+    /// höherer Eindruck von Kontrast, ohne dass die Mitteltöne flach werden.
+    /// Hier wird dafür eine stark verkleinerte Luma-Karte weichgezeichnet und als
+    /// Verstärkungsfaktor auf das Bild gelegt — der Radius entspricht einer
+    /// Dimming-Zone, nicht einem Pixel.
+    private func localDimKernelInstance() -> CIColorKernel? {
+        if ldTried { return ldKernel }
+        ldTried = true
+        let src = """
+        kernel vec4 pxLocalDim(__sample c, __sample map, float strength, float knee, float lift) {
+            float l = dot(map.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float t = smoothstep(0.0, knee, l);
+            float gain = 1.0 - strength * (1.0 - t);
+            vec3 o = c.rgb * gain + vec3(lift * (1.0 - t));
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        ldKernel = CIColorKernel(source: src)
+        return ldKernel
+    }
+
+    // MARK: - Kanten-Upscaler (Core Image, ohne MetalFX)
+
+    /// Kantenbewusstes Hochskalieren als CIKernel. Basis ist bewusst die
+    /// bilineare Abtastung (immer gueltig), darauf kommt ein Detailzuschlag,
+    /// der auf die lokale Min/Max-Spanne begrenzt wird. Dadurch sind Halos
+    /// konstruktiv ausgeschlossen — anders als bei Lanczos, das ueber Kanten
+    /// hinausschwingt.
+    private func upscaleKernelInstance() -> CIKernel? {
+        if upTried { return upKernel }
+        upTried = true
+        let src = """
+        kernel vec4 pxUpscale(sampler src, float invScale, float sharp, float clampK) {
+            vec2 p = destCoord() * invScale;
+            vec2 b = floor(p) + 0.5;
+            vec4 c = sample(src, p);
+            vec4 s0 = sample(src, b + vec2(-0.5, -0.5));
+            vec4 s1 = sample(src, b + vec2( 0.5, -0.5));
+            vec4 s2 = sample(src, b + vec2(-0.5,  0.5));
+            vec4 s3 = sample(src, b + vec2( 0.5,  0.5));
+            vec4 mn = min(min(s0, s1), min(s2, s3));
+            vec4 mx = max(max(s0, s1), max(s2, s3));
+            vec4 avg = (s0 + s1 + s2 + s3) * 0.25;
+            vec4 detail = c - avg;
+            vec4 lim = (mx - mn) * clampK;
+            detail = clamp(detail, -lim, lim);
+            vec3 o = c.rgb + detail.rgb * sharp;
+            o = clamp(o, mn.rgb, mx.rgb);
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        upKernel = CIKernel(source: src)
+        return upKernel
+    }
+
+    // MARK: - Lokale Tonwertspreizung (Object-Based HDR Remaster)
+
+    /// Ein Spitzenfernseher hellt das Bild nicht global auf, sondern RAEUMLICH:
+    /// Partien unter der Szenenmitte werden tiefer, Partien darueber bleiben
+    /// hell. Dadurch entsteht Tiefenwirkung, ohne dass das Bild flau oder
+    /// ausgewaschen wirkt. Die Karte ist stark unscharf (1/16 Aufloesung,
+    /// grosser Radius), damit keine Kantenhoefe entstehen.
+    private func toneKernelInstance() -> CIColorKernel? {
+        if toneTried { return toneKernel }
+        toneTried = true
+        let src = """
+        kernel vec4 pxLocalTone(__sample c, __sample map, float strength, float ref) {
+            float l = dot(map.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float ratio = clamp(l / max(ref, 0.05), 0.30, 2.5);
+            float g = pow(ratio, strength);
+            g = clamp(g, 0.78, 1.30);
+            vec3 o = c.rgb * g;
+            float m = max(max(o.r, o.g), o.b);
+            float hi = clamp((m - 0.84) * 5.0, 0.0, 0.65);
+            o = mix(o, min(o, vec3(0.995)), hi);
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        toneKernel = CIColorKernel(source: src)
+        return toneKernel
+    }
+
+    private func applyLocalTone(_ input: CIImage, strength: Float, ref: Float) -> CIImage {
+        guard strength > 0.01, let k = toneKernelInstance() else { return input }
+        let ext = input.extent
+        let s: CGFloat = 1.0 / 16.0
+        let small = input.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
+            kCIInputRadiusKey: 3.0
+        ]).cropped(to: small.extent)
+        let up = blurred.transformed(by: CGAffineTransform(scaleX: 1.0 / s, y: 1.0 / s))
+        if let out = k.apply(extent: ext, arguments: [
+            input, up, NSNumber(value: strength), NSNumber(value: ref)
+        ]) {
+            return out
+        }
+        return input
+    }
+
+    private func applyLocalDimming(_ input: CIImage, strength: Float, zone: CGFloat) -> CIImage {
+        guard strength > 0.02, let lc = localDimKernelInstance() else { return input }
+        let ext = input.extent
+        let s = 1.0 / max(zone, 2.0)
+        // Wichtig: echtes Herunterskalieren mit Tiefpass. Ein bilineares
+        // transformed(by:) wuerde bei Faktor 36 nur jedes 36. Pixel abtasten und
+        // eine verrauschte Zonenkarte erzeugen (fleckiges Dimming).
+        let small = input.applyingFilter("CILanczosScaleTransform", parameters: [
+            kCIInputScaleKey: s,
+            kCIInputAspectRatioKey: 1.0
+        ])
+        let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
+            kCIInputRadiusKey: 3.0
+        ]).cropped(to: small.extent)
+        // Hochskalieren bewusst bilinear: die Karte ist bereits weichgezeichnet,
+        // Lanczos wuerde pro Panelpixel 36 Taps lesen und die Bildrate kosten.
+        let up = blurred.transformed(by: CGAffineTransform(scaleX: 1.0 / s, y: 1.0 / s))
+        if let out = lc.apply(extent: ext, arguments: [
+            input, up, NSNumber(value: strength), NSNumber(value: 0.30), NSNumber(value: 0.008)
+        ]) {
+            return out
+        }
+        return input
+    }
+
+    /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
+    /// Panel-Auflösung, nie auf dem 1080p-Signal.
+    private func applyDetailStage(_ input: CIImage, radiusScale: Float = 1.0) -> CIImage {
+        if UserDefaults.standard.bool(forKey: "pxSharpBypass") { return input }
+        var image = input
+        let level = Float(UserDefaults.standard.object(forKey: "pxSharpLevel") as? Double ?? 0.50)
+        let detail = Float(UserDefaults.standard.object(forKey: "pxSharpDetail") as? Double ?? 0.0)
+
+        let engineNew = (UserDefaults.standard.object(forKey: "pxSharpEngine") as? Int ?? 1) != 0
+        // In verrauschten Szenen weniger Schaerfe: sonst verstaerkt der CAS das
+        // Rauschen staerker, als es der Filter entfernen kann.
+        let autoFlag = (UserDefaults.standard.object(forKey: "pxSharpAuto") as? NSNumber)?.boolValue ?? false
+        let autoStr = Float(UserDefaults.standard.object(forKey: "pxSharpAutoStrength") as? Double ?? 0.65)
+        let autoNoise: Float = autoFlag ? Float(PXScene.shared.noise) * autoStr : 0
+        // Zusaetzlich: bei niedriger Bitrate weniger Schaerfe (Blockkanten).
+        // Die Bitrate wird hier separat gelesen (die Funktion hat keinen Zugriff
+        // auf die lokale Variable aus draw()).
+        let mbpsD = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
+        var bfD: Float = 1.0
+        if mbpsD > 0.1 {
+            bfD = Float(min(max((mbpsD - 7.0) / 15.0, 0.0), 1.0))
+        }
+        // Schärfe-Dämpfung bei niedriger Bitrate: vorher wurden bei 8 Mbit nur
+        // 58 % der eingestellten Schärfe angewendet — das Bild war dadurch weich,
+        // obwohl der Regler auf 0,95 stand. Jetzt bleiben mindestens 75 %.
+        let sharpDamp = (1.0 - min(autoNoise * 0.30, 0.25)) * (0.75 + 0.25 * bfD)
+        // Coring-Schwelle: Regler + gemessenes Rauschen der Szene.
+        // Coring-Schwelle: fast ausschliesslich vom GEMESSENEN Rauschen
+        // bestimmt. In einer sauberen Szene bleibt Textur voll erhalten, in
+        // einer verrauschten wird nur der Rauschteppich weggeschnitten.
+        let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04)
+        let coringVal = Float(min(0.080, coringBase * 0.040 + Double(min(autoNoise, 1.0)) * 0.024))
+        var haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
+        let master = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
+        let s1 = min(max(level, 0), 1) * 2.10 * sharpDamp * autoDetailScale * master
+        let s2 = min(max(detail, 0), 1) * 1.70 * sharpDamp * autoDetailScale * master
+        // Texturtiefe: vergroessert den zweiten Radius (2,7 -> 5,0 px auf dem
+        // Panel). Kleine Radien = Feinststruktur, grosse Radien = Texturtiefe
+        // (Gras, Stoff, Mauerwerk). Kostet keine zusaetzlichen Samples.
+        let texDepth = Float(min(max(UserDefaults.standard.object(forKey: "pxSharpTexDepth") as? Double ?? 0.0, 0.0), 1.0))
+        let r2v = 2.2 + 3.2 * texDepth
+        let s2v = s2 * (1.0 - 0.25 * texDepth)
+        // Je haerter geschaerft wird, desto enger wird der Ueberschwinger
+        // begrenzt. Gemessen: bei level 1.0 + detail 0.8 entstanden an Haaren
+        // vor hellem Himmel dunkle Saeume (1,05 % Unterschwinger).
+        let strengthNorm = min(1.0, (s1 + s2v) / 2.5)
+        haloLimitD *= (1.0 - 0.55 * strengthNorm)
+        if s1 > 0.02 || s2 > 0.02 {
+            if engineNew, let k = cas2KernelInstance() {
+                let halo: CGFloat = CGFloat(-8.0 * radiusScale)
+                let roi: CIKernelROICallback = { _, rect in rect.insetBy(dx: halo, dy: halo) }
+                if let out = k.apply(extent: image.extent, roiCallback: roi,
+                                     arguments: [image, NSNumber(value: 1.35 * radiusScale), NSNumber(value: r2v * radiusScale),
+                                                 NSNumber(value: s1), NSNumber(value: s2v), NSNumber(value: haloLimitD),
+                                                 NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true),
+                                                 NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)),
+                                                 NSNumber(value: coringVal)]) {
+                    image = out
+                } else {
+                    // Fallback: falls der Kernel zur Laufzeit nicht durchlaeuft
+                    image = image.applyingFilter("CIUnsharpMask", parameters: [
+                        kCIInputRadiusKey: CGFloat(1.4 * radiusScale),
+                        kCIInputIntensityKey: min(level, 1.0) * 1.25
+                    ])
+                }
+            } else {
+                // Altpfad (pxSharpEngine=0): exakt die Kette aus Build 39.
+                if level > 0.02 {
+                    image = image.applyingFilter("CIUnsharpMask", parameters: [
+                        kCIInputRadiusKey: 1.4,
+                        kCIInputIntensityKey: min(level, 1.0) * 1.25
+                    ])
+                }
+                if detail > 0.02 {
+                    image = image.applyingFilter("CIUnsharpMask", parameters: [
+                        kCIInputRadiusKey: 3.2,
+                        kCIInputIntensityKey: min(detail, 1.0) * 0.58
+                    ])
+                }
+            }
+        }
+
+        return image
+    }
+
+    func draw(in view: MTKView) {
+        // ---- Panel-Aufloesung (Leistung) -----------------------------------
+        // 0,83 = 2266 px statt 2732 px: 31 % weniger Pixel zu rechnen. Bei Hitze
+        // haelt das die 60 fps, kostet rund 6 % Schaerfe. Der Layer skaliert die
+        // Textur bilinear auf die volle Flaeche — bei 2266 px nicht zu sehen.
+        let panelFactor: CGFloat = (UserDefaults.standard.object(forKey: "pxSharpPanel2x") as? Bool ?? false) ? 0.83 : 1.0
+        if abs(panelFactor - appliedPanelFactor) > 0.0001 {
+            appliedPanelFactor = panelFactor
+            let scale = window?.screen.scale ?? UIScreen.main.scale
+            let w = (bounds.width * scale * panelFactor).rounded(.down)
+            let h = (bounds.height * scale * panelFactor).rounded(.down)
+            if w > 0, h > 0 { view.drawableSize = CGSize(width: w, height: h) }
+        }
+
+        // HDR-Peak live nachziehen (Panel-Headroom ändert sich mit der Display-Helligkeit)
+        if hdrActive {
+            let peak = UserDefaults.standard.object(forKey: "pxSharpHdrPeak") as? Double ?? 600
+            if abs(peak - appliedPeak) > 0.5, let caml = view.layer as? CAMetalLayer {
+                caml.edrMetadata = CAEDRMetadata.hdr10(minLuminance: 0.005,
+                                                       maxLuminance: Float(peak),
+                                                       opticalOutputScale: 100)
+                appliedPeak = peak
+            }
+        }
+
+        guard let drawable = view.currentDrawable,
+              let cb = commandQueue?.makeCommandBuffer() else { return }
+
+        bufferLock.lock()
+        let pb = latestBuffer
+        bufferLock.unlock()
+        guard let pixelBuffer0 = pb else { return }
+        PXProbe.shared.note(pixelBuffer0)
+        // Szenenanalyse fuer die Automatik (Belichtung, Rauschen).
+        PXScene.shared.analyze(PXProbe.shared.frozenBuffer ?? pixelBuffer0)
+        let pixelBuffer = PXProbe.shared.frozenBuffer ?? pixelBuffer0
+
+        let target = CGSize(width: drawable.texture.width, height: drawable.texture.height)
+        guard target.width > 0, target.height > 0 else { return }
+
+        var image: CIImage
+        if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+            // 10-Bit-Buffer sind PQ-kodiert — explizit taggen, sonst nimmt CoreImage sRGB an
+            // und die PQ-Ausgabe wirkt weiß/ausgewaschen.
+            image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: pq])
+        } else {
+            // WICHTIG: SDR NICHT selbst taggen. VideoToolbox legt Matrix, Primaries und
+            // Range (16-235 vs 0-255) als Attachments an den Buffer. Ein hartes BT.709-Tag
+            // überschreibt die Range und drückt das Bild zusammen -> Schatten laufen zu.
+            image = CIImage(cvPixelBuffer: pixelBuffer)
+        }
+        let src = image.extent.size
+        guard src.width > 0, src.height > 0 else { return }
+        // A/B-Vergleich: schaltet JEDE Nachbearbeitung ab, damit man den
+        // Unterschied zwischen "verarbeitet" und "roh" direkt sieht.
+        let bypassNow = UserDefaults.standard.bool(forKey: "pxSharpBypass")
+
+        // QUALITAETS-WATCHDOG. Bekanntes Problem in chiaki: der Stream wird
+        // mit der Zeit schlechter, bis man die Verbindung neu aufbaut. Ein
+        // neues Keyframe holt die Qualitaet zurueck, ohne die Sitzung zu
+        // trennen. Faellt die Rate 6 Sekunden unter 7 Mbit, fordern wir eins an.
+        let rateNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0
+        if rateNow > 0.2 && rateNow < 7.0 {
+            lowRateAccum += 1.0 / 60.0
+            if lowRateAccum > 6.0 {
+                lowRateAccum = 0
+                PyluxVideoDecoderRequestKeyframe()
+                os_log(.default, log: videoViewLog, "[px] keyframe angefordert (%.1f Mbit)", rateNow)
+            }
+        } else {
+            lowRateAccum = 0
+        }
+
+        // ---- Bildautomatik ------------------------------------------------
+        // Misst jede Szene und korrigiert nur das, was messbar danebenliegt:
+        // ausgebrannte Lichter zuruecknehmen, abgesoffene Schwazen leicht
+        // anheben, Schaerfe bei Rauschen zuruecknehmen. Bewusst kleine
+        // Korridore (+-8 %), damit nichts pumpt.
+        let autoEngine = (UserDefaults.standard.object(forKey: "pxSharpAutoEngine") as? NSNumber)?.boolValue ?? true
+        var autoExpo: Double = 1.0
+        var autoLift: Double = 0.0
+        autoDetailScale = 1.0
+        if autoEngine && !bypassNow {
+            let sceneNow = PXScene.shared
+            let m = Double(sceneNow.mean)
+            let hi = Double(sceneNow.p90)
+            let nz = Double(sceneNow.noise)
+            if hi > 0.94 { autoExpo -= min(0.08, (hi - 0.94) * 1.1) }
+            // Spitzlichtschutz nach FLaeCHE, nicht nach p90: p90 bleibt bei
+            // weissen Fassaden niedrig, waehrend 2 % der Flaeche ausbrennen.
+            if hlNearWhiteShare > 0.008 {
+                autoExpo -= min(0.10, (hlNearWhiteShare - 0.008) * 6.0)
+            }
+            if m < 0.13 { autoExpo += min(0.08, (0.13 - m) * 0.9) }
+            // Lift nur in wirklich dunklen Szenen, sonst hellt er Lichter mit auf.
+            if m < 0.22 { autoLift = min(0.020, (0.22 - m) * 0.10) }
+            // Traegheit: hoechstens 1,5 % pro Bild. Ohne das pumpt die
+            // Belichtung bei harten Schnitten zwischen zwei Szenen.
+            let step: Double = 0.015
+            autoExpo = min(max(autoExpo, lastAutoExpo - step), lastAutoExpo + step)
+            lastAutoExpo = autoExpo
+            autoDetailScale = Float(1.0 - min(0.40, nz * 0.50))
+            // Hitzeschutz: meldet die Lastregel Stufe 2, Schaerfe zuruecknehmen,
+            // bevor Bilder ausfallen.
+            // Hitzeschutz erst bei .critical. Bei .serious stehen viele Geraete
+            // im Dauerbetrieb -- dort dauerhaft 15 % Schaerfe wegzunehmen sah
+            // aus wie "das Bild wird unscharf", ohne einen Bildausfall zu verhindern.
+            let th = ProcessInfo.processInfo.thermalState
+            if th == .critical { autoDetailScale *= 0.70 }
+        }
+        if autoExpo < 0.999 || autoExpo > 1.001 {
+            let f = CGFloat(pow(autoExpo, 1.0 / 2.2))
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
+            ])
+        }
+        if autoLift > 0.0005 {
+            let l = CGFloat(autoLift)
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: 1, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: 1, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: l, y: l, z: l, w: 0)
+            ])
+        }
+
+        // Range: PS5 liefert Limited (16-235). Wenn die Kette das nicht macht, wird
+        // das Bild zu dunkel und die Schatten laufen zu.
+        let rangeMode = UserDefaults.standard.integer(forKey: "pxSharpRange") // 0 auto, 1 expand, 2 compress
+        if rangeMode == 1 {
+            let s: CGFloat = 255.0 / 219.0
+            let b: CGFloat = -16.0 / 219.0
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: s, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: s, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: s, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: b, y: b, z: b, w: 0)
+            ])
+        } else if rangeMode == 2 {
+            let s: CGFloat = 219.0 / 255.0
+            let b: CGFloat = 16.0 / 255.0
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: s, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: s, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: s, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: b, y: b, z: b, w: 0)
+            ])
+        }
+
+        // Gamma: hebt oder senkt die Mitteltöne (dunkle Szenen durchzeichnen)
+        let colorEngine = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? NSNumber)?.boolValue ?? true
+        // 1 = nur Luma schaerfen (keine Farbsaeume), 0 = pro Kanal (alt)
+        let lumaSharpen = (UserDefaults.standard.object(forKey: "pxSharpLumaSharpen") as? NSNumber)?.boolValue ?? true
+        let chromaSharpen = Float(UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)
+        // Halo-Grenze: wie viel Ueberschwinger an Kanten erlaubt ist, in
+        // Anteilen des lokalen Kontrasts. 0,30 = keine sichtbaren Halos,
+        // 0,45 = mehr Textur, sichtbare Hoefe.
+        let haloLimit = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
+        let gamma = Float(UserDefaults.standard.object(forKey: "pxSharpGamma") as? Double ?? 1.0)
+        if !colorEngine && abs(gamma - 1.0) > 0.01 {
+            image = image.applyingFilter("CIGammaAdjust", parameters: ["inputPower": gamma])
+        }
+        // Schwarzwert: Offset auf alle Kanäle
+        let black = Float(UserDefaults.standard.object(forKey: "pxSharpBlack") as? Double ?? 0.0)
+        if !colorEngine && abs(black) > 0.001 {
+            image = image.applyingFilter("CIColorControls", parameters: [
+                kCIInputBrightnessKey: black
+            ])
+        }
+
+        // Tone Mapping: echter Verarbeitungsblock, nicht nur ein Reglerwert.
+        // Sony "XR Contrast Booster" und LG "Precision Dimming" arbeiten beide mit
+        // Highlight-Rolloff + Shadow-Lift, aber mit anderer Kurve und anderem Radius.
+        // ---- Automatik (Szenenanalyse) ------------------------------------
+        // Belichtung: linear in der Helligkeit gerechnet, in der Gamma-Domain
+        // angewendet (Faktor^(1/2.2)). Das ist physikalisch eine Belichtung,
+        // keine Gamma-Verschiebung.
+        let autoOn = (UserDefaults.standard.object(forKey: "pxSharpAuto") as? NSNumber)?.boolValue ?? false
+        // ---- TV-Helligkeit --------------------------------------------------
+        // Der eigentliche Grund fuer "zu hell": das iPad zeigt SDR mit bis zu
+        // ~600 cd/m2, ein Fernseher mit 100-200. Derselbe Code (z. B. 230/255)
+        // ist auf dem iPad also drei- bis sechsmal so hell. Ein TV regelt das
+        // ueber die Hintergrundbeleuchtung - hier wird die Ausgabe entsprechend
+        // skaliert, damit die absolute Leinhelle stimmt.
+        let tvBrightOn = (UserDefaults.standard.object(forKey: "pxSharpTvBrightness") as? NSNumber)?.boolValue ?? false
+        var tvComp = 1.0
+        if tvBrightOn {
+            let sb = min(max(Double(UIScreen.main.brightness), 0.0), 1.0)
+            // 100 % Bildschirm -> 0.55, 50 % -> 0.775, 20 % -> 0.91
+            tvComp = 0.55 + 0.45 * (1.0 - sb)
+        }
+        let autoStrength = Float(UserDefaults.standard.object(forKey: "pxSharpAutoStrength") as? Double ?? 0.65)
+        let scene = PXScene.shared
+        // Lastregel: 0 = alles an, 1 = Klarheit aus, 2 = zusaetzlich Deconvolution aus
+        let perfLevelNow = scene.perfLevel
+        // TV-Leuchtdichte und Szenen-Automatik in EINEM Durchgang (spart eine
+        // komplette Vollbild-Stufe).
+        var expo = tvComp
+        if lastClipShare > 0.006 && expo > 1.0 { expo = 1.0 }
+        if autoOn && autoStrength > 0.01 {
+            // Deckel bei +10 %: die Szenen-Automatik hat dunkle Szenen vorher um
+            // bis zu +23 % aufgehellt. Zusammen mit der Schatten-Anhebung wurde
+            // das Bild dadurch flau. Nachtszenen DUERFEN dunkel sein.
+            // Vorher: min(1.30, 1.0 + gain*strength*2.0) -- bei 75 % Staerke waren
+            // das bis zu +30 % Helligkeit. Genau das hat das Bild ueberzogen
+            // (gemessen: p90 205 -> 235, 4,9 % der Flaeche ueber 95 %).
+            expo *= min(1.06, max(0.90, 1.0 + (scene.gain - 1.0) * Double(autoStrength)))
+        }
+        // Wenn im Bild schon geclippt wird, darf die Automatik NICHT aufhellen.
+        // Gemessen: bei 75 % Staerke stieg das Clipping von 0,42 auf 4,67 %.
+        // Im HDR-Pfad keine SDR-Belichtung: PQ kodiert Helligkeit absolut.
+        if hdrActive { expo = 1.0 }
+        if abs(expo - 1.0) > 0.002 {
+            let f = CGFloat(pow(expo, 1.0 / 2.2))
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: f, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: f, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: f, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
+            ])
+        }
+
+        // Tone Mapping als echte S-Kurve (CIToneCurve): kontrollierter Kontrast in
+        // den Mitten, Rolloff in den Lichtern, leichte Anhebung der Schatten.
+        // CIHighlightShadowAdjust (vorher) war ein lokaler Operator und hat
+        // Helligkeitskanten um helle Objekte erzeugt — genau das wirkt künstlich.
+        let toneMap = (hdrActive || bypassNow) ? 0 : UserDefaults.standard.integer(forKey: "pxSharpToneMap")
+        if toneMap == 1 {
+            image = image.applyingFilter("CIToneCurve", parameters: [
+                "inputPoint0": CIVector(x: 0.00, y: 0.000),
+                "inputPoint1": CIVector(x: 0.25, y: 0.220),
+                "inputPoint2": CIVector(x: 0.50, y: 0.500),
+                "inputPoint3": CIVector(x: 0.75, y: 0.790),
+                "inputPoint4": CIVector(x: 1.00, y: 0.995)
+            ])
+        } else if toneMap == 2 {
+            image = image.applyingFilter("CIToneCurve", parameters: [
+                "inputPoint0": CIVector(x: 0.00, y: 0.003),
+                "inputPoint1": CIVector(x: 0.25, y: 0.230),
+                "inputPoint2": CIVector(x: 0.50, y: 0.520),
+                "inputPoint3": CIVector(x: 0.75, y: 0.808),
+                "inputPoint4": CIVector(x: 1.00, y: 0.985)
+            ])
+        }
+
+        // ---- Lokale Tonwertspreizung (TV-Technologie) ----------------------
+        // Wirkt nur auf die Verteilung, nicht auf die Gesamthelligkeit.
+        let localTone = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpLocalTone") as? Double ?? 0.0))
+        if localTone > 0.01 && !hdrActive {
+            // In bereits hellen Szenen darf die Spreizung nicht weiter aufblasen.
+            // p90 ist der Spitzlichtpegel: ab 0,72 wird zurueckgenommen, ab 0,95 aus.
+            let headroom = Float(1.0 - min(max((scene.p90 - 0.72) / 0.23, 0.0), 1.0))
+            image = applyLocalTone(image, strength: localTone * 0.35 * headroom,
+                                   ref: Float(min(max(scene.mean, 0.12), 0.65)))
+        }
+
+        // ---- Schattendurchzeichnung (Black Stabilizer) --------------------
+        // Manueller Regler + Automatik. Die Automatik greift umso staerker,
+        // je dunkler die Szene ist (Szenenmedian), und nie bei Tageslicht.
+        let shadowManual = Float(UserDefaults.standard.object(forKey: "pxSharpShadow") as? Double ?? 0.0)
+        // Black Stabilizer wirkt NUR in dunklen Szenen. In einer hellen Szene
+        // wuerde er nur den Kontrast flachdruecken (gemessen: std -3 %).
+        let darkFactor = min(max((0.34 - scene.mean) / 0.24, 0.0), 1.0)
+        var shadowAmt = Double(bypassNow ? 0 : shadowManual) * (0.15 + 0.85 * darkFactor)
+        if autoOn && autoStrength > 0.01 {
+            // Die Automatik darf die Schatten nur MODERAT anheben. Vorher kam sie
+            // in Nachtszenen auf 0,95 und hat das Schwarz auf 10/255 gehoben —
+            // das Bild wirkte flau und die Farben "ausgewaschen". Der Regler
+            // selbst bleibt voll nutzbar, die Automatik gibt hoechstens 0,22 dazu.
+            shadowAmt = min(0.85, shadowAmt + min(darkFactor * Double(autoStrength) * 0.85, 0.22))
+        }
+        if !hdrActive, shadowAmt > 0.02, let sk = shadowKernelInstance(),
+           let out = sk.apply(extent: image.extent,
+                              roiCallback: { _, rect in rect },
+                              arguments: [image, NSNumber(value: shadowAmt), NSNumber(value: 0.45),
+                                          NSNumber(value: shadowAmt * 0.035)]) {
+            image = out
+        }
+
+        var denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.06)
+        if autoOn {
+            let darkBoost = 1.0 + Float(scene.darkFrac) * 0.45
+            denoise = min(1.0, denoise * (1.0 + Float(scene.noise) * autoStrength * 1.2) * darkBoost)
+        }
+        let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.14)
+        let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.30)
+        let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
+
+        // ---- Bitraten-Adaption -------------------------------------------
+        // Bei 8 Mbit ist ein 1080p60-Bild stark komprimiert (Blockkanten,
+        // ausgewaschene Textur), bei 22 Mbit kaum. Ein Fernseher regelt seine
+        // MPEG-Rauschunterdrueckung genauso: mehr Filter, weniger Schaerfe,
+        // wenn die Leitung schwach ist. Sonst verstaerkt die Schaerfe Bloecke.
+        let mbps = scene.streamMbps
+        var bitrateFactor: Float = 1.0
+        if mbps > 0.1 {
+            bitrateFactor = Float(min(max((mbps - 7.0) / 15.0, 0.0), 1.0))
+        }
+        let filterBoost = 1.0 + (1.0 - bitrateFactor) * 0.35   // bis +35 % Filter
+        denoise = min(1.0, denoise * filterBoost)
+
+        let aD = denoise > 0.02 ? min(denoise, 1.0) * 0.85 : 0.0
+        let aB = deblock > 0.02 ? min(max(deblock, 0), 1) * 0.90 * filterBoost : 0.0
+        // Deband laeuft IMMER. Der Sparmodus hatte sie abgeschaltet — dadurch
+        // kamen die Treppenstufen in dunklen Verlaeufen zurueck (im 100-%-Bild
+        // als diagonale Streifen sichtbar). Sie kostet im zusammengefassten
+        // Kernel nur einen Ring, nicht einen eigenen Durchgang.
+        let aG = dbn > 0.02 ? min(dbn, 1.0) * 0.65 * filterBoost : 0.0
+
+        if (aD + aB + aG) > 0.02, let k = cleanKernelInstance(),
+           let out = k.apply(extent: image.extent,
+                             roiCallback: { _, rect in rect.insetBy(dx: -9, dy: -9) },
+                             arguments: [image,
+                                         NSNumber(value: 2.4), NSNumber(value: 0.075), NSNumber(value: aD),
+                                         NSNumber(value: 1.7), NSNumber(value: 0.042), NSNumber(value: aB),
+                                         NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
+            image = out
+        } else {
+            // Rueckfall, falls der Kernel nicht kompiliert: die drei Einzelstufen.
+            if aD > 0.02, let k = deblockKernelInstance(),
+               let out = k.apply(extent: image.extent,
+                                 roiCallback: { _, rect in rect.insetBy(dx: -6, dy: -6) },
+                                 arguments: [image, NSNumber(value: 2.4), NSNumber(value: 0.075), NSNumber(value: aD)]) {
+                image = out
+            }
+            if aB > 0.02, let k = deblockKernelInstance(),
+               let out = k.apply(extent: image.extent,
+                                 roiCallback: { _, rect in rect.insetBy(dx: -6, dy: -6) },
+                                 arguments: [image, NSNumber(value: 1.7), NSNumber(value: 0.042), NSNumber(value: aB)]) {
+                image = out
+            }
+            if aG > 0.02, let k = deblockKernelInstance(),
+               let out = k.apply(extent: image.extent,
+                                 roiCallback: { _, rect in rect.insetBy(dx: -8, dy: -8) },
+                                 arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
+                image = out
+            }
+        }
+
+        // ---- Chroma-Rekonstruktion -----------------------------------------
+        let chromaAmt = Float((UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)
+                              * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
+        if !bypassNow, chromaAmt > 0.01, let ck = chromaKernelInstance(),
+           let out = ck.apply(extent: image.extent,
+                              roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
+                              arguments: [image, NSNumber(value: 1.8),
+                                          NSNumber(value: chromaAmt * 1.8), NSNumber(value: 0.010)]) {
+            image = out
+        }
+
+        // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
+        // echte Kanten statt weicher Pixel bekommt — ebenfalls CAS, damit die
+        // Vorverstärkung keine Halos in die Skalierung schickt.
+        let clearImage = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
+        if clearImage > 0.05 {
+            if let k = casKernelInstance(),
+               let out = k.apply(extent: image.extent,
+                                 roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
+                                 arguments: [image, NSNumber(value: 0.85), NSNumber(value: 1.7), NSNumber(value: 3.0),
+                                             NSNumber(value: min(clearImage, 1.0) * 0.95),
+                                             NSNumber(value: min(clearImage, 1.0) * 0.55),
+                                             NSNumber(value: min(clearImage, 1.0) * 0.45),
+                                             NSNumber(value: haloLimit * 0.85), NSNumber(value: lumaSharpen),
+                                             NSNumber(value: chromaSharpen),
+                                             NSNumber(value: (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04) * 0.020)]) {
+                image = out
+            } else {
+                image = image.applyingFilter("CIUnsharpMask", parameters: [
+                    kCIInputRadiusKey: 1.2,
+                    kCIInputIntensityKey: min(clearImage, 1.0) * 0.55
+                ])
+            }
+        }
+
+        // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
+        let deconvAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
+        // Deconvolution läuft IMMER — sie ist die Stufe mit dem größten
+        // Texturgewinn (+44 % gemessen). Sie wird von keiner Lastregel
+        // abgeschaltet, auch nicht bei Hitze.
+        if deconvAmt > 0.02, let k = deconvKernelInstance(),
+           let out = k.apply(extent: image.extent,
+                             roiCallback: { _, rect in rect.insetBy(dx: -3, dy: -3) },
+                             arguments: [image,
+                                         NSNumber(value: min(deconvAmt, 1.0) * 0.45),
+                                         NSNumber(value: 0.004 + Double(min(Float(scene.noise), 1.0)) * 0.012),
+                                         NSNumber(value: Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12))]) {
+            image = out
+        }
+
+        // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
+        // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
+        // ein Drittel der Pixel.
+        let clarityAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
+        if clarityAmt > 0.02, let lc = diffKernelInstance() {
+            let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
+            let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
+                kCIInputRadiusKey: 3.2
+            ]).cropped(to: small.extent)
+            let up = blurred.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+            // Die Begrenzung waechst mit dem Regler: bei 0,28 sind es 0,062,
+            // bei 1,0 sind es 0,105. Gemessen erzeugt das bis 0,105 noch
+            // KEINE Halos (0,0 % Ueberschuss), also ist der Spielraum da.
+            let clarLimit = 0.055 + Double(min(clarityAmt, 1.0)) * 0.075
+            if let out = lc.apply(extent: image.extent, arguments: [
+                image, up, NSNumber(value: min(clarityAmt, 1.0) * 1.50), NSNumber(value: clarLimit)
+            ]) {
+                image = out
+            }
+        }
+
+        // Mini-LED-Dimming und Farb-LUT wirken bei QUELLAUFLÖSUNG (1080p) statt
+        // auf dem Panel. Beides sind niederfrequente bzw. punktweise Operationen —
+        // das Ergebnis ist identisch, kostet aber nur 2,1 statt 5,6 Mio Pixel.
+        let localDim = Float(bypassNow ? 0 : (UserDefaults.standard.object(forKey: "pxSharpLocalDim") as? Double ?? 0.0))
+        if localDim > 0.02 && !hdrActive {
+            let dimScale = 0.60 + 0.40 * Float(min(max(scene.mean / 0.40, 0.0), 1.0))
+            // Bei Stufe 2 nur noch halbes Dimming: es ist die teuerste Stufe
+            // nach der Deconvolution, und der Unterschied ist im Bild klein.
+            let pd: Float = perfLevelNow >= 2 ? 0.5 : 1.0
+            image = applyLocalDimming(image, strength: min(localDim, 1.0) * dimScale * pd, zone: 36)
+        }
+        if pendingWhitePoint {
+            pendingWhitePoint = false
+            if !hdrActive { measureWhitePoint(from: image) }
+            else { pxNote("HDR aktiv — Weisspunktabgleich nur fuer SDR") }
+        }
+        if colorEngine && !hdrActive && !bypassNow {
+            image = applyColorEngine(image)
+        }
+        // Messung NACH der Farb-LUT: sonst sieht der Spitzlichtschutz die
+        // Aufhellung durch LUT und Bereichsspreizung nicht -- und genau die
+        // hat das Bild ueberzogen.
+        let hlBalance = (UserDefaults.standard.object(forKey: "pxSharpHlBalance") as? NSNumber)?.boolValue ?? true
+        if hlBalance {
+            hlCounter += 1
+            if hlCounter >= 30 {
+                hlCounter = 0
+                if !hdrActive { measureHighlightBalance(from: image) }
+            }
+        } else {
+            // Ohne Messung darf ein alter Clip-Wert die Automatik nicht
+            // dauerhaft blockieren.
+            lastClipShare *= 0.90
+        }
+
+        let sx = target.width / src.width
+        let sy = target.height / src.height
+        let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
+        // MetalFX-Spatial-Scaler (kantenbewusstes Hochskalieren). Ueber den
+        // Schalter, Standard aus. Der Ausgang wird fuer die Messung in PXProbe
+        // gespiegelt — nur so laesst sich per /shot pruefen, ob der Pfad
+        // korrekt rechnet.
+        let useMFX = (UserDefaults.standard.object(forKey: "pxSharpMetalFX") as? NSNumber)?.boolValue ?? false
+        if useMFX {
+            // Skalierung übernimmt MetalFX am Ende.
+        } else if pixelPerfect {
+            // 1:1: keine Skalierung, jeder Stream-Pixel sitzt auf genau einem Panel-Pixel.
+            image = image.transformed(by: CGAffineTransform(scaleX: 1, y: 1))
+        } else {
+        switch currentMode {
+        case .fit:
+            let s = min(sx, sy)
+            let useKernelUp = false   // siehe Kommentar unten: wird vom Panel-Kernel abgedeckt
+            if useKernelUp, let uk = upscaleKernelInstance() {
+                let outExt = CGRect(x: 0, y: 0,
+                                    width: (src.width * s).rounded(.down),
+                                    height: (src.height * s).rounded(.down))
+                let upStrength = Float(UserDefaults.standard.object(forKey: "pxSharpUpScale") as? Double ?? 0.60)
+                let inv = 1.0 / s
+                if let out = uk.apply(extent: outExt,
+                                      // WICHTIG: der ROI-Rueckruf bekommt Ziel-Koordinaten und
+                                      // muss in QUELL-Koordinaten zurueckgeben (Faktor invScale).
+                                      roiCallback: { _, rect in
+                                          rect.applying(CGAffineTransform(scaleX: inv, y: inv)).insetBy(dx: -2, dy: -2)
+                                      },
+                                      arguments: [image, NSNumber(value: inv),
+                                                  NSNumber(value: upStrength), NSNumber(value: 0.55)]) {
+                    image = out
+                } else {
+                    image = image.applyingFilter("CILanczosScaleTransform", parameters: [
+                        kCIInputScaleKey: s,
+                        kCIInputAspectRatioKey: 1.0
+                    ])
+                }
+            } else {
+                image = image.applyingFilter("CILanczosScaleTransform", parameters: [
+                    kCIInputScaleKey: s,
+                    kCIInputAspectRatioKey: 1.0
+                ])
+            }
+        case .zoom:
+            let s = max(sx, sy)
+            image = image.applyingFilter("CILanczosScaleTransform", parameters: [
+                kCIInputScaleKey: s,
+                kCIInputAspectRatioKey: 1.0
+            ])
+        case .stretch:
+            image = image.applyingFilter("CIBicubicScaleTransform", parameters: [
+                kCIInputScaleKey: sy,
+                kCIInputAspectRatioKey: sx / sy
+            ])
+        }
+        }
+
+        let placed = image.extent
+        let dx = (target.width - placed.width) / 2 - placed.origin.x
+        let dy = (target.height - placed.height) / 2 - placed.origin.y
+        image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+
+        // Kantengerichtete Schärfung (Option): 1:1 nach der Skalierung.
+        if (UserDefaults.standard.object(forKey: "pxSharpScaler") as? Int ?? 0) == 1,
+           let dk = dirKernelInstance() {
+            let amt = Float(UserDefaults.standard.object(forKey: "pxSharpEasu") as? Double ?? 1.0)
+            let haloK = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
+            if let out = dk.apply(extent: image.extent,
+                                  roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
+                                  arguments: [image, NSNumber(value: amt * 0.55),
+                                              NSNumber(value: 1.6), NSNumber(value: haloK)]) {
+                image = out
+            }
+        }
+
+        // Schaerfung auf PANEL-Aufloesung: beim Hineinzoomen bleiben die
+        // Kanten crisper als bei Quellaufloesung. Die Renderzeit liegt bei
+        // 13 ms (Budget 16,7) -- die App ist nicht der Bremsklotz, der Stream ist es.
+        image = applyDetailStage(image)
+
+        // Kontrast: 50 % = neutral
+        let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
+        if !colorEngine && abs(contrastRaw - 0.5) > 0.01 {
+            image = image.applyingFilter("CIColorControls", parameters: [
+                kCIInputContrastKey: 0.8 + min(max(contrastRaw, 0), 1) * 0.4
+            ])
+        }
+
+        // Farbtemperatur als NORMALISIERTE Matrix. CITemperatureAndTint hat die
+        // Kanäle ungefiltert verstärkt: bei 5500 K und 9500 K waren je über 8 %
+        // aller Pixel geclippt. Hier wird gegen die Luma-Gewichtung geteilt,
+        // dadurch bleibt die Helligkeit gleich und es entsteht kein Clipping.
+        let tempRaw = Float(UserDefaults.standard.object(forKey: "pxSharpTemp") as? Double ?? 0.5)
+        if !colorEngine && abs(tempRaw - 0.5) > 0.005 {
+            let t = Double(tempRaw - 0.5) * 2.0          // -1 = warm, +1 = kühl
+            let kR = 1.0 - 0.22 * t
+            let kG = 1.0
+            let kB = 1.0 + 0.22 * t
+            let kn = 0.2126 * kR + 0.7152 * kG + 0.0722 * kB
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: CGFloat(kR / kn), y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: CGFloat(kG / kn), z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(kB / kn), w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
+            ])
+        }
+
+        // Weißabgleich RGB (Feinschliff): 1.00 = neutral. Damit lässt sich der letzte
+        // Farbstich rausnehmen, den ein einzelner Kelvin-Regler nicht trifft.
+        let wbR = Float(UserDefaults.standard.object(forKey: "pxSharpWB_R") as? Double ?? 1.0)
+        let wbG = Float(UserDefaults.standard.object(forKey: "pxSharpWB_G") as? Double ?? 1.0)
+        let wbB = Float(UserDefaults.standard.object(forKey: "pxSharpWB_B") as? Double ?? 1.0)
+        if !colorEngine && (abs(wbR - 1.0) > 0.002 || abs(wbG - 1.0) > 0.002 || abs(wbB - 1.0) > 0.002) {
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: CGFloat(wbR), y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: CGFloat(wbG), z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(wbB), w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
+            ])
+        }
+
+        let satRaw = Float(UserDefaults.standard.object(forKey: "pxSharpSaturation") as? Double ?? 0.5)
+        let sat = 0.7 + min(max(satRaw, 0), 1) * 0.6
+        if !colorEngine && abs(sat - 1.0) > 0.01 {
+            image = image.applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: sat
+            ])
+        }
+
+        let vib = Float(UserDefaults.standard.object(forKey: "pxSharpVibrance") as? Double ?? 0.0)
+        if !colorEngine && vib > 0.01 {
+            image = image.applyingFilter("CIVibrance", parameters: [
+                "inputAmount": min(vib, 1.0)
+            ])
+        }
+
+        if !colorEngine {
+            image = applyCalibration(image)
+        }
+
+        // Dithering zuletzt (nur SDR/8 Bit; HDR laeuft mit 16 Bit)
+        if !hdrActive, let dk = ditherKernelInstance(),
+           let out = dk.apply(extent: image.extent,
+                              roiCallback: { _, rect in rect },
+                              arguments: [image, NSNumber(value: 0.0024)]) {
+            image = out
+        }
+
+        let outSpace: CGColorSpace
+        if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+            outSpace = pq
+        } else {
+            outSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        }
+
+        if useMFX, let device = metalView?.device {
+            let fit = min(target.width / src.width, target.height / src.height)
+            let outW = max(2, Int((src.width * fit).rounded(.down)))
+            let outH = max(2, Int((src.height * fit).rounded(.down)))
+            let ox = (Int(target.width) - outW) / 2
+            let oy = (Int(target.height) - outH) / 2
+
+            if ensureMetalFX(device: device,
+                             input: src,
+                             output: CGSize(width: outW, height: outH)),
+               let inTex = mfxIn, let outTex = mfxOut, let scaler = mfxScaler {
+
+                // Drawable leeren, damit die Balken schwarz sind
+                let rp = MTLRenderPassDescriptor()
+                rp.colorAttachments[0].texture = drawable.texture
+                rp.colorAttachments[0].loadAction = .clear
+                rp.colorAttachments[0].storeAction = .store
+                rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+                cb.makeRenderCommandEncoder(descriptor: rp)?.endEncoding()
+
+                // WICHTIG: bounds müssen den tatsächlichen Bildbereich abdecken.
+                // Das Bild wurde vorher auf die Drawable-Mitte verschoben (extent
+                // beginnt z.B. bei x=406,y=255). Mit bounds=(0,0,1920,1080) wurde
+                // nur eine Ecke gerendert; der Rest der Textur blieb undefinierter
+                // Speicher — genau das war das lila Bild bei MetalFX.
+                let norm = image.transformed(by: CGAffineTransform(
+                    translationX: -image.extent.origin.x,
+                    y: -image.extent.origin.y))
+                ciContext?.render(norm, to: inTex, commandBuffer: cb,
+                                  bounds: CGRect(x: 0, y: 0,
+                                                 width: CGFloat(Int(src.width)),
+                                                 height: CGFloat(Int(src.height))),
+                                  colorSpace: outSpace)
+
+                scaler.colorTexture = inTex
+                scaler.outputTexture = outTex
+                scaler.inputContentWidth = Int(src.width)
+                scaler.inputContentHeight = Int(src.height)
+                scaler.encode(commandBuffer: cb)
+
+                if let blit = cb.makeBlitCommandEncoder() {
+                    blit.copy(from: outTex, sourceSlice: 0, sourceLevel: 0,
+                              sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                              sourceSize: MTLSize(width: outW, height: outH, depth: 1),
+                              to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
+                              destinationOrigin: MTLOrigin(x: ox, y: oy, z: 0))
+                    blit.endEncoding()
+                }
+
+                cb.present(drawable)
+                cb.commit()
+
+                // Probe ERST nach der GPU. Vorher wurde outTex gelesen, bevor der
+                // Command-Buffer überhaupt abgeschickt war — deshalb lieferte /shot
+                // ein leeres graues Bild, obwohl der Scaler auf dem Panel normal
+                // rechnete. Das war ein Messfehler, kein Scaler-Fehler.
+                cb.waitUntilCompleted()
+                if let c = ciContext,
+                   let outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) {
+                    let r = CGRect(x: 0, y: 0, width: CGFloat(outW), height: CGFloat(outH))
+                    PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
+                                       width: outW, height: outH)
+                }
+                return
+            }
+        }
+
+        // ---- Randsaum entfernen -------------------------------------------
+        // Die Kernel-Kette (CAS, Deconvolution, Clean, Dither) tastet am Rand
+        // Nachbarpixel ab. Ausserhalb des Bildes liefert Core Image
+        // transparentes Schwarz; dadurch rechnet der Kernel dort einen extremen
+        // Kontrast und schreibt einen 1-3 px breiten hellen Saum an alle vier
+        // Kanten (gemessen: Rand 61 statt 31 innen, also 2x). Auf dem Panel
+        // sieht das wie ein leuchtender Rahmen um das Bild aus.
+        // 4 px beschneiden entfernt den Saum vollstaendig; bei 2732 px Breite
+        // sind das 0,15 % — unsichtbar.
+        let saum = image.extent.insetBy(dx: 4, dy: 4)
+        if saum.width > 16, saum.height > 16 {
+            image = image.cropped(to: saum)
+        }
+
+        let canvasRect = CGRect(origin: .zero, size: target)
+        let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
+        let composited = image.composited(over: canvas)
+
+        let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
+        if let c = ctx {
+            PXProbe.shared.set(composited, context: c, space: outSpace,
+                               width: Int(target.width), height: Int(target.height))
+        }
+        ctx?.render(composited,
+                    to: drawable.texture,
+                    commandBuffer: cb,
+                    bounds: canvasRect,
+                    colorSpace: outSpace)
+
+        let renderStart = CACurrentMediaTime()
+        cb.addCompletedHandler { _ in
+            PXScene.shared.noteRenderMs((CACurrentMediaTime() - renderStart) * 1000.0)
+        }
+        cb.present(drawable)
+        cb.commit()
+
+        // Renderrate messen: /state liefert pxSharpFPS. Nur so ist belegbar, ob ein
+        // Bildblock (z. B. CAS) noch mit 60 Bildern/s laeuft oder Frames kostet.
+        frameCount += 1
+        let now = CACurrentMediaTime()
+        if now - fpsWindowStart >= 1.0 {
+            let fps = Double(frameCount) / (now - fpsWindowStart)
+            UserDefaults.standard.set(String(format: "%.0f", fps), forKey: "pxSharpFPS")
+            frameCount = 0
+            fpsWindowStart = now
+        }
+    }
+}
+
+// MARK: - PXScene: Szenenanalyse (das "Auge" des Fernsehers)
+
+/// Ein Fernseher regelt nicht mit festen Werten, sondern analysiert jedes Bild:
+/// wie hell ist die Szene, wie viel Spitzlicht gibt es, wie stark rauscht sie.
+/// Genau das macht diese Klasse. Sie liest eine Stichprobe der Y-Ebene des
+/// Quellbildes (kein GPU-Readback, kostet < 1 ms) und leitet daraus drei
+/// Werte ab, die der Renderer pro Frame benutzt:
+///
+///   gain   Belichtungskorrektur (dunkle Szene heller, helle Szene dunkler)
+///   noise  Rauschmass (0 = sauber, 1 = verrauscht) -> mehr Filter, weniger Schärfe
+///   p90    Spitzlichtpegel -> fuer den Highlight-Rolloff
+///
+/// Das entspricht "AI Brightness Control" + "Dynamic Tone Mapping" eines TVs.
+final class PXScene {
+    static let shared = PXScene()
+
+    private let lock = NSLock()
+    private var lastAnalysis: CFTimeInterval = 0
+
+    // Glaettung (langsam, damit es nicht pumpt)
+    private var gainEma: Double = 1.0
+    private var noiseEma: Double = 0.0
+    private var renderMsEma: Double = 0
+    private var perfLevelStore: Int = 0
+    private var perfCooldown: CFTimeInterval = 0
+
+    var perfLevel: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return perfLevelStore
+    }
+
+    // Vom Renderer gelesen
+    private(set) var gain: Double = 1.0
+    private(set) var noise: Double = 0.0
+    private(set) var mean: Double = 0.5
+    private(set) var p90: Double = 0.85
+    private(set) var darkFrac: Double = 0.0
+    /// Gemessene Stream-Bitrate in Mbit/s (0 = unbekannt). Wird von StreamView
+    /// einmal pro Sekunde geschrieben.
+    private(set) var streamMbps: Double = 0.0
+
+    /// Gemessene GPU-Zeit pro Bild in Millisekunden (gleitender Mittelwert).
+    /// 16,6 ms = 60 fps. Alles darunter ist Reserve, alles darueber kostet Bilder.
+    var renderMs: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return renderMsEma
+    }
+
+    func noteRenderMs(_ ms: Double) {
+        lock.lock()
+        renderMsEma += (ms - renderMsEma) * 0.08
+        // Lastregel in zwei Stufen. WICHTIG: Die Stufe muss im Renderer auch
+        // gelesen werden (draw() fragt scene.perfLevel ab). Vorher war sie nur
+        // eine Anzeige und hat nichts abgeschaltet.
+        //   Stufe 1 (ueber 21 ms): Klarheit aus  — kaum sichtbar
+        //   Stufe 2 (ueber 26 ms): zusaetzlich Deconvolution aus, Dimming halb
+        // Rueckweg mit 8 s Sperre, damit es nicht flattert.
+        let now = CACurrentMediaTime()
+        // Die Lastregel ist standardmaessig AUS. Sie hat in Build 95 die
+        // Deconvolution abgeschaltet, sobald das iPad warm wurde — das Bild
+        // verlor dadurch 25-27 % Textur. Bildqualitaet geht vor Bildrate.
+        let autoPerf = (UserDefaults.standard.object(forKey: "pxSharpPerfAuto") as? NSNumber)?.boolValue ?? false
+        if !autoPerf {
+            perfLevelStore = 0
+            lock.unlock()
+            return
+        }
+        if perfLevelStore == 0 && renderMsEma > 24.0 {
+            perfLevelStore = 1
+            perfCooldown = now + 8.0
+        } else if perfLevelStore == 1 && renderMsEma > 30.0 {
+            perfLevelStore = 2
+            perfCooldown = now + 8.0
+        } else if perfLevelStore == 2 && now > perfCooldown && renderMsEma < 24.0 {
+            perfLevelStore = 1
+            perfCooldown = now + 8.0
+        } else if perfLevelStore == 1 && now > perfCooldown && renderMsEma < 18.0 {
+            perfLevelStore = 0
+        }
+        lock.unlock()
+    }
+
+    private init() {}
+
+    func reset() {
+        lock.lock()
+        gainEma = 1.0; noiseEma = 0.0; gain = 1.0; noise = 0.0
+        lock.unlock()
+    }
+
+    /// Analysiert hoechstens 10x pro Sekunde. Das reicht fuer Belichtung und
+    /// Rauschen und kostet praktisch keine Bildrate.
+    func analyze(_ pb: CVPixelBuffer) {
+        let now = CACurrentMediaTime()
+        lock.lock()
+        if now - lastAnalysis < 0.10 { lock.unlock(); return }
+        lastAnalysis = now
+        lock.unlock()
+
+        guard CVPixelBufferGetPlaneCount(pb) >= 1 else { return }
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return }
+
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0)
+        let h = CVPixelBufferGetHeightOfPlane(pb, 0)
+        let bpr = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        guard w > 32, h > 32 else { return }
+        // 10-Bit-Streams liefern 16-Bit-Worte (0..1023). Der Analysator muss
+        // das erkennen, sonst waeren alle Szenenwerte um Faktor 4 falsch.
+        let fmtType = CVPixelBufferGetPixelFormatType(pb)
+        let isTenBit = (fmtType == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                        || fmtType == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)
+        let maxVal = isTenBit ? 1023.0 : 255.0
+        let p = base.assumingMemoryBound(to: UInt8.self)
+        let p16 = base.assumingMemoryBound(to: UInt16.self)
+        func luma(_ x: Int, _ y: Int) -> Double {
+            if isTenBit { return Double(p16[y * (bpr / 2) + x]) / maxVal * 255.0 }
+            return Double(p[y * bpr + x]) / maxVal * 255.0
+        }
+
+        var hist = [Int](repeating: 0, count: 256)
+        var n = 0
+        var flatSum = 0.0
+        var flatN = 0
+        var darkSum = 0.0
+        var darkN = 0
+        var y = 4
+        while y < h - 4 {
+            let row = y * bpr
+            var x = 4
+            while x < w - 6 {
+                let v = Int(luma(x, y))
+                hist[v] += 1
+                n += 1
+                // Rauschen nur in FLACHEN Stellen messen: nur wenn auch der
+                // Pixel 2 Stellen weiter fast gleich ist. Sonst misst man
+                // Textur statt Rauschen.
+                let v1 = Int(luma(x + 1, y))
+                let v2 = Int(luma(x + 2, y))
+                let d = abs(v1 - v)
+                if abs(v2 - v) <= 6 && d <= 24 {
+                    flatSum += Double(d)
+                    flatN += 1
+                }
+                if v < 90 { darkSum += Double(v); darkN += 1 }
+                x += 6
+            }
+            y += 6
+        }
+        guard n > 200 else { return }
+
+        func pct(_ q: Double) -> Double {
+            let target = Int(Double(n) * q)
+            var acc = 0
+            for i in 0..<256 {
+                acc += hist[i]
+                if acc >= target { return Double(i) / 255.0 }
+            }
+            return 1.0
+        }
+
+        let p10 = pct(0.10)
+        let p50 = pct(0.50)
+        let p90 = pct(0.90)
+
+        // Belichtungsziel: Median ~0.46, Spitzlicht ~0.86.
+        // min() sorgt dafuer, dass niemals Highlights fuer die Mitten geopfert werden.
+        let gMid = 0.40 / max(p50, 0.06)
+        let gHigh = 0.78 / max(p90, 0.12)
+        // Bewusst enger Regelbereich: eine Nacht bleibt Nacht. Die Automatik
+        // korrigiert Belichtungsfehler, sie erfindet keine Helligkeit.
+        // Grenze nach oben szenenabhaengig: eine sehr dunkle Szene (Median < 0,18)
+        // darf bis +30 % aufgehellt werden, eine normale nur bis +12 %.
+        let capHigh = min(1.32, 1.12 + max(0.0, 0.18 - p50) * 1.6)
+        var g = min(gMid, gHigh, capHigh)
+        g = max(g, 0.64)
+
+        // Rauschen: mittlerer Gradient in flachen Stellen. Sauber ~0.3-1.0,
+        // verrauscht 2-6 (Stufen/255).
+        let grad = flatN > 0 ? flatSum / Double(flatN) : 0.0
+        let nz = min(max((grad - 0.7) / 3.5, 0.0), 1.0)
+        // Wie dunkel ist die Szene wirklich? (Anteil unter 90/255)
+        let darkFrac = n > 0 ? Double(darkN) / Double(n) : 0.0
+        _ = darkSum
+
+        // Bitrate der Leitung mitlesen: bestimmt, wie stark komprimiert das
+        // Bild ist — und damit, wie viel Filter bzw. Schaerfe sinnvoll ist.
+        let mb = UserDefaults.standard.string(forKey: "pxSharpStreamMbps").flatMap { Double($0) } ?? 0.0
+
+        lock.lock()
+        streamMbps = mb
+        // Asymmetrische Glaettung: schnell runter (nicht ueberbelichten),
+        // langsam hoch. Verhindert Pumpen bei Szenenwechseln.
+        let a = g < gainEma ? 0.18 : 0.07
+        gainEma += (g - gainEma) * a
+        noiseEma += (nz - noiseEma) * 0.15
+        gain = gainEma
+        noise = noiseEma
+        mean = p50
+        self.p90 = p90
+        self.darkFrac = darkFrac
+        lock.unlock()
+    }
+}
+
+// MARK: - PXProbe: Messung direkt in der App
+/// Rendert das zuletzt angezeigte Bild und berechnet Bildkennzahlen auf dem
+/// Gerät. Damit ist eine Messung in ~100 ms möglich, exakt auf demselben Bild,
+/// ohne Screenshot-Umweg. Zusätzlich wird die Bewegung zwischen zwei Probes
+/// gemeldet, damit man weiß, ob ein Vergleich überhaupt gültig ist.
+final class PXProbe {
+    static let shared = PXProbe()
+    private let lock = NSLock()
+    private var image: CIImage?
+    private var ctx: CIContext?
+    private var space: CGColorSpace?
+    private var w = 0
+    private var h = 0
+    private var prevLuma: [Float]?
+    private var lastBuffer: CVPixelBuffer?
+    private(set) var frozenBuffer: CVPixelBuffer?
+
+    func note(_ pb: CVPixelBuffer) {
+        lock.lock()
+        lastBuffer = pb
+        lock.unlock()
+    }
+
+    /// Friert das Quellbild ein, damit alle folgenden Messungen exakt dasselbe
+    /// Bild verarbeiten. Ohne das misst man bei laufendem Spiel Szenenwechsel
+    /// statt Einstellungsunterschiede.
+    func freeze(_ on: Bool) {
+        lock.lock()
+        if on {
+            if let src = lastBuffer { frozenBuffer = PXProbe.copyBuffer(src) }
+        } else {
+            frozenBuffer = nil
+        }
+        lock.unlock()
+    }
+
+    static func copyBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(src)
+        let h = CVPixelBufferGetHeight(src)
+        let fmt = CVPixelBufferGetPixelFormatType(src)
+        var dst: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+        ]
+        CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt, attrs as CFDictionary, &dst)
+        guard let d = dst else { return nil }
+        CVBufferPropagateAttachments(src, d)
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(d, [])
+        let planes = CVPixelBufferIsPlanar(src) ? CVPixelBufferGetPlaneCount(src) : 1
+        for i in 0..<max(1, planes) {
+            if CVPixelBufferIsPlanar(src) {
+                guard let sb = CVPixelBufferGetBaseAddressOfPlane(src, i),
+                      let db = CVPixelBufferGetBaseAddressOfPlane(d, i) else { continue }
+                let bh = CVPixelBufferGetHeightOfPlane(src, i)
+                let brs = CVPixelBufferGetBytesPerRowOfPlane(src, i)
+                let brd = CVPixelBufferGetBytesPerRowOfPlane(d, i)
+                let n = min(brs, brd)
+                for y in 0..<bh {
+                    memcpy(db.advanced(by: y * brd), sb.advanced(by: y * brs), n)
+                }
+            } else {
+                guard let sb = CVPixelBufferGetBaseAddress(src),
+                      let db = CVPixelBufferGetBaseAddress(d) else { continue }
+                memcpy(db, sb, CVPixelBufferGetBytesPerRow(src) * h)
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(d, [])
+        CVPixelBufferUnlockBaseAddress(src, .readOnly)
+        return d
+    }
+
+    func set(_ img: CIImage, context: CIContext, space: CGColorSpace, width: Int, height: Int) {
+        lock.lock()
+        image = img
+        ctx = context
+        self.space = space
+        w = width
+        h = height
+        lock.unlock()
+    }
+
+    /// Rendert das aktuelle Bild als JPEG (max. 1200 px breit) und gibt es
+    /// base64-kodiert zurück. Fuer die visuelle Kontrolle von Farbe/Schaerfe
+    /// ohne USB-Verbindung.
+    func shotJPEG(maxW: Int = 1200) -> String {
+        shotImage(maxW: maxW, png: false)
+    }
+
+    /// Verlustfreie Aufnahme (PNG). Wichtig fuer Messungen: JPEG rechnet in
+    /// 4:2:0 herunter und halbiert damit die Farbaufloesung — Farbkanten und
+    /// Banding lassen sich damit nicht ehrlich beurteilen.
+    func shotPNG(maxW: Int = 1920) -> String {
+        shotImage(maxW: maxW, png: true)
+    }
+
+    private func shotImage(maxW: Int, png: Bool) -> String {
+        lock.lock()
+        guard let img = image, let ctx = ctx, let sp = space, w > 8, h > 8 else {
+            lock.unlock()
+            return "{\"ok\":false}"
+        }
+        let W = w, H = h
+        lock.unlock()
+
+        let scale = min(1.0, Double(maxW) / Double(W))
+        let ow = max(8, Int(Double(W) * scale))
+        let oh = max(8, Int(Double(H) * scale))
+        let small = img.transformed(by: CGAffineTransform(scaleX: CGFloat(scale), y: CGFloat(scale)))
+        guard let cg = ctx.createCGImage(small, from: CGRect(x: 0, y: 0, width: ow, height: oh),
+                                         format: .RGBA8, colorSpace: sp) else {
+            return "{\"ok\":false}"
+        }
+        let ui = UIImage(cgImage: cg)
+        let data: Data?
+        if png {
+            data = ui.pngData()
+        } else {
+            data = ui.jpegData(compressionQuality: 0.88)
+        }
+        guard let d = data else { return "{\"ok\":false}" }
+        let b64 = d.base64EncodedString()
+        let fmt = png ? "png" : "jpeg"
+        return "{\"ok\":true,\"w\":\(ow),\"h\":\(oh),\"\(fmt)\":\"\(b64)\"}"
+    }
+
+    func probe() -> String {
+        lock.lock()
+        guard let img = image, let ctx = ctx, let sp = space, w > 8, h > 8 else {
+            lock.unlock()
+            return "{\"ok\":false}"
+        }
+        let W = w, H = h
+        lock.unlock()
+
+        var buf = [UInt8](repeating: 0, count: W * H * 4)
+        let rect = CGRect(x: 0, y: 0, width: W, height: H)
+        buf.withUnsafeMutableBytes { raw in
+            ctx.render(img, toBitmap: raw.baseAddress!, rowBytes: W * 4,
+                       bounds: rect, format: .RGBA8, colorSpace: sp)
+        }
+
+        // Luma + Zeilensummen in einem Durchgang
+        var luma = [Float](repeating: 0, count: W * H)
+        var rowSum = [Double](repeating: 0, count: H)
+        buf.withUnsafeBufferPointer { p in
+            let b = p.baseAddress!
+            for y in 0..<H {
+                var rs: Double = 0
+                let row = y * W * 4
+                for x in 0..<W {
+                    let i = row + x * 4
+                    let l = 0.299 * Float(b[i]) + 0.587 * Float(b[i + 1]) + 0.114 * Float(b[i + 2])
+                    luma[y * W + x] = l
+                    rs += Double(l)
+                }
+                rowSum[y] = rs / Double(W)
+            }
+        }
+
+        var r0 = 0, r1 = H - 1
+        while r0 < H && rowSum[r0] <= 6 { r0 += 1 }
+        while r1 > r0 && rowSum[r1] <= 6 { r1 -= 1 }
+        if r1 - r0 < 16 { r0 = 0; r1 = H - 1 }
+
+        var sR = 0.0, sG = 0.0, sB = 0.0, sL = 0.0, sL2 = 0.0
+        var chromaSum = 0.0, satSum = 0.0, satN = 0
+        var clip = 0, black = 0, n = 0
+        var lapSum = 0.0, lapSq = 0.0, lapN = 0
+        var flatSum = 0.0, flatN = 0
+
+        buf.withUnsafeBufferPointer { p in
+            let b = p.baseAddress!
+            for y in r0...r1 {
+                let row = y * W * 4
+                for x in 0..<W {
+                    let i = row + x * 4
+                    let r = Double(b[i]), g = Double(b[i + 1]), bl = Double(b[i + 2])
+                    sR += r; sG += g; sB += bl
+                    let l = 0.299 * r + 0.587 * g + 0.114 * bl
+                    sL += l; sL2 += l * l
+                    let mx = max(r, max(g, bl))
+                    let mn = min(r, min(g, bl))
+                    chromaSum += mx - mn
+                    if mx > 4 { satSum += (mx - mn) / mx; satN += 1 }
+                    if mx >= 254 { clip += 1 }
+                    if mx <= 1 { black += 1 }
+                    n += 1
+                    if x > 0 && x < W - 1 && y > r0 && y < r1 {
+                        let li = y * W + x
+                        let lp = luma[li]
+                        let lap = abs(4 * lp - luma[li - 1] - luma[li + 1] - luma[li - W] - luma[li + W])
+                        lapSum += Double(lap); lapSq += Double(lap * lap); lapN += 1
+                        let grad = abs(luma[li - 1] - luma[li + 1]) + abs(luma[li - W] - luma[li + W])
+                        if grad < 12 {
+                            flatSum += Double(lap); flatN += 1
+                        }
+                    }
+                }
+            }
+        }
+        if n == 0 { return "{\"ok\":false}" }
+        let mean = sL / Double(n)
+        let std = max(0, sL2 / Double(n) - mean * mean).squareRoot()
+        let lapVar = lapN > 0 ? (lapSq / Double(lapN) - (lapSum / Double(lapN)) * (lapSum / Double(lapN))) : 0
+        let flatNoise = flatN > 0 ? flatSum / Double(flatN) : 0
+
+        // Bewegung gegenüber der letzten Messung: nur gültig, wenn Bild steht
+        var motion = -1.0
+        lock.lock()
+        if let prev = prevLuma, prev.count == luma.count {
+            var d: Double = 0
+            var cn = 0
+            var i = 0
+            let step = 7
+            while i < luma.count {
+                d += Double(abs(luma[i] - prev[i])); cn += 1
+                i += step
+            }
+            motion = cn > 0 ? d / Double(cn) : 0
+        }
+        prevLuma = luma
+        lock.unlock()
+
+        let o: [String: Any] = [
+            "ok": true,
+            "w": W, "h": H, "rows": r1 - r0 + 1,
+            "r": sR / Double(n), "g": sG / Double(n), "b": sB / Double(n),
+            "mean": mean, "std": std,
+            "lap": lapVar, "acu": lapVar / max(std * std, 0.0001),
+            "clip": Double(clip) / Double(n) * 100.0,
+            "black": Double(black) / Double(n) * 100.0,
+            "noise": flatNoise,
+            "chroma": chromaSum / Double(n),
+            "sat": satN > 0 ? satSum / Double(satN) : 0,
+            "motion": motion
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
+            return String(data: data, encoding: .utf8) ?? "{\"ok\":false}"
+        }
+        return "{\"ok\":false}"
+    }
+}
+
+// MARK: - PXTuner: Debug-Bruecke fuer automatisierte Bildtests
+/// Kleiner HTTP-Server auf Port 8766. Erlaubt das Lesen und Setzen aller
+/// pxSharp-*-Werte, waehrend der Stream laeuft. Der Renderer liest
+/// UserDefaults in jedem Frame, Aenderungen wirken daher sofort.
+final class PXTuner {
+    static let shared = PXTuner()
+    private var listener: NWListener?
+    private let queue = DispatchQueue(label: "px.tuner")
+
+    func start() {
+        guard listener == nil else { return }
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        guard let port = NWEndpoint.Port(rawValue: 8766),
+              let l = try? NWListener(using: params, on: port) else { return }
+        l.newConnectionHandler = { conn in
+            conn.start(queue: self.queue)
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 16384) { data, _, _, _ in
+                let req = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                let body = PXTuner.handle(req)
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
+                conn.send(content: (head + body).data(using: .utf8),
+                          completion: .contentProcessed { _ in conn.cancel() })
+            }
+        }
+        l.start(queue: queue)
+        listener = l
+        os_log(.default, log: videoViewLog, "[PXTuner] listening on 8766")
+    }
+
+    private static func handle(_ req: String) -> String {
+        let line = req.split(separator: "\r\n").first.map(String.init) ?? ""
+        let parts = line.split(separator: " ")
+        guard parts.count >= 2 else { return "{\"error\":\"bad request\"}" }
+        let path = String(parts[1])
+        let comps = URLComponents(string: "http://x" + path)
+        let items = comps?.queryItems ?? []
+        func val(_ n: String) -> String? { items.first(where: { $0.name == n })?.value }
+        let d = UserDefaults.standard
+
+        if path.hasPrefix("/set"), let k = val("key"), let v = val("value"),
+           k.hasPrefix("pxSharp") || k == "bitrate" {
+            if k == "bitrate" {
+                // Stream-Bitrate in kbit/s (0 = automatisch). Wirkt beim naechsten
+                // Verbinden. Wichtig: 1080p H.265 laeuft "automatisch" nur mit
+                // 12000 kbit/s — das ist der Deckel, den man hier anheben kann.
+                var p = StreamPreferences.load()
+                p.bitrate = max(0, min(50000, Int(v) ?? 0))
+                p.save()
+                return "{\"ok\":true,\"bitrate\":\(p.effectiveBitrate),\"pref\":\(p.bitrate)}"
+            }
+            if v == "true" || v == "false" { d.set(v == "true", forKey: k) }
+            else if let i = Int(v) { d.set(i, forKey: k) }
+            else if let f = Double(v) { d.set(f, forKey: k) }
+            else { d.set(v, forKey: k) }
+            return "{\"ok\":true,\"key\":\"\(k)\"}"
+        }
+        if path.hasPrefix("/freeze") {
+            let on = val("on") == "1"
+            PXProbe.shared.freeze(on)
+            return "{\"ok\":true,\"frozen\":\(on)}"
+        }
+        if path.hasPrefix("/probe") {
+            return PXProbe.shared.probe()
+        }
+        if path.hasPrefix("/shot") {
+            // Aktuelles Bild als JPEG (base64). ?w=2732 liefert volle Panelbreite
+            // fuer 1:1-Ausschnitte. ?fmt=png liefert verlustfrei (fuer Messungen).
+            let w = Int(val("w") ?? "") ?? 1200
+            let width = min(max(w, 200), 2732)
+            if val("fmt") == "png" {
+                return PXProbe.shared.shotPNG(maxW: min(width, 1920))
+            }
+            return PXProbe.shared.shotJPEG(maxW: width)
+        }
+        if path.hasPrefix("/state") {
+            var o: [String: Any] = [:]
+            for (k, v) in d.dictionaryRepresentation() where k.hasPrefix("pxSharp") { o[k] = "\(v)" }
+            o["_bundle"] = Bundle.main.bundleIdentifier ?? "?"
+            o["_version"] = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+            // Szenenanalyse sichtbar machen (Automatik nachvollziehen)
+            o["pxAutoGain"] = String(format: "%.3f", PXScene.shared.gain)
+            o["pxAutoNoise"] = String(format: "%.3f", PXScene.shared.noise)
+            o["pxSceneMedian"] = String(format: "%.3f", PXScene.shared.mean)
+            o["pxSceneP90"] = String(format: "%.3f", PXScene.shared.p90)
+            o["pxRenderMs"] = String(format: "%.2f", PXScene.shared.renderMs)
+            o["pxScreenBrightness"] = String(format: "%.2f", Double(UIScreen.main.brightness))
+            o["pxPerfLevel"] = String(PXScene.shared.perfLevel)
+            // Angeforderte Bitrate sichtbar machen: 0 = automatisch (1080p H.265
+            // = 12000 kbit/s). Genau dieser Automatikwert war der Deckel.
+            let prefs = StreamPreferences.load()
+            o["pxBitratePref"] = String(prefs.bitrate)
+            o["pxRequestedBitrate"] = String(prefs.effectiveBitrate)
+            // Thermischer Zustand des iPads: nominal / fair / serious / critical.
+            // Damit laesst sich belegen, ob Einbrueche von der Waerme kommen.
+            switch ProcessInfo.processInfo.thermalState {
+            case .nominal: o["pxThermal"] = "nominal"
+            case .fair: o["pxThermal"] = "fair"
+            case .serious: o["pxThermal"] = "serious"
+            case .critical: o["pxThermal"] = "critical"
+            @unknown default: o["pxThermal"] = "?"
+            }
+            o["pxLowPower"] = ProcessInfo.processInfo.isLowPowerModeEnabled ? "1" : "0"
+            o["pxBitrateFactor"] = String(format: "%.2f", min(max((PXScene.shared.streamMbps - 7.0) / 15.0, 0.0), 1.0))
+            o["pxSceneDark"] = String(format: "%.3f", PXScene.shared.darkFrac)
+            if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) {
+                return String(data: data, encoding: .utf8) ?? "{}"
+            }
+        }
+        return "{\"ok\":false}"
+    }
+}
+SWIFT_SOURCE_EOF
+
+# --- Icon -----------------------------------------------------------------
+python3 - <<'ICON_EOF'
+import base64
+data = "iVBORw0KGgoAAAANSUhEUgAABAAAAAQACAIAAADwf7zUAAAopElEQVR42u3c669lZWHH8ed51lr73DlzYVBUFAUVpEEh2oAXpLRpUgbaprXv2tgKxJrYS6J/hImhMTWpWiQpfVGjYagmtKl9U2raCh2kDb3ERlBIQLHjXM6cfc7Z++y1nqcvZjBeABmka68zfj7xpSSTZ++z1u+7b3FheT0AAAA/G5IjAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAEAAAAIAAAAIC9r3YEnFFKcQh7RYwhhOgcALcPzvH24d6BAOAHnwp14xD2yPU75JxLzk4CGMKgrCpbYs/IuRNsCABCCKGUUtfN5Ve9ta4b14U98WB996knv/PUE3Xj8QLmOf27tl1b3//6N/9czq23JYd/A0mp/tb//Ofmxsmqrt0+BACcfQdAAOyNAGiamCpHAQwkA+q6yTkKgD0RAD4ChADgR5flGY5i+A9TCB4mYGjXJfbAA+UUCH4FCAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAAAgAAADi/1Y6An1IpxSH0edqllBCcOTC06xK9ijE6BAQA85FSSqkq9miPN9qmGaVUOQpgIDO0aUZdjiHYo32deYi55Nx1jgIBwHzW/+bGqc2Nk6lKEqCnAAglpWq8cTIln98D5r1EU5pOJ08/+VgpWQD0Nv9LzguLS/svfGUp2XkgAOj7peiY0ubGyaee+EbTjLz/23MDpJScOTDnu0CM08nOU08+Fq3/Ht9yadvZvv0XHjh0cSlFdyEACHN5E6BpRnXTGKP93neDrwEAw/kIkHPo88BjjFVtvyEAGMDXvwQAgJ+CwLeuCX4GFAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAM6qHQFnlGed0/8/hOLoAGAud+1z/S+cGwKAH34qNE1dj0rJL/5C0jSjlCpHBwB9ijE2zajLMYT44gOgSk2M0ekhADh7HSklP/PUkymlF/+CfgklpWq8cTIlHyQDgL7u2ilNp5Onn3yslHxOARBjmk4n0V2bEOLC8rpTIITQtW0I5VwuJWcbQAAAQOj38z9d18Zwbi/nl1CqqvYmAME7APzgR4Be0jUo+BoAAITePwL00srB6SEAcFEAAHdtgp8BBQAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAAAAgAAABAAAADAnlI7As5rMVQqd666bk/8M1NKMUYP17zknEspe+Oa4nkyP3vlSQICAOZ5ow5dm7fH3umaX37FuLJ25r498H/qznjD4zXPW9HCctM0OefBh0pXSolBA8xj/YeQUkypkgHwMtygF5bXnQLn5/pv27S+f/SO68t4HFIK7tl936xDyHn64FdCiiHVoeTBvqZYVdUNN9yQc5dz8fpu/+dfV+nhrz1y8sT3FpdWugG/ZVRKWV5dq+sm504D9H9BiSnuTnYm29tVXWsACN4BgOdWVXnr9PLh31q74335WAiVBOhXDnEpbN51z4mP3hZXVkNMw2yAqqp2J9tXXHHFJ+782Nmd4bHrediF8NWHHr71lltPnjq1uLQ81AaIoeQU06VvuqqqqpyzBuj5mRJjnM1m3/z6o+PNjbpuNAB4BwCe+02A0nVlMj748bvXbv+97tg01o1T6fkDE+lQvfnZe0585La4shrCQBsgpbQzPvmBOz5012f+bGtnWkpMybYLPX5PJK+vLjx49JHDNx8+NeAGiDG2s9nK2gWXXfnWsw0QYyhFCPRz/KWUVFVd22oAEADwwk/wFEIuW+MDd969dvv787E21N716lfb7okGqOt66/Tx2z/44bs+/cmtyayEmHwWqEeztl1fWXjo6CM3D78B2tnq6vobrry6qqvcZZ8ZC/1+CksDwMuiqptFp8D5/PmCmOKo2bn/3urQ6xbfc20ZtyH5TnDo89X1Mm4X33Ntdeh1O/ffG0dNiOnsNwTCsH6FZnFp9aF/+cennzn+m79+y6zt/N5Lr7eilLans8suveTGX7jpyJH7xuPN0WhhmNuuqqrJZHtrc2PfgYuqui5ZA/QaYCXnqq73HTi0tbkxmWxXVeVYQACABtAAGkAD9NYAhzSABgABABoADYAGQAOAAAANgAZAA6ABQACABtAAGgANgAYAAQAaQANoAA2gAdAAIABAA2gADaABNAAaAAQAaAANoAE0gAbQABoABABoAA2gATSABtAAgAAADaABNIAG0AAaAASAU0ADaAANoAE0gAbQACAAQAOgATSABtAAGgAEAGgANIAG0AAaQAOAAAANgAZAA2gADQACADQAGgANoAE0AAgA0ABoADQAGgAEAGgADaAB0ABoABAAoAE0gAZAA6ABQACABtAAGkADaAA0AAgA0AAaQANoAA2ABgABABpAA2gADaABNIAGAAEAGkADaAANoAE0AAgAQANoAA2gATSABgABABpAA2gADaABNIAGAAEAGgANoAE0gAbQACAAQAOgATSABtAAGgAEAGgANAAaQANoABAAoAHQAGgADaABQACABkADoAHQACAAQANoAA2ABkADgAAADaABNAAaAA0AAgA0gAbQABpAA6ABQACABtAAGkADaAA0AAIA0AAaQANoAA2gATQAAgDQABpAA2gADaABQAAAGkADaAANoAE0AAgA0AAaQANoAA2gATQACADQAGgADaABNIAGAAEAGgANoAE0gAbQACAAQAOgAdAAGkADgAAADYAGQAN4nmgAEACgAdAAaAA0AAgA0AAaQAOgAdAAIABAA2gADYAGQAMgAAANoAE0gAbQAGgABACgATSABtAAGgANgAAANIAG0AAaQANoAA2AAAA0gAbQABpAA2gAEACABtAAGkADaAANAAIANIAG0AAaQANoAA0AAgA0ABpAA2gADaABQACABkADaAANoAE0AAgA0ABoADSABtAAIABAA6AB0ACeJxoABABoADQAGgANgAAANIAG0ABoADQAAgDQABpAA6AB0AAIAEADaAANoAE0ABoAAQBoAA2gATSABkADIAAADaABNIAG0AAaQAMgAAANoAE0gAbQABoABACgATSABtAAGkADgAAADaABNIAG0AAaQAOAAAANgAbQABpAA2gAEACgAdAAtp0G0AAaAAQAaAA0ABpAA2gABIAAAA2ABkADoAEQAIAGQAOgAdAACABAA2gADYAGQAMgAAANoAE0ABoADYAAADSABtAAGkADoAEQAIAG0AAaQANoADQAAgDQABpAA2gADaABNAACANAAGkADaAANoAFAAAAaQANoAA2gATQACADQABpAA2gADaABNAAIANAAaAANoAE0gAYAAQAaAA1g22kADaABEACABkADoAE0gAZAAAAaAA2ABkADIAAADYAGQAOgARAAgAbQAGcbYIiDSQNoAA2gARAAwHnZAJcuvvsaDTDPBvibe+NoIYQ90AC7szaEaNv13wDv/YWb7jty3/b2Vl2P9kADVFUpxfNkPg1wemM62UkaAAEAvEADbN//hfpVb15459Vlsw2VBui9AW64ttr32u2//XxcXA6DHHbfb4Bnjp36jV87PN1tk1bsvQEuv/SS99540+c+91ftbFZV9XAbYGd7a3Nj/6FXxpQ0wDwaoNp/4UWnT53YnU40AAIAeJ4GSCmkavLAlxev++Xmja8uYw0wjwZ497Xdd09P//Uf4tJqyHmYDbCwuPLgPz9w0cWvfff1b9+ZzjRA3w0w2b389Zdc/OpL7rv383WzEAf5vZEQQlXVk52tdjbbf/DQMIP2fG+AUtXNytr6qePHctf5O0UAAM+ZACVWTdmdbN9/7+J1v6gB5nLTLpNu+ZZfyc+cmB59YLANEEJoFha/dN+Ri1/z2nddpwHm8OL6znR23Tuuufg1r/vikXvrUTPUBihVVW+d3mhnu/sOHioaoPcGyDmPFhfX1vedOqEBEADACzRAMyrbm9v3H9EAc7ljhxDDLC//6uH8nYE3QKxHoy8euVcDhPm8XZR2prN3Xff2i1/z2mE3QKiqanz6ZDubaYB5NcDi4vLqBRoAAQC8cAOMFjTAPBsg740GiDHVo0YDaIAX81kgDTDXBugWlzQAAgDQABrg5XiiaAANoAE0AAIA0ABoAM8TDaABNAACANAAaAA0gAbQAAgAQAOgAdAAaAAEAKAB0ABoADQAAgDQABpAA6AB0AAIAEADaAANgAZAAyAAAA2gATSABtAAaAAEAKABNIAG0AAaAA2AAAA0gAbQABpAA2gAf6cIAEADaAANoAE0gAZAAAgAQANoAA2gATSABkAAABpAA2gADaABNIAGQAAAGgANoAE0gAbQAAgAQAOgAdAAGkADIAAADYAGQANoAA2AAAA0ABoADYAGQAAAGgANgAZAAyAAAA2gATQAGgANgAAANIAG0ABoADQAAgDQABpAA2gADYAGQAAAGkADaAANoAHQAAgAQANoAA2gATSABvB3KgAANIAG0AAaQANoAAQAoAE0gAbQABpAA2gABACgAdwzNIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAaAANoAEQAIAGQAOgATSABkAAABoADYAGQAMgAAANgAZAA6ABEACABtAAGgANgAZAAAAaQANoADQAGgABAGgADaABNIAGQAMIAAANoAE0gAbQAK4oGkAAAGgADaABNIAG0AAIAAANoAE0gAbQABoAAQBoAA2gATSABtAAGgABAGgANIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAaAANoAEQAIAGQAOgATSABkAAABoADYAGQAMgAAANgAZAA6ABEACABtAAGgANgAYQAAAaQANoADQAGkAAAGgADaABNIAGQAMIAAANoAE0gAbQABpAAwgAAA2gATSABtAAGgABAKABNIAG0AAaQAMgAAANoAE0gAbQABpAAyAAAA2ABtAAGkADaAAEAKAB0AAaQANoAA2AAAA0ABoADaABNAACANAAaAA0gAbQAAgAQAOgAdAAaAABAKAB0ABoADSAAADQABpAA6AB0AACAEADaAANoAE0ABpAAABoAA2gATSABkADCAAADaABNIAG0AAaQAMIAAANoAE0gAbQABoAAQCgATSABtAAGkADIAAADaABNIAG0AAaQAMgAAANgAbQABpAA2gABACgAdAAGkADaAANgAAANAAaAA2gATQAAgDQAGgANIAG0AACAEADoAHQAGgAAQCgAdyxNQAaAA0gAAA0gAbQAGgANIAAANAAGkADaAANgAYQAAAaQANoAA2gAdAAAgBAA2gADaABNIAG0AACAEADaAANoAE0gAZAAABoAA2gATSABtAACABAA2gADaABNIAG0AAIAEADoAE0gAbQABoAAQBoADSABtAAGkADCAAADYAGQANoAA0gAAA0ABoADaABNIAAABh6A1z/S82bX1W2ckjRwcylASZHH0gLy2GIs+lHG2A662L0PJlXA3whVlVK1UAH07MNsP/gRcOslJ+JBljfd/L4sa7rogYQAADP2wA74+37j4ze8vbmskvDrATbrs8GKDHM8vIth8vmdHr0n2IzGnIDfOmv71vbd+Cd1/1822UNMJcGuPSyN/39l/+uy2Ww519V9fj0qd3dyQX7Dnrg5tIAC4tLa+v7xxsnu7b1d/pT/d05AuC8lXNcWOqOf6f91rdCHYM37vtvgFmOS2F05dVDPvxScl2PSp49+uh/RK/szuchCCGEt73tbYuLi2WInxb7oWf1ztY45xyMz7k8VXJeXFqumyaUIgAEAMCP36dTCKVsbhz8k79c++DvltM5VJVT6VXbplc0m5+553t/9NtxtDDYBqjrerxx7I7f/4O/uPvTu51V0bdZ266vLjx49JGbbrzxxImTVV0P80P2Mca2na2uXfDGq66p6loq9l6JJVVV13Xf+K9/H29upKryZQwBAPDj6z+XrfGBO+9eu+138v/6EvA81v+hevOue0589La0vBZiGmYA1HW9dfr47R/88J9/6k+3J20pQQD0vf5XFh46+sjhmw9vnD69sLScB/kOwLPrf/0NV1ydqip3ncduDuu/bb/59Ue3xht13Vj/AgDg+df/7e/Px9pQ105lDuv/s/ec+MhtcWV1+Ov/rk9/cmsyK8H6n8/6v/nmw6dOnVpcWh7msP7B9V/Vde58U3xu63+8af0LAADrf/jrP6RQ8vDXfwjRqpvv+u+sf6x/AQBg/Vv/1r/1b/1b/9a/AACw/q1/69/6t/6tfwQAYP1b/9a/9W/9W//WPwIAsP6x/q1/69/6t/4RAID1j/Vv/Vv/1r/1LwAArH+sf6x/69/6FwAA1j/WP9Y/1r8AALD+rX/rH+sf618AAFj/1r/1j/WP9S8AAKx/69/6t/6tf6x/AQBg/Vv/1r/1b/1b/9a/AACw/q1/69/6t/6tfwQAYP1b/9a/9W/9W//WPwIAsP6x/q1/69/6t/4RAID1j/Vv1Vn/1r/1jwAArH+sf6x/69/6FwAA1j/WP9Y/1r8AALD+rX/rH+sf618AAFj/1r/1j/WP9S8AAKx/69/6t/6tf6x/AQBg/Vv/1r/1b/1b/9a/AACw/q1/69/6t/6tfwQAYP1b/9a/9W/9W//WPwIAsP6x/q1/69/6t/4RAID1j/Xv0bP+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/rH8B4AgA69/6t/6x/rH+BQCA9W/9W/9Y/1j/AgDA+rf+rX/r3/rH+hcAANa/9W/9W//Wv/Vv/QsAAOvf+rf+rX/r3/pHAADWv/Vv/Vv/1r/1b/0jAADrH+vf+rf+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/69/6RwAA1j/WP9Y/1j8CALD+rX/rH+sf6x8BAFj/1r/1b/1b/1j/AgDA+rf+rX/r3/rH+hcAANa/9W/9W//Wv/Vv/QsAAOvf+rf+rX/r3/pHAADWv/Vv/Vv/1r/1b/0jAADrH+vf+rf+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/69/6RwAA1j/WP9Y/1j8CALD+rX/rH+sf6x8BAFj/1r/1b/1b/1j/CADA+rf+rX/r3/rH+hcAANa/9W/9W//Wv/Vv/QsAAOvf+rf+rX/r3/pHAADWv/Vv/Vv/1r/1b/0jAADrH+vf+rf+rX/rHwEAWP9Y/1j/1r/1jwAArH+sf6x/69/6RwAA1j/WP9Y/1j8CALD+rX/rH+sf6x8BAFj/1r/1b/1b/1j/CADA+rf+rX/r3/rH+kcAANa/9W/9W//Wv/XvWAQAgPVv/Vv/1r/1b/0jAADr3/q3/q1/69/6t/4RAID1j/Vv/Vv/1r/1jwAArH+sf6x/69/6RwAA1j/WP9a/54n1jwAArH+sf6x/rH8EAGD9W//WP9Y/1j8CALD+rX/r3/q3/rH+EQCA9W/9W//Wv/WP9Y8AAKx/69/6t/6tf+sfBABg/Vv/1r/1b/1b/wgAwPq3/q1/69/6t/6tfwQAYP1j/Vv/1r/1b/0jAADrH+sf69/6t/4RAID1j/WP9e/hs/4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/rH+EQCA9W/9W//Wv/Vv/YMAAKx/69/6t/6tf+sfBABY/9a/9W/9W//Wv/UPAgCsf6x/69/6t/6tfwQAYP1j/WP9W//WPwIAsP6x/rH+sf4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CADA+rf+rX/r3/q3/kEAgPWP9W/9W//Wv/UPAgCsf6x/69/6t/6tfxAAYP1j/WP9W//WPwIAsP6x/rH+sf4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CADA+rf+rX/r3/q3/kEAgPWP9W/9W//Wv/UPAgCsf6x/69/6t/6tfxAAYP1j/WP9W//WPwgAsP6x/rH+sf4RAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CADA+rf+rX/r3/q3/kEAgPWP9W/9W//Wv/UPAgCsf6x/69/6t/6tfxAAYP1j/WP9W//WPwgAsP6x/rH+sf5BAID1j/WP9Y/1jwAArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+rf+rX/r3/oHAQDWP9Y/1r/1b/2DAADrH+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/rH+sf6RwAA1r/1b/1b/9Y/1j8CALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+rf+rX/r3/oHAQDWP9Y/1r/1b/2DAADrH+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/rH+sf6BwEA1r/1b/1b/9Y/1j8IALD+rX/r3/q3/q1/6x8BAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+rfqrH/r3/oHAQDWP9Y/1r/1b/2DAADrH+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/rH+sf6BwEA1r/1b/1b/9Y/1j8IALD+rX/r3/q3/q1/6x8EAFj/1r/1b/1b/9Y/CACw/q1/69/6t/6tf+sfBABY/1j/1r/1b/1b/yAAwPrH+vfoWf/Wv/UPAgCsf6x/rH/r3/oHAQDWP9Y/1j/WPwgAsP6tf+sf6x/rHwQAWP/Wv/WP9Y/1DwIArH/r3/q3/q1/rH8QAGD9W//Wv/Vv/Vv/1j8IALD+rX/r3/q3/q1/QABg/Vv/1r/1b/1b/9Y/CACw/rH+rX/r3/q3/kEAgPWP9Y/1b/1b/yAAwPrH+sf6t/6tfxAAYP1j/WP9Y/2DAADr3/rfS+u/WP/W/wus/9Uz67+y/q1/2KOMIc7j9R9L15bJ+ODH7177wPu7705j3YScHUx/ct4T6z+ltHX6+Afu+NBnPvXJze1pKTGlkA2LvnRdXl9dePDoI4eHv/5ns5W1C95w5dVVVeUuxxhDKUEC9HL81j+8nH9RC8vrToHzcv2fuTEf+Phn1+54Xz4WQhXcp/td/yEuhc277jnx0aGv/93J9of/8I8/cefHQgjF06RfZw78qw89fOstt54c8PoPIZbcrV6w7+z6zzl6pvT7TIkxzmYz6x8EALxgALRtWt8/esf1ZTwOKdl1ve+6EHKePviVkGJI9TDX/5kPFVRVdcMNN+Tc5Vx8oqP/86+r9PDXHjl54nuLSytDXf9n/6nLq2t13eTcWf9zCMUUdyc7k+3tqq6tfxAA8PwN0LV5MvZdl7k9AiHGlbUz02ng/9Tp9qbHa47qheWmafLgP6GXc1dKsf7n1QApxZQq6x8EAPykCVpZ/2G+n+/eE//MlJLX/uc6rPNeWXWeJ/N9E8YhQPAlYPjJrxntkQHK3AeoQ8AGBYKfAQUAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAABAAAAAAAIAAAAQAAAAwN5QOwLOiDG+hP+qlOLoAMBdGwHA3tO17TlfR0JIKcbofSQA6E8ppeu6+FLu2umllQMCgHBevpCwtm9/jDGUc7iOxBh3p5PpZMfVBAB6W/913SytrIZzfTk/xp2tcdvO3LURAIRSSlXVr3/TVXU9evFvDpZS6lHz7Scef/rJx+um8a4iAIT//xfsctctr6xe/pZrcm5DePFTvqRUP/bf/7Zx8niqa3dtAQAhhJBzl3N7TgGQ2+gKAgCh91fuctfmcm4BEIrvACAA+LGXFc7lOnL2hQinBgBzeS8glHO8cbtrE/wMKAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAAAeAIAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAADoU+0I+CnFGGOMzqFPpRSHAAznLuAQer/nOnMEAPNcorlt2xijSdrfmYeQUozR23fAIF6P6LrOGu0zANq2zblzFAgA5nbdX1hcWt9/sKrrIAD6Wv8xxt3pZDrZ8aobMPe7QF03SyurbgF9FkDuuuXVNa+7IQCYz4sQuev2X/iKAxddHFyF+rzdjppvP/H4008+XjeNGwAw37vA8srq5W+5JufWh1L6fTGolJydOQKAue3R0rYuQX0eeG594AoY0kWpa3MRAH2/F+wYEACE+b4K5AwcOPAzfVEqvpba54E7AoKfAQUAAAQAAAAgAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAB4brUj4Fnl2f8x7IepeIyAQV2W3DvcPhAA7E0pVSnVxdVh6PfZkuo6xugogCGIMaaqDjmE4Lo09BtISm4fPPuXu7C87hSIMS6vrsUYvYgz/LdpYoy708l0suM6Dsz9JYm6bpZWVr20vFdu9jtb47aduX0gADgrd51D2CsNkFKM0Rd4gEE0QM7ZnNw7t49k/RN8BIjvq2pPhr10x3UIQBjGG8i124fbBwIAFwUA3D6A4GdAAQAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAIAAAAAABAAAACAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAIAAAAAABAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAEAAAAAAAgAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAACAAAAAAAQAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAAIAAAAAABAAAACAAAABAAAACAAAAAAAQAAAAgAAAAAAEAAAAIAAAAQAAAAAACAAAAEAAAAIAAAAAABAAAAAgAAABAAAAAAAIAAAAQAAAAgAAAAAAEAAAA0Lf/Ayehbpa0f6QCAAAAAElFTkSuQmCC"
+open("ios/Pylux/Assets.xcassets/AppIcon.appiconset/AppIcon.png", "wb").write(base64.b64decode(data))
+open("ios/Pylux/Assets.xcassets/PyluxLogo.imageset/pylux-logo.png", "wb").write(base64.b64decode(data))
+print("icon bytes", len(base64.b64decode(data)))
+ICON_EOF
+
+# --- Bundle-ID / Name / Entitlements --------------------------------------
+sed -i '' 's/PRODUCT_BUNDLE_IDENTIFIER = com\.pylux\.stream;/PRODUCT_BUNDLE_IDENTIFIER = com.pylux.stream.sharp;/g' \
+  ios/Pylux.xcodeproj/project.pbxproj
+/usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string PXSharp" ios/Pylux/Info.plist \
+  || /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName PXSharp" ios/Pylux/Info.plist
+cat > ios/Pylux/Pylux.entitlements <<'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+</dict>
+</plist>
+PLIST_EOF
+
+# --- Schärfe-Slider in die Video-Einstellungen ----------------------------
+cat > /tmp/SharpnessRow.swift <<'ROW_EOF'
+struct SharpnessRow: View {
+    var onMaxQuality: () -> Void = {}
+    var onStableLink: () -> Void = {}
+
+    @AppStorage("pxSharpLevel") private var level: Double = 1.0
+    @AppStorage("pxSharpClarity") private var clarity: Double = 0.0
+    @AppStorage("pxSharpDetail") private var detail: Double = 0.55
+    @AppStorage("pxSharpDenoise") private var denoise: Double = 0.06
+    @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
+    @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
+    @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
+    @AppStorage("pxSharpTemp") private var temp: Double = 0.5
+    @AppStorage("pxSharpGamma") private var gamma: Double = 1.0
+    @AppStorage("pxSharpBlack") private var black: Double = 0.0
+    @AppStorage("pxSharpRange") private var rangeMode: Int = 0
+    @AppStorage("pxSharpDiag") private var diag: String = "—"
+    @AppStorage("pxSharpShowDiag") private var showDiag: Bool = true
+    @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 1600
+    @AppStorage("pxSharpPacing") private var pacing: Bool = true
+    @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
+    @AppStorage("pxSharpBypass") private var bypass: Bool = false
+    @AppStorage("pxSharpMaster") private var master: Double = 1.0
+    @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
+    @AppStorage("pxSharpWBNote") private var wbNote: String = ""
+    @AppStorage("pxSharpHlBalance") private var hlBalance: Bool = true
+    @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
+    @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
+    @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
+    @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.20
+    @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
+    @AppStorage("pxSharpUpScale") private var upscaleAmount: Double = 0.60
+    @AppStorage("pxSharpLocalTone") private var localTone: Double = 0.0
+    @AppStorage("pxSharpHueSat") private var hueSat: Double = 0.0
+    @AppStorage("pxSharpCastFix") private var castFix: Double = 0.0
+    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
+    @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
+    @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
+    @AppStorage("pxSharpWB_B") private var wbB: Double = 1.0
+    @AppStorage("pxSharpTunedV1") private var tunedV1: Bool = false
+    @AppStorage("pxSharpTunedV2") private var tunedV2: Bool = false
+    @AppStorage("pxSharpHdrOff") private var hdrOff: Bool = false
+    @AppStorage("pxSharpDeblock") private var deblock: Double = 0.14
+    @AppStorage("pxSharpGammaR") private var gammaR: Double = 1.0
+    @AppStorage("pxSharpGammaG") private var gammaG: Double = 1.0
+    @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
+    @AppStorage("pxSharpMode") private var mode: Int = 11
+    @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.20
+    @AppStorage("pxSharpToneMap") private var toneMap: Int = 0
+    @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
+    @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.0
+    @AppStorage("pxSharpDeband") private var deband: Double = 0.30
+    @AppStorage("pxSharpBrightness") private var brightness: Double = 0.50
+    @AppStorage("pxSharpLumaSharpen") private var lumaSharpen: Bool = true
+    @AppStorage("pxSharpGamut") private var gamut: Int = 0
+    @AppStorage("pxSharpColorEngine") private var colorEngine: Bool = true
+    @AppStorage("pxSharpAuto") private var auto: Bool = false
+    @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
+    @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
+    @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
+    @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
+    @AppStorage("pxSharpCoring") private var coring: Double = 0.03
+    @AppStorage("pxSharpHalo") private var halo: Double = 0.12
+    @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
+    @AppStorage("pxSharpScaler") private var scaler: Int = 0
+    @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
+    @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
+    @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
+    @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
+    @AppStorage("pxAudioEQ2") private var eq2: Double = 0.0
+    @AppStorage("pxAudioEQ3") private var eq3: Double = 0.5
+    @AppStorage("pxAudioEQ4") private var eq4: Double = 0.0
+    @AppStorage("pxAudioPreset") private var audioPreset: Int = 0
+    @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
+    @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
+    @AppStorage("pxRenderMs") private var liveRender: String = "—"
+    @AppStorage("pxPerfLevel") private var perfLevel: String = "0"
+    @AppStorage("pxSharpDiag") private var liveDiag: String = "—"
+
+    // MARK: - Bildmodi
+
+    /// Die Presets sind aus Messreihen abgeleitet (eingefrorenes Bild, 2732x2048).
+    /// Jeder Regler wurde in Stufen gemessen: Kantenschärfe, Rauschen, Clipping,
+    /// zugelaufene Schwärzen, Farbton. Die Werte sind das Optimum aus Schärfe
+    /// pro Artefakt — nicht "Regler auf Anschlag".
+    private func applyMode(_ m: Int) {
+        colorEngine = true
+        lumaSharpen = true
+        gamut = 0
+        // Neutrale Grundlage. Jeder Modus überschreibt nur, was er wirklich braucht.
+        // Vorher standen hier auto = true, shadow = 0.35, tvBrightness = true,
+        // deconv = 0.95, chroma = 0.50 und halo = 0.45 — das war die Ursache für
+        // die künstliche Optik: Schatten angehoben, SDR abgedunkelt, Details
+        // rekonstruiert, Farbe aufgedreht und Halos zugelassen.
+        auto = false
+        autoStrength = 0.65
+        shadow = 0.0
+        tvBrightness = false
+        chroma = 0.0
+        coring = 0.02
+        deconv = 0.0
+        localTone = 0.0
+        texDepth = 0.0
+        hueSat = 0.0
+        castFix = 0.0
+        scaler = 0
+        easuAmt = 0.60
+        halo = 0.10
+        vibrance = 0.0
+        wbR = 1.00; wbG = 1.00; wbB = 1.00
+        gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        switch m {
+        case 0: // Kino / Filmmaker (D65, BT.1886) - Referenz, kaum Eingriff
+            level = 0.35; detail = 0.15; clarity = 0.08
+            deblock = 0.30; denoise = 0.20; vibrance = 0.12
+            saturation = 0.52; contrast = 0.48; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 600
+            clearImage = 0.00; localDim = 0.15; toneMap = 0; deband = 0.35
+            brightness = 0.48; shadow = 0.20
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 1: // Sony BRAVIA 7 II (XR Clear Image, Contrast Booster)
+            level = 0.95; detail = 0.85; clarity = 0.26
+            deblock = 0.35; denoise = 0.20; vibrance = 0.30
+            saturation = 0.58; contrast = 0.50; temp = 0.475
+            gamma = 1.00; black = 0.0; hdrPeak = 800
+            clearImage = 0.85; toneMap = 1; localDim = 0.30; deband = 0.30
+            brightness = 0.45; shadow = 0.35; chroma = 0.55
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 2: // Sony Vivid / Live Colour
+            gamut = 1
+            level = 1.00; detail = 0.90; clarity = 0.30
+            deblock = 0.28; denoise = 0.10; vibrance = 0.62
+            saturation = 0.66; contrast = 0.54; temp = 0.545
+            gamma = 1.00; black = 0.0; hdrPeak = 900
+            clearImage = 0.88; toneMap = 2; localDim = 0.40; deband = 0.30
+            brightness = 0.50; shadow = 0.40; chroma = 0.65
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 3: // LG QNED93 (Precision Dimming, QNED Color Pro)
+            gamut = 0
+            level = 0.28; detail = 0.10; clarity = 0.0
+            deblock = 0.14; denoise = 0.06; vibrance = 0.0
+            saturation = 0.50; contrast = 0.50; temp = 0.500
+            gamma = 1.00; black = 0.0; hdrPeak = 850
+            clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.10
+            brightness = 0.50; shadow = 0.0; chroma = 0.0; coring = 0.02
+            deconv = 0.0
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 9: // Natürlich / kalibriert — Standardmodus
+            gamut = 0
+            level = 1.0; detail = 0.55; clarity = 0.0
+            deblock = 0.14; denoise = 0.06; vibrance = 0.0
+            saturation = 0.50; contrast = 0.50; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 600
+            clearImage = 0.20; toneMap = 0; localDim = 0.0; deband = 0.30
+            brightness = 0.50; shadow = 0.12; chroma = 0.30; coring = 0.03
+            deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 11: // OLED Referenz (W-OLED, BT.709, D65)
+            gamut = 0
+            level = 1.0; detail = 0.90; clarity = 0.35
+            deblock = 0.14; denoise = 0.06; vibrance = 0.0
+            saturation = 0.50; contrast = 0.50; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 1000
+            clearImage = 0.25; toneMap = 0; localDim = 0.0; deband = 0.30
+            brightness = 0.50; shadow = 0.10; chroma = 0.55; coring = 0.20
+            deconv = 0.35; scaler = 0; easuAmt = 0.6; halo = 0.18; texDepth = 0.50
+        case 12: // QD-OLED (RGB-Tandem, DCI-P3, 2500 Nits)
+            gamut = 1
+            level = 1.0; detail = 0.95; clarity = 0.40
+            deblock = 0.14; denoise = 0.06; vibrance = 0.0
+            saturation = 0.50; contrast = 0.50; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 2500
+            clearImage = 0.30; toneMap = 0; localDim = 0.0; deband = 0.30
+            brightness = 0.50; shadow = 0.14; chroma = 0.60; coring = 0.18
+            deconv = 0.40; scaler = 0; easuAmt = 0.6; halo = 0.20; texDepth = 0.55
+        case 10: // TV-Max: alles, was messbar gewinnt — ohne erfundene Details
+            gamut = 1
+            level = 1.0; detail = 0.55; clarity = 0.0
+            deblock = 0.14; denoise = 0.06; vibrance = 0.04
+            saturation = 0.52; contrast = 0.50; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 900
+            clearImage = 0.20; toneMap = 0; localDim = 0.0; deband = 0.30
+            brightness = 0.50; shadow = 0.14; chroma = 0.30; coring = 0.03
+            deconv = 0.0; scaler = 0; easuAmt = 0.6; halo = 0.12; texDepth = 0.20
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 8: // Referenz: reiner Durchlauf, keine Nachbearbeitung
+            gamut = 0
+            level = 0.0; detail = 0.0; clarity = 0.0
+            deblock = 0.0; denoise = 0.0; vibrance = 0.0
+            saturation = 0.50; contrast = 0.50; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 600
+            clearImage = 0.0; toneMap = 0; localDim = 0.0; deband = 0.0
+            brightness = 0.50; shadow = 0.0; chroma = 0.0; coring = 0.0
+            deconv = 0.0
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 4: // LG Vivid (Dynamic QNED Color Pro)
+            gamut = 1
+            level = 1.00; detail = 0.92; clarity = 0.30
+            deblock = 0.26; denoise = 0.08; vibrance = 0.65
+            saturation = 0.66; contrast = 0.54; temp = 0.555
+            gamma = 1.00; black = 0.0; hdrPeak = 950
+            clearImage = 0.88; toneMap = 2; localDim = 0.45; deband = 0.30
+            brightness = 0.50; shadow = 0.45; chroma = 0.65
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 6: // Game (scharf, Schatten lesbar, wenig Filter)
+            gamut = 0
+            level = 1.00; detail = 0.88; clarity = 0.26
+            deblock = 0.25; denoise = 0.08; vibrance = 0.30
+            saturation = 0.58; contrast = 0.50; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 600
+            clearImage = 0.82; toneMap = 0; localDim = 0.15; deband = 0.15
+            brightness = 0.47; shadow = 0.50; chroma = 0.62; coring = 0.60
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 7: // Realistisch / kalibriert (BT.709, D65, +4 % Sättigung)
+            gamut = 0
+            level = 0.80; detail = 0.70; clarity = 0.22
+            deblock = 0.35; denoise = 0.18; vibrance = 0.15
+            saturation = 0.52; contrast = 0.48; temp = 0.500
+            gamma = 1.00; black = 0.0; hdrPeak = 700
+            clearImage = 0.75; toneMap = 1; localDim = 0.10; deband = 0.25
+            brightness = 0.45; shadow = 0.25; chroma = 0.45
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        default: // Ultra (max. Detail)
+            level = 1.00; detail = 0.90; clarity = 0.30
+            deblock = 0.30; denoise = 0.12; vibrance = 0.25
+            saturation = 0.56; contrast = 0.48; temp = 0.50
+            gamma = 1.00; black = 0.0; hdrPeak = 600
+            clearImage = 0.90; toneMap = 0; localDim = 0.25; deband = 0.18
+            brightness = 0.45; shadow = 0.35; chroma = 0.60; coring = 0.60
+            wbR = 1.00; wbG = 1.00; wbB = 1.00
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        }
+        wbPreset = 3
+        pacing = true
+    }
+
+    private var modeTitle: String {
+        switch mode {
+        case 0: return "Kino / Filmmaker"
+        case 1: return "Sony BRAVIA 7 II"
+        case 2: return "Sony Vivid"
+        case 3: return "LG QNED93"
+        case 8: return "Referenz (unverfälscht)"
+        case 4: return "LG Vivid"
+        case 6: return "Game"
+        case 7: return "Realistisch"
+        case 9: return "Natürlich / kalibriert"
+        case 10: return "TV-Max"
+        case 11: return "OLED Referenz"
+        case 12: return "QD-OLED"
+        default: return "Ultra"
+        }
+    }
+
+    /// Was der gewählte Modus tut und wann man ihn nimmt. Das ist die einzige
+    /// Erklärung, die man im Alltag braucht.
+    private var modeInfo: String {
+        switch mode {
+        case 0:
+            return "Referenz: D65-Weißpunkt, kein Tone-Mapping, kleinste Schärfewerte. So sieht der Regisseur den Film. Nimm ihn für Filme und Serien im dunklen Raum."
+        case 1:
+            return "Sony-typisch: moderate Schärfung, XR-Clear-Image-Kurve, kräftige Mitten. Nimm ihn für Spiele und Streaming bei Tageslicht."
+        case 2:
+            return "Sony Live Colour: mehr Sättigung, nativer Farbraum, knackigere Kurve. Nimm ihn, wenn du es bunt magst — Farben bleiben trotzdem im Farbton."
+        case 3:
+            return "Der QNED93: Precision-Dimming-Kurve, QNED-Farbprofil, Clear Image. Nimm ihn als Standard für alles — das ist der Fernseher, den du nachbaust."
+        case 4:
+            return "LG Vivid: maximale Schärfe, nativer Farbraum, stärkstes Dimming. Nimm ihn für Sport und helle Räume."
+        case 6:
+            return "Minimal: kaum Schärfung, kein Tone-Mapping, kleinste Latenz. Nimm ihn für Shooter und Online-Spiele."
+        case 7:
+            return "Kalibriert: BT.709 (kein Nativ-Farbraum), D65, nur +4 % Sättigung, weiches Dimming. So sieht ein abgeglichener Fernseher im Cinema-Modus aus — wenn dir alles andere zu bunt ist, nimm den."
+        case 9:
+            return "Der Referenzpfad: BT.709, D65, Sättigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Eine Luma-Schärfung (CAS 0,65), halo-begrenzt, dazu Debanding 0,30 gegen die niedrige Bitrate. Gemessen: +5 % Schärfe, −13 % Banding gegenüber der reinen Quelle, ohne erfundene Details (Energie über der Quell-Nyquistfrequenz: 0,04 %)."
+        case 10:
+            return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % Sättigung, kein Clipping), Schattendurchzeichnung 0,14 (greift nur unter 34 % Bildhelligkeit), Debanding 0,30, CAS 0,65. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nächsten kommt — mehr Punch, aber keine erfundenen Details."
+        default:
+            return "Maximale Detail-Schärfung (Textur 2,7 px) bei neutraler Farbe. Nimm ihn, wenn du die PS5-Oberfläche oder Text scharf sehen willst."
+        }
+    }
+
+    /// Klangprofile wie bei einem Fernseher (Sony-Klangmodi).
+    private var mbpsValue: Double {
+        Double(streamMbps.replacingOccurrences(of: ",", with: ".")) ?? 0
+    }
+
+    private var linkVerdict: String {
+        let mb = mbpsValue
+        if mb <= 0 { return "unbekannt" }
+        if mb < 6 { return "sehr schwach — Bild wird weich" }
+        if mb < 12 { return "schwach — Filter aktiv" }
+        if mb < 20 { return "gut" }
+        return "sehr gut"
+    }
+
+    private var linkColor: Color {
+        let mb = mbpsValue
+        if mb <= 0 { return .secondary }
+        if mb < 6 { return .red }
+        if mb < 12 { return .orange }
+        if mb < 20 { return .yellow }
+        return .green
+    }
+
+    private func applyAudioPreset(_ p: Int) {
+        switch p {
+        case 0: // Standard (voller Bass)
+            eq0 = 3.0; eq1 = 1.5; eq2 = 0; eq3 = 0.5; eq4 = 0; audio3D = 0.0
+        case 1: // Sony Kino
+            eq0 = 3.5; eq1 = 1.5; eq2 = 0; eq3 = 2; eq4 = 1.5; audio3D = 0.20
+        case 2: // Sony Musik
+            eq0 = 4.0; eq1 = 0; eq2 = -1; eq3 = 1; eq4 = 3; audio3D = 0.45
+        case 3: // Sony Spiel
+            eq0 = 5.5; eq1 = 3.0; eq2 = 0; eq3 = 3; eq4 = 1; audio3D = 0.30
+        case 4: // Nacht
+            eq0 = 6.0; eq1 = 2.5; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
+        case 5: // Sony Bass Boost
+            eq0 = 9.0; eq1 = 5.0; eq2 = 0; eq3 = 2.0; eq4 = 1.0; audio3D = 0.20
+        case 6: // Dolby Atmos (weite Bühne)
+            eq0 = 3.0; eq1 = 1.0; eq2 = 0; eq3 = 4.0; eq4 = 2.0; audio3D = 0.70
+        case 7: // Bose (warm, bassbetont)
+            eq0 = 6.5; eq1 = 5.5; eq2 = -1.0; eq3 = 1.0; eq4 = 2.5; audio3D = 0.35
+        case 8: // Sony WH-1000XM4 (starker Bass, weite Buehne)
+            eq0 = 15.0; eq1 = 11.0; eq2 = 1.0; eq3 = 2.0; eq4 = 3.5; audio3D = 0.55
+        case 9: // Sony WH-1000XM4 maximal (mit Subbass)
+            eq0 = 18.0; eq1 = 14.0; eq2 = 2.0; eq3 = 2.5; eq4 = 4.0; audio3D = 0.70
+        default: break
+        }
+    }
+
+    private func applyWB(_ p: Int) {
+        switch p {
+        case 0: // Neutral / D65
+            wbR = 1.000; wbG = 1.000; wbB = 1.000
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 1: // Warm (Kino / Sony Standard)
+            wbR = 1.020; wbG = 1.000; wbB = 0.980
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        case 2: // Kühl (LG / Vivid)
+            wbR = 0.985; wbG = 1.000; wbB = 1.030
+            gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
+        default: break
+        }
+    }
+
+    private func resetAll() {
+        level = 0.0; detail = 0.0; clarity = 0.0; denoise = 0.0
+        vibrance = 0.0; saturation = 0.5; contrast = 0.5; temp = 0.5
+        gamma = 1.0; black = 0.0; rangeMode = 0; hdrPeak = 600
+        wbR = 1.0; wbG = 1.0; wbB = 1.0
+        gammaR = 1.0; gammaG = 1.0; gammaB = 1.0
+        deblock = 0.0
+        clearImage = 0.0
+        toneMap = 0
+        localDim = 0.0
+        deband = 0.0
+        brightness = 0.50
+        gamut = 0
+        colorEngine = true
+        lumaSharpen = true
+        auto = true
+        autoStrength = 0.65
+        shadow = 0.35
+        tvBrightness = true
+        chroma = 0.50
+        audio3D = 0.0
+        eq0 = 0; eq1 = 0; eq2 = 0; eq3 = 0; eq4 = 0
+        audioPreset = 0
+        metalFX = false; pixelPerfect = false
+    }
+
+    // MARK: - UI-Bausteine
+
+    /// Ein Regler mit Wert, "Je ..."-Regel und optionaler Erklärung.
+    @ViewBuilder
+    private func sliderRow(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
+                           step: Double, display: String, rule: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(display)
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: value, in: range, step: step)
+            Text(rule)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// Ein EQ-Band mit dB-Anzeige.
+    @ViewBuilder
+    private func eqRow(_ title: String, _ value: Binding<Double>) -> some View {
+        HStack {
+            Text(title).font(.caption)
+            Slider(value: value, in: -18...18, step: 0.5)
+            Text(String(format: "%+.1f dB", value.wrappedValue))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .monospacedDigit()
+                .frame(width: 62, alignment: .trailing)
+        }
+    }
+
+    var body: some View {
+        Group {
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("PXSharp Bild").font(.headline)
+                    Text("Build 113 · jede Stufe einzeln schaltbar").font(.caption2).foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Notfall-Reset") { resetAll() }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .foregroundColor(.red)
+            }
+
+            // Direktvergleich: schaltet jede Nachbearbeitung ab. Wenn sich hier
+            // nichts ändert, wirkt auch kein einzelner Regler — umgekehrt sieht
+            // man so sofort, was die Regler zusammen bewirken.
+            Toggle("Vergleich: unbearbeitetes Bild (A/B)", isOn: $bypass)
+            Text("An = reine Quelle ohne jede Verarbeitung. Schalte hin und her: was du im Bild siehst, ist der Unterschied, den die Regler machen. Bleibt das Bild gleich, hat der Stream gerade ein Problem, nicht die Einstellung.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            sliderRow("Gesamtstärke der Bearbeitung", value: $master, range: 0...2, step: 0.05,
+                      display: String(format: "%.0f %%", master * 100),
+                      rule: "Skaliert Schärfe, Detail, Klarheit, Sättigung und Kontrast gemeinsam. 0 % = unbearbeitet, 100 % = wie eingestellt, 200 % = doppelt so stark. Ein Regler für den ganzen Bildeindruck.")
+            Toggle("Bildautomatik (passt sich jeder Szene an)", isOn: $autoEngine)
+            Text("Misst Helligkeit, Lichter und Rauschen in jeder Szene und korrigiert nur, was messbar danebenliegt: ausgebrannte Lichter zurück, abgesoffene Schwärzen leicht hoch, Schärfe bei Rauschen zurück. Bewusst kleine Korridore, damit nichts pumpt.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            // ---------------------------------------------------------------- 1
+            // ---------------------------------------------------------------- 0
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text("Leitung").font(.caption).foregroundColor(.secondary)
+                    Spacer()
+                    Text(linkVerdict).font(.caption).bold()
+                        .foregroundColor(linkColor)
+                }
+                Text("\(streamMbps) Mbit/s · \(liveFPS) fps · Render \(liveRender) ms · " +
+                     (liveDiag.isEmpty ? "" : liveDiag))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 2)
+
+            Text("1 · Bildmodus").font(.headline)
+            Picker("Bildmodus", selection: $mode) {
+                Text("Natürlich / kalibriert (empfohlen)").tag(9)
+                Text("TV-Max (P3 + Kontrast + Deband)").tag(10)
+                Text("Kino / Filmmaker (D65)").tag(0)
+                Text("Sony BRAVIA 7 II").tag(1)
+                Text("Sony Vivid (Live Colour)").tag(2)
+                Text("LG QNED93").tag(3)
+                Text("LG Vivid").tag(4)
+                Text("Ultra (max. Detail)").tag(5)
+                Text("Game (minimal)").tag(6)
+                Text("Realistisch (kalibriert)").tag(7)
+                Text("Referenz (unverfälscht)").tag(8)
+            }
+            .onChange(of: mode) { m in applyMode(m) }
+            Text(modeTitle + ": " + modeInfo)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if mbpsValue > 0 && mbpsValue < 10 {
+                Text("Die Verbindung liefert gerade nur \(streamMbps) Mbit/s. Bei 1080p braucht ein sauberes Bild 20–30 Mbit. Das ist die Ursache für weiche Kanten und Blockbildung — kein Regler kann das ausgleichen. Nächster Router oder 5-GHz-Band prüfen, dann neu verbinden.")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+            Text("Der Bildmodus setzt alle Regler darunter auf gemessene Werte. Ändere zuerst ihn, nicht die Einzelregler.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            // ---------------------------------------------------------------- 2
+            Text("2 · Automatik").font(.headline)
+            Toggle("Szenen-Automatik (empfohlen)", isOn: $auto)
+            Text("Misst jede Szene: Helligkeit, Spitzlicht, Rauschen. Regelt Belichtung nach und passt Rauschfilter und Schärfe an. Genau das macht ein Fernseher mit „AI Brightness“ und „Dynamic Tone Mapping“.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            sliderRow("Automatik-Stärke", value: $autoStrength, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", autoStrength * 100),
+                      rule: "Je höher, desto stärker zieht die Automatik dunkle Szenen hoch und helle herunter. Über 80 % fängt es an zu pumpen.")
+
+            // ---------------------------------------------------------------- 3
+            Text("3 · Schärfe").font(.headline)
+            Picker("Skalierer (Upscaling)", selection: $scaler) {
+                Text("Lanczos (Standard)").tag(0)
+                Text("Kantengerichtet (Richtungs-Schärfung)").tag(1)
+            }
+            Text("Lanczos interpoliert gleichmäßig. Der kantengerichtete Skalierer (EASU-Prinzip aus AMD FSR 1.0) schätzt die Kantenrichtung und tastet ENTLANG der Kante ab — schräge Konturen bleiben dadurch schärfer. Gemessen wird nach dem Install, welcher bei deinem Bild gewinnt.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if scaler == 1 {
+                sliderRow("Skalierer-Stärke", value: $easuAmt, range: 0...1, step: 0.1,
+                          display: String(format: "%.0f %%", easuAmt * 100),
+                          rule: "Je höher, desto stärker folgt die Abtastung der Kantenrichtung. Über 80 % können dünne Linien unruhig werden.")
+            }
+            sliderRow("Bildschärfe (Kanten, 1 px)", value: $level, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", level * 100),
+                      rule: "Je höher, desto härter werden Konturen. Über 85 % bekommen Kanten einen hellen Saum (Halo).")
+            Toggle("Schärfung nur auf Helligkeit (Farbe läuft separat)", isOn: $lumaSharpen)
+            Text("Fernseher schärfen die Helligkeit, nicht die Farbe. Dadurch entstehen an Kanten keine farbigen Ränder.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            sliderRow("Texturdichte (Feinstruktur 2–5 px)", value: $detail, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", detail * 100),
+                      rule: "Feine Struktur: Gras, Kies, Stoff, Metall. Das ist das Band, in dem sich Detaildichte abspielt — nicht die Kante. Gemessen +170 % Textur bei 10 % Rauschen.")
+            sliderRow("Farbschärfe (Chroma)", value: $chroma, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", chroma * 100),
+                      rule: "Je höher, desto schärfer werden FARBkanten (Schildtext, Zierleisten, Lichter). Der Stream liefert Farbe nur mit halber Auflösung (4:2:0) — dieser Regler holt die Präzision zurück, ohne Helligkeitsrauschen zu erzeugen.")
+            sliderRow("Detail-Klarheit (Coring)", value: $coring, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", coring * 100),
+                      rule: "Je höher, desto konsequenter wird Rauschen von echter Textur getrennt: alles unter dem Rauschpegel wird verworfen, Struktur darüber verstärkt. Das ist der Unterschied zwischen verrauscht-scharf und kristallklar.")
+            sliderRow("Kanten-Rekonstruktion (Deconvolution)", value: $deconv, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", deconv * 100),
+                      rule: "Je höher, desto stärker wird die Kantenglättung des Spiels (TAA/FXAA) rechnerisch zurückgenommen — ein 3×3-Laplace gegen einen 1-px-Blur. Über 50 % entstehen Ringe an harten Kanten.")
+            sliderRow("Halo-Grenze (Textur gegen Höfe)", value: $halo, range: 0.15...0.55, step: 0.01,
+                      display: String(format: "%.0f %%", halo * 100),
+                      rule: "Je höher, desto mehr Überschwinger an Kanten sind erlaubt — das gibt mehr Textur, aber sichtbare helle Höfe an harten Konturen. Gemessen: 30 % = 0 % Halos, 45 % = 5–8 % Halos.")
+            sliderRow("Clear Image (Vor-Schärfung 1080p)", value: $clearImage, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", clearImage * 100),
+                      rule: "Je höher, desto mehr echte Kanten bekommt der Upscaler zu sehen. Über 75 % werden feine Linien unruhig.")
+            sliderRow("Texturtiefe (Grobband 8–16 px)", value: $clarity, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", clarity * 100),
+                      rule: "Grobe Textur und Tiefe: Mauerwerk, Fels, Bodenwellen. Großes Band, wenig Halo. Über 40 % wirkt es wie ein Grauschleier.")
+            sliderRow("Rauschfilter (MPEG)", value: $denoise, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", denoise * 100),
+                      rule: "Je höher, desto glatter verrauschte Flächen. Über 60 % wirkt das Bild plastikartig.")
+            sliderRow("MPEG-Blöcke entfernen", value: $deblock, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", deblock * 100),
+                      rule: "Je höher, desto stärker werden 8×8-Blockkanten bei niedriger Bitrate geglättet. Gemessen: 0,6 = −21 % Rauschen bei +4 % Schärfe.")
+
+            // ---------------------------------------------------------------- 4
+            Text("4 · Farbe").font(.headline)
+            sliderRow("Sättigung", value: $saturation, range: 0...1, step: 0.05,
+                      display: String(format: "%+.0f %%", (saturation - 0.5) * 75),
+                      rule: "0 % ist neutral. Der Wert zeigt die echte Abweichung: +38 % bei Anschlag. Gerechnet wird im YCbCr-Raum, der Farbton bleibt dabei exakt erhalten.")
+            sliderRow("Farbdynamik (Vibrance)", value: $vibrance, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", vibrance * 100),
+                      rule: "Je höher, desto mehr werden blasse Farben angehoben, kräftige bleiben stehen. Der Regler für „natürlich bunt“.")
+            sliderRow("Kontrast", value: $contrast, range: 0...1, step: 0.05,
+                      display: String(format: "%+.0f %%", (contrast - 0.5) * 40),
+                      rule: "0 % ist neutral. Der Wert ist die echte Kontrastabweichung: +20 % bei Anschlag.")
+            sliderRow("Farbtemperatur", value: $temp, range: 0...1, step: 0.025,
+                      display: String(format: "%.0f K", 6500 + (temp - 0.5) * 8000),
+                      rule: "Je höher, desto kühler (blauer). 6500 K ist D65 und damit der Referenz-Weißpunkt. Darunter wirkt es wärmer (Kerzenlicht).")
+            DisclosureGroup("Weißabgleich RGB (Feinschliff)") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("Preset", selection: $wbPreset) {
+                        Text("Neutral (D65)").tag(0)
+                        Text("Warm (Kino / Sony)").tag(1)
+                        Text("Kühl (LG / Vivid)").tag(2)
+                        Text("Eigene").tag(3)
+                    }
+                    .onChange(of: wbPreset) { p in if p < 3 { applyWB(p) } }
+                    Button {
+                        NotificationCenter.default.post(name: Notification.Name("pxWhitePointMeasure"), object: nil)
+                    } label: {
+                        Label("Weißpunkt jetzt abgleichen", systemImage: "eyedropper.halffull")
+                            .font(.callout)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Text("Misst die hellen neutralen Flächen im laufenden Bild und korrigiert den Farbstich einmalig, maximal ±6 %. Ziele dabei auf eine weiße oder graue Fläche — ein weißes Hemd, eine Wand, ein Schild.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if !wbNote.isEmpty {
+                        Text(wbNote)
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+                    Toggle("Wolken/Weiß neutral halten", isOn: $hlBalance)
+                    Text("Zieht nur die hellen Bereiche (Wolken, Spitzlichter) soweit zur Neutralität, dass Weiß wieder weiß ist. Mitten und Schatten bleiben unangetastet — dort ist eine warme oder kühle Note eine Stilfrage. Ohne das bleiben Wolken gelb-creme, wie im Spiel-Grade.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Button("Weißabgleich zurücksetzen") {
+                        wbR = 1.0; wbG = 1.0; wbB = 1.0; wbPreset = 3
+                    }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    HStack {
+                        Text("Rot")
+                        Slider(value: $wbR, in: 0.85...1.15, step: 0.005)
+                        Text(String(format: "%.3f", wbR))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("Grün")
+                        Slider(value: $wbG, in: 0.85...1.15, step: 0.005)
+                        Text(String(format: "%.3f", wbG))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("Blau")
+                        Slider(value: $wbB, in: 0.85...1.15, step: 0.005)
+                        Text(String(format: "%.3f", wbB))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    Text("1,000 = neutral. Gegen Gelbstich: Blau hoch. Gegen Blaustich: Rot hoch. Immer nur ein Kanal, in 0,01-Schritten.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            DisclosureGroup("Kalibrierung (Gamma pro Kanal)") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Rot")
+                        Slider(value: $gammaR, in: 0.85...1.15, step: 0.005)
+                        Text(String(format: "%.3f", gammaR))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("Grün")
+                        Slider(value: $gammaG, in: 0.85...1.15, step: 0.005)
+                        Text(String(format: "%.3f", gammaG))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    HStack {
+                        Text("Blau")
+                        Slider(value: $gammaB, in: 0.85...1.15, step: 0.005)
+                        Text(String(format: "%.3f", gammaB))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+                    Text("Je höher, desto dunkler wird dieser Kanal in den Mitteltönen. 1,000 = neutral. Korrigiert den Farbstich, den der Weißabgleich nicht trifft (CMS-Ebene eines kalibrierten Fernsehers).")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            sliderRow("Gamma", value: $gamma, range: 0.7...1.3, step: 0.01,
+                      display: String(format: "%.2f", gamma),
+                      rule: "Je höher, desto dunkler die Mitten, desto mehr Kontrast. 1,00 = neutral (BT.1886). Über 1,10 werden Schatten zugedrückt.")
+            sliderRow("Schwarzwert", value: $black, range: -0.10...0.10, step: 0.005,
+                      display: String(format: "%+.0f", black * 100),
+                      rule: "Je höher, desto mehr wird die Schwärze angehoben (Grauschleier). 0 ist meist richtig; nur bei zugelaufenen Schatten leicht ins Plus.")
+
+            // ---------------------------------------------------------------- 5
+            Text("5 · Bild-Engine (das Innenleben des Fernsehers)").font(.headline)
+            Toggle("TV-Helligkeit (an Bildschirmhelligkeit anpassen)", isOn: $tvBrightness)
+            Text("Das iPad zeigt SDR mit bis zu 600 cd/m², ein Fernseher mit 100–200. Derselbe Bildpunkt wirkt hier also drei- bis sechsmal so hell. Diese Option skaliert die Ausgabe auf TV-Leuchtdichte — bei 100 % Bildschirmhelligkeit auf 55 %, bei 50 % auf 78 %. Wenn dir das Bild dann zu dunkel ist: Bildschirmhelligkeit am iPad erhöhen, nicht den Regler darunter.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            sliderRow("Helligkeit (Hintergrundlicht)", value: $brightness, range: 0...1, step: 0.02,
+                      display: String(format: "%+.0f %%", (pow(2.0, (brightness - 0.5) * 1.6) - 1.0) * 100),
+                      rule: "Je höher, desto heller das ganze Bild — linear gerechnet wie die Hintergrundbeleuchtung. 0 % = neutral. Für dunkle Räume 5–10 % darunter.")
+            sliderRow("Lokales Dimming (Mini-LED-Zonen)", value: $localDim, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", localDim * 100),
+                      rule: "Je höher, desto tiefer werden dunkle Bildbereiche abgesenkt, helle bleiben stehen. Über 60 % laufen Schatten zu. 30 % entspricht dem QNED93.")
+            sliderRow("Schattendurchzeichnung (Black Stabilizer)", value: $shadow, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", shadow * 100),
+                      rule: "Je höher, desto mehr werden nur die dunklen Bereiche angehoben — echtes Schwarz bleibt schwarz. Für Nachtszenen im Spiel: 50 %.")
+            Picker("Tone Mapping (Kontrastkurve)", selection: $toneMap) {
+                Text("Aus (linear)").tag(0)
+                Text("Sony Contrast Booster").tag(1)
+                Text("LG Precision Dimming").tag(2)
+            }
+            Text("Je stärker die Kurve, desto mehr Kontrast in den Mitten und Rolloff in den Lichtern. LG (2) ist gemessen die beste Kurve: heller, aber nur 1,95 % Clipping.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            sliderRow("Sanfte Verläufe (Deband)", value: $deband, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", deband * 100),
+                      rule: "Je höher, desto stärker werden Treppenstufen in Himmel und Nebel geglättet. Gemessen praktisch gratis — 30 % reicht.")
+            Toggle("Farb-Engine (3D-LUT, lineares Licht)", isOn: $colorEngine)
+            Text("Rechnet Weißabgleich, Sättigung, Gamma, Schwarzpegel und Kontrast in EINER 3D-LUT in linearem Licht. Verhindert Farbstiche und ausgebrannte Kanäle. Eingeschaltet lassen.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            sliderRow("Farbcharakter (hue-selektiv)", value: $hueSat, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", hueSat * 100),
+                      rule: "Je höher, desto stärker behandelt die Engine Farbtöne unterschiedlich: Blau und Cyan werden in Nachtbildern zurückgenommen (−16 % / −7 %), Hauttöne geschützt (−7 %), Grün erhalten (+8 %). Genau das machen die Farbmanager guter Fernseher. 0 % = alle Farbtöne gleich (alte Wirkung).")
+            sliderRow("Weißpunkt-Korrektur (Mittentöne)", value: $castFix, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", castFix * 100),
+                      rule: "Je höher, desto mehr wird der Blaustich in den Mittentönen (Helligkeit 20–45 %) entfernt — dort liegt er gemessen bei 2–4 %. Schatten und Lichter bleiben unangetastet. 0 % = wie das PS5-Signal.")
+            Picker("Farbumfang", selection: $gamut) {
+                Text("BT.709 (korrekt)").tag(0)
+                Text("Display P3 nativ (TV-Look)").tag(1)
+            }
+            Text("„Nativ“ ist die Einstellung, die auf Fernsehern kräftigere Farben macht: das Panel nutzt seinen echten Farbraum statt auf BT.709 zu begrenzen. Für natürliche Farben BT.709.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            // ---------------------------------------------------------------- 6
+            Text("6 · Anzeige").font(.headline)
+            Toggle("Frame Pacing", isOn: $pacing)
+            Picker("Bildrate (Pacing)", selection: $paceHz) {
+                Text("60 Hz (Quelle liefert 60)").tag(60)
+                Text("120 Hz (ProMotion, weniger Mikro-Ruckler)").tag(120)
+                Text("240 Hz (Panel kann max. 120)").tag(240)
+            }
+            Text("Die PS5 liefert 60 Bilder pro Sekunde. 120 Hz lässt das Panel zweimal pro Bild aktualisieren — das nimmt Mikro-Ruckler, kostet aber etwas Akku. 240 Hz kann das Panel nicht; der Wert wird auf 120 begrenzt.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Picker("Farbbereich (HDMI-Level)", selection: $rangeMode) {
+                Text("Auto").tag(0)
+                Text("Limited → Full").tag(1)
+                Text("Full → Limited").tag(2)
+            }
+            sliderRow("HDR-Peak (Nits)", value: $hdrPeak, range: 300...1600, step: 50,
+                      display: String(format: "%.0f", hdrPeak),
+                      rule: "Je höher, desto mehr Spielraum für Spitzlichter in HDR. Nur relevant, wenn der Stream HDR liefert (Diagnose: hdr=1).")
+            Text(diag)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
+            Toggle("HDR deaktivieren (Test bei Farbfehlern)", isOn: $hdrOff)
+            Text("Für echtes HDR: Codec auf \"H.265 + HDR\" stellen und auf der PS5 HDR einschalten. Dann liefert die Konsole 10 Bit, und das Panel nutzt seine 1600 Nits — der einzige echte HDR-Weg, der hier möglich ist.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
+            Text("Je größer der Unterschied zwischen Quelle und Panel, desto mehr bringt Scaling. 1:1 zeigt die echte Quelle (kleiner, aber pixelgenau).")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Toggle("Panel 2× (2266 px statt 2732 px)", isOn: $panel2x)
+            Text("Je niedriger die Panel-Auflösung, desto mehr Bilder pro Sekunde — und desto weicher die feinste Textur. Aus: volle 2732 px (maximale Schärfe). An: 2266 px, hält 60 fps, wenn das iPad warm wird. Wirkt sofort.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Toggle("Bei Hitze automatisch Schärfe sparen", isOn: $perfAuto)
+            Text("Je wärmer das iPad, desto eher schaltet die Automatik Klarheit und Dimming ab, um die Bildrate zu halten — das kostet sichtbar Textur. Aus (Standard): die volle Kette läuft immer, auch wenn die Bildrate dadurch sinkt. An: stabilere Bildrate, weicheres Bild bei Hitze.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            sliderRow("Texturtiefe (Struktur-Radius)", value: $texDepth, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", texDepth * 100),
+                      rule: "Je höher, desto größere Strukturen werden betont — Gras, Stoff, Mauerwerk, Rinde (Radius 2,7 bis 5,0 px). Je niedriger, desto mehr Feinstkontur. Über 70 % kann es an harten Kanten säumen.")
+            sliderRow("Lokale Tonwertspreizung (Tiefenwirkung)", value: $localTone, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", localTone * 100),
+                      rule: "Je höher, desto stärker werden dunkle Partien tiefer und helle Partien heller — räumlich, nicht global (wie „Object-Based HDR Remaster“ bei Sony). Das erzeugt Tiefenwirkung, ohne das Bild aufzuhellen. Über 60 % können Ränder um sehr helle Flächen entstehen.")
+
+            // ---------------------------------------------------------------- 7
+            // ---------------------------------------------------------------- 7
+            Text("7 · Audio (3D + Equalizer)").font(.headline)
+            Picker("Klangprofil", selection: $audioPreset) {
+                Text("Standard").tag(0)
+                Text("Sony Kino").tag(1)
+                Text("Sony Musik").tag(2)
+                Text("Sony Spiel").tag(3)
+                Text("Nacht").tag(4)
+                Text("Sony Bass Boost").tag(5)
+                Text("Dolby Atmos (weit)").tag(6)
+                Text("Bose (warm)").tag(7)
+                Text("Sony WH-1000XM4 (starker Bass)").tag(8)
+                Text("Sony WH-1000XM4 maximal").tag(9)
+                Text("Eigene").tag(10)
+            }
+            .onChange(of: audioPreset) { p in if p < 10 { applyAudioPreset(p) } }
+            Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. „Sony Spiel“ hebt Tiefbass und Präsenz an, damit Schritte und Schüsse ortbar sind.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            sliderRow("3D-Weite (Raumklang)", value: $audio3D, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", audio3D * 100),
+                      rule: "Je höher, desto breiter die Bühne (Mitten/Seiten-Verbreiterung mit kurzer Laufzeitverzögerung). Über 60 % wird es phasig.")
+            VStack(alignment: .leading, spacing: 8) {
+                eqRow("Subbass 45 Hz", $eq0)
+                eqRow("Bass 150 Hz", $eq1)
+                eqRow("Mitten 600 Hz", $eq2)
+                eqRow("Präsenz 2,4 kHz", $eq3)
+                eqRow("Höhen 9 kHz", $eq4)
+            }
+            Text("Je höher ein Band, desto stärker wird dieser Frequenzbereich angehoben (max. ±18 dB). Gegen dumpfen Klang: Höhen +3. Gegen dröhnenden Bass: 300 Hz −3.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            DisclosureGroup("Welcher Regler wofür? (Kurzfassung)") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Willst du ein besseres Bild: Bildmodus wechseln. Fertig.")
+                    Text("Ist es zu hell: Helligkeit −10 %, dann Kontrast −0,05.")
+                    Text("Ist es zu bunt: Sättigung −0,05, Farbumfang auf BT.709.")
+                    Text("Ist es zu blass: Farbdynamik +10 %, Sättigung +0,05.")
+                    Text("Ist es unscharf: zuerst Detail, dann Clear Image, zuletzt Bildschärfe.")
+                    Text("Nachtszenen zu dunkel: Schattendurchzeichnung auf 50–60 %.")
+                    Text("Rauscht es: MPEG-Blöcke auf 50 %, Rauschfilter auf 40 %.")
+                    Text("Schatten laufen zu: lokales Dimming −10 %, Schwarzwert +1 %.")
+                    Text("Farbstich: Farbtemperatur in 0,025-Schritten, dann Weißabgleich RGB.")
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            DisclosureGroup("Warum sieht ein 8500-€-Fernseher so aus?") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("1 · Zonen: 2880 Mini-LED-Zonen schalten Licht wirklich ab. Hier macht das pxLocalDim auf einer Luma-Karte mit ~3300 Zonen.")
+                    Text("2 · Farbvolumen: bei 1000 cd/m² bleibt die Sättigung erhalten, weil in linearem Licht gerechnet wird — das macht die 3D-LUT.")
+                    Text("3 · Tone Mapping: 3000 cd/m² Spitze erlauben eine flache Kurve. Auf 600 cd/m² muss gestaucht werden — dafür die S-Kurven.")
+                    Text("4 · Upscaling: Kanten werden vor der Skalierung rekonstruiert (Clear Image), nicht danach.")
+                    Text("5 · Kalibrierung: D65, BT.1886, Kanal-Gamma. Das ist der unsichtbare Teil, der „natürlich“ wirkt.")
+                    Text("Physik bleibt Physik: echte Zonen, echte Spitzenhelligkeit und die Bitrate der Quelle kann keine Software erzeugen.")
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            DisclosureGroup("Was technisch nicht geht") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("4K/120: Die PS5 gibt über Remote Play maximal 1080p60 aus.")
+                    Text("Dolby Vision: Der Stream liefert SDR bzw. HDR10, kein DV.")
+                    Text("Motion Booster (Zwischenbilder): kostet 1–2 Frames Latenz, im Spiel unbrauchbar.")
+                    Text("Echte 2880 Zonen: kein Backlight im iPad — nur der Eindruck ist nachbaubar.")
+                    Text("Ambient-Light-Anpassung: iOS gibt den Lichtsensor nicht frei.")
+                    Text("10-Bit-Panel: 8 Bit + Deband ist die Näherung.")
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            Button("Stabile Leitung: 1080p · 60 fps · 18 Mbit · H.265 (bei WLAN empfohlen)") {
+                onStableLink()
+            }
+            Button("Maximale Quelle: 1080p · 60 fps · 30 Mbit · H.265 (greift beim nächsten Verbinden)") {
+                onMaxQuality()
+            }
+        }
+        .onAppear {
+            if UserDefaults.standard.object(forKey: "pxSharpTunedV3") == nil {
+                SharpnessRow.applyCalibratedPreset()
+            }
+            // Einmalige Migration: die alten Modi 0-10 gibt es im Schnellpanel
+            // nicht mehr. Steht der Wert noch darauf, bleibt der Schalter leer.
+            if UserDefaults.standard.object(forKey: "pxSharpTunedV4") == nil {
+                UserDefaults.standard.set(true, forKey: "pxSharpTunedV4")
+                if mode != 11 && mode != 12 {
+                    mode = 11
+                    SharpnessRow.applyPreset(11)
+                }
+            }
+            if UserDefaults.standard.object(forKey: "pxAudioEQ0") == nil {
+                applyAudioPreset(audioPreset)
+            }
+        }
+    }
+
+    // MARK: - Kalibrierter Standard (Migration)
+
+    /// Schreibt den neutralen Referenzpfad direkt in die UserDefaults.
+    /// Der Renderer ruft das beim Start auf, weil `onAppear` dieser Ansicht
+    /// erst läuft, wenn man die Einstellungen öffnet — die Bildfehler sieht
+    /// man aber vorher schon im Stream.
+    static func applyCalibratedPreset() {
+        let d = UserDefaults.standard
+        let values: [String: Any] = [
+            "pxSharpMode": 11,
+            "pxSharpLevel": 1.0,
+            "pxSharpClarity": 0.0,
+            "pxSharpDetail": 0.55,
+            "pxSharpDenoise": 0.06,
+            "pxSharpVibrance": 0.0,
+            "pxSharpSaturation": 0.5,
+            "pxSharpContrast": 0.5,
+            "pxSharpTemp": 0.5,
+            "pxSharpGamma": 1.0,
+            "pxSharpBlack": 0.0,
+            "pxSharpRange": 0,
+            "pxSharpTexDepth": 0.20,
+            "pxSharpLocalTone": 0.0,
+            "pxSharpHueSat": 0.0,
+            "pxSharpCastFix": 0.0,
+            "pxSharpDeblock": 0.14,
+            "pxSharpDeband": 0.30,
+            "pxSharpClearImage": 0.20,
+            "pxSharpToneMap": 0,
+            "pxSharpLocalDim": 0.0,
+            "pxSharpBrightness": 0.5,
+            "pxSharpShadow": 0.12,
+            "pxSharpTvBrightness": false,
+            "pxSharpChroma": 0.30,
+            "pxSharpCoring": 0.03,
+            "pxSharpHalo": 0.12,
+            "pxSharpDeconv": 0.0,
+            "pxSharpAuto": false,
+            "pxSharpAutoStrength": 0.65,
+            "pxSharpGamut": 0,
+            "pxSharpColorEngine": true,
+            "pxSharpLumaSharpen": true,
+            "pxSharpScaler": 0,
+            "pxSharpEasu": 0.6,
+            "pxSharpWB_R": 1.0,
+            "pxSharpWB_G": 1.0,
+            "pxSharpWB_B": 1.0,
+            "pxSharpGammaR": 1.0,
+            "pxSharpGammaG": 1.0,
+            "pxSharpGammaB": 1.0,
+            "pxSharpWBPreset": 3,
+            "pxSharpPacing": true,
+            "pxSharpPaceHz": 60,
+            "pxSharpBypass": false,
+            "pxSharpHlBalance": true,
+            "pxSharpMaster": 1.0,
+            "pxSharpAutoEngine": true,
+            "pxSharpHdrPeak": 1600,
+            "pxSharpTunedV1": true,
+            "pxSharpTunedV2": true,
+            "pxSharpTunedV3": true,
+        ]
+        for (key, value) in values { d.set(value, forKey: key) }
+    }
+
+    /// Setzt einen Bildmodus, ohne die Einstellungen zu öffnen. Wird vom
+    /// Schnellpanel über dem Stream benutzt.
+    static let profileKeys = ["pxSharpLevel","pxSharpDetail","pxSharpTexDepth","pxSharpClarity",
+        "pxSharpClearImage","pxSharpDeconv","pxSharpHalo","pxSharpCoring","pxSharpChroma",
+        "pxSharpSaturation","pxSharpVibrance","pxSharpContrast","pxSharpTemp","pxSharpBrightness",
+        "pxSharpShadow","pxSharpDenoise","pxSharpDeblock","pxSharpDeband","pxSharpLocalDim",
+        "pxSharpAutoStrength"]
+
+    /// Sichert die aktuellen Regler unter dem gerade aktiven Modus.
+    static func saveProfile(_ mode: Int) {
+        let d = UserDefaults.standard
+        var dict: [String: Double] = [:]
+        for k in profileKeys { dict[k] = d.double(forKey: k) }
+        if let data = try? JSONSerialization.data(withJSONObject: dict) {
+            d.set(data, forKey: "pxProfile\(mode)")
+        }
+    }
+
+    /// Laedt ein gesichertes Profil, falls es eines gibt.
+    static func loadProfile(_ mode: Int) {
+        let d = UserDefaults.standard
+        guard let data = d.data(forKey: "pxProfile\(mode)"),
+              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Double] else { return }
+        for (k, v) in dict { d.set(v, forKey: k) }
+    }
+
+    static func applyPreset(_ m: Int) {
+        let d = UserDefaults.standard
+        // Beim Wechsel: alten Modus sichern, neuen spaeter wiederherstellen.
+        let cur = d.integer(forKey: "pxSharpMode")
+        if cur != m && cur >= 0 { saveProfile(cur) }
+        var v: [String: Any] = [
+            "pxSharpClarity": 0.0, "pxSharpClearImage": 0.0, "pxSharpDeconv": 0.0,
+            "pxSharpLocalTone": 0.0, "pxSharpLocalDim": 0.0, "pxSharpAuto": false,
+            "pxSharpChroma": 0.30, "pxSharpHueSat": 0.0, "pxSharpCastFix": 0.0,
+            "pxSharpRange": 0, "pxSharpTvBrightness": false, "pxSharpTemp": 0.5,
+            "pxSharpGamma": 1.0, "pxSharpBlack": 0.0, "pxSharpScaler": 0,
+            "pxSharpEasu": 0.6, "pxSharpCoring": 0.05, "pxSharpHalo": 0.12,
+            "pxSharpDeblock": 0.14, "pxSharpDenoise": 0.06, "pxSharpDeband": 0.30,
+        ]
+        switch m {
+        case 11:
+            v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.90; v["pxSharpTexDepth"] = 0.50
+            v["pxSharpClarity"] = 0.35; v["pxSharpDeconv"] = 0.35
+            v["pxSharpClearImage"] = 0.25; v["pxSharpChroma"] = 0.55
+            v["pxSharpCoring"] = 0.20; v["pxSharpHalo"] = 0.18
+            v["pxSharpDenoise"] = 0.06; v["pxSharpDeblock"] = 0.14; v["pxSharpDeband"] = 0.30
+            v["pxSharpSaturation"] = 0.50; v["pxSharpContrast"] = 0.50
+            v["pxSharpBrightness"] = 0.50; v["pxSharpVibrance"] = 0.0
+            v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.10
+        case 12:
+            v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.95; v["pxSharpTexDepth"] = 0.55
+            v["pxSharpClarity"] = 0.40; v["pxSharpDeconv"] = 0.40
+            v["pxSharpClearImage"] = 0.30; v["pxSharpChroma"] = 0.60
+            v["pxSharpCoring"] = 0.18; v["pxSharpHalo"] = 0.20
+            v["pxSharpDenoise"] = 0.06; v["pxSharpDeblock"] = 0.14; v["pxSharpDeband"] = 0.30
+            v["pxSharpSaturation"] = 0.50; v["pxSharpContrast"] = 0.50
+            v["pxSharpBrightness"] = 0.49; v["pxSharpVibrance"] = 0.0
+            v["pxSharpGamut"] = 1; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.14
+        case 10: // TV-Max
+            v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.55; v["pxSharpTexDepth"] = 0.20
+            v["pxSharpSaturation"] = 0.52; v["pxSharpContrast"] = 0.5
+            v["pxSharpBrightness"] = 0.5; v["pxSharpVibrance"] = 0.04
+            v["pxSharpGamut"] = 1; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.14
+        case 8: // Aus / reiner Durchlauf
+            v["pxSharpLevel"] = 0.0; v["pxSharpDetail"] = 0.0; v["pxSharpTexDepth"] = 0.0
+            v["pxSharpDeblock"] = 0.0; v["pxSharpDenoise"] = 0.0; v["pxSharpDeband"] = 0.0
+            v["pxSharpShadow"] = 0.0; v["pxSharpVibrance"] = 0.0
+            v["pxSharpSaturation"] = 0.5; v["pxSharpContrast"] = 0.5
+            v["pxSharpBrightness"] = 0.5; v["pxSharpCoring"] = 0.0
+            v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0
+        default: // Natürlich
+            v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.55; v["pxSharpTexDepth"] = 0.20
+            v["pxSharpSaturation"] = 0.5; v["pxSharpContrast"] = 0.5
+            v["pxSharpBrightness"] = 0.5; v["pxSharpVibrance"] = 0.0
+            v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0; v["pxSharpShadow"] = 0.12
+        }
+        v["pxSharpMode"] = m
+        v["pxSharpBypass"] = false
+        for (key, value) in v { d.set(value, forKey: key) }
+        // Eigenes Profil dieses Modus zurueckholen, falls vorhanden.
+        loadProfile(m)
+    }
+}
+
+// MARK: - Schnellpanel über dem Stream
+
+/// Schwebendes Bild-Panel. Schreibt direkt in die UserDefaults, die der
+/// Renderer in jedem Frame neu liest — jede Änderung ist sofort sichtbar,
+/// ohne den Stream zu verlassen oder das Spiel zu schließen.
+struct PXQuickPicturePanel: View {
+    @Binding var isPresented: Bool
+
+    @AppStorage("pxSharpLevel") private var level: Double = 1.0
+    @AppStorage("pxSharpDetail") private var detail: Double = 0.55
+    @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
+    @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
+    @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
+    @AppStorage("pxSharpBrightness") private var brightness: Double = 0.5
+    @AppStorage("pxSharpGamut") private var gamut: Int = 0
+    @AppStorage("pxSharpMode") private var mode: Int = 11
+    @AppStorage("pxSharpMaster") private var master: Double = 1.0
+    @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
+    @AppStorage("pxSharpWBNote") private var wbNote: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Kopfzeile
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+                Text("Bild")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                Text("wirkt sofort")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.4))
+                Spacer()
+                Button { isPresented = false } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.white.opacity(0.5))
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 10)
+
+            // Schnellwahl
+            Picker("Bildmodus", selection: $mode) {
+                Text("OLED Referenz").tag(11)
+                Text("QD-OLED").tag(12)
+                if mode != 11 && mode != 12 {
+                    Text("Eigener").tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+            .onChange(of: mode) { m in SharpnessRow.applyPreset(m) }
+
+            HStack(spacing: 12) {
+                Text("Stärke")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.8))
+                Slider(value: $master, in: 0...2).tint(.white)
+                Text(String(format: "%.0f%%", master * 100))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.6))
+                    .frame(width: 46, alignment: .trailing)
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 6)
+
+            Toggle(isOn: $autoEngine) {
+                Text("Bildautomatik")
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            .toggleStyle(.switch)
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+
+            // Alle Einstellungen — dieselbe Ansicht wie in den Einstellungen,
+            // nur über dem Spiel.
+            ScrollView {
+                PXSettingsClean()
+                    .padding(.horizontal, 18)
+                    .padding(.top, 4)
+                    .padding(.bottom, 22)
+            }
+        }
+        .frame(maxWidth: 640, maxHeight: 680)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(white: 0.09))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                )
+        )
+        .preferredColorScheme(.dark)
+        .shadow(color: .black.opacity(0.6), radius: 30, y: 12)
+    }
+}
+
+// MARK: - Konsolenkarte für den Startbildschirm
+
+/// Grosse, zentrierte Karte mit rundem Verbinden-Knopf. Ein Ziel pro Karte,
+/// ein Tipp genuegt -- bewusst wie die PlayStation-Startseite gehalten.
+struct PXConsoleCard: View {
+    let name: String
+    let address: String
+    let isPS5: Bool
+    let isRegistered: Bool
+    let onConnect: () -> Void
+    let onWake: (() -> Void)?
+    let onEdit: (() -> Void)?
+    let onDelete: (() -> Void)?
+
+    var body: some View {
+        VStack(spacing: 20) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(Color(uiColor: .tertiarySystemFill))
+                        .frame(width: 46, height: 46)
+                    Text(isPS5 ? "5" : "4")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(name)
+                        .font(.system(size: 21, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(isRegistered ? Color.green : Color.orange)
+                            .frame(width: 7, height: 7)
+                        Text(isRegistered ? "Bereit" : "Nicht registriert")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Text(address)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 6)
+                if onEdit != nil || onWake != nil {
+                    Menu {
+                        if let w = onWake { Button("Aufwecken", action: w) }
+                        if let e = onEdit { Button("Bearbeiten", action: e) }
+                        if let d = onDelete { Button("Entfernen", role: .destructive, action: d) }
+                    } label: {
+                        Image(systemName: "ellipsis.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Button(action: onConnect) {
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient(colors: [Color(red: 0.24, green: 0.52, blue: 1.0),
+                                                      Color(red: 0.08, green: 0.26, blue: 0.80)],
+                                             startPoint: .topLeading,
+                                             endPoint: .bottomTrailing))
+                        .frame(width: 132, height: 132)
+                        .shadow(color: Color.black.opacity(0.30), radius: 20, y: 10)
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 46, weight: .bold))
+                        .foregroundStyle(.white)
+                        .offset(x: 5)
+                }
+            }
+            .buttonStyle(PXPressStyle())
+
+            Text("Antippen zum Verbinden")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .frame(maxWidth: 400)
+        .background(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                )
+        )
+    }
+}
+
+struct PXPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Sortierte Einstellungen für das Schnellpanel
+
+/// Bewusst neu geordnet: erst was schaerfer macht, dann Farbe, dann Licht,
+/// dann eine eigene Sektion fuer Regler, die das Bild auch verschlechtern
+/// koennen -- mit Warnung. Ganz unten die Ausgabe.
+struct PXSettingsClean: View {
+    @AppStorage("pxSharpLevel") private var level: Double = 1.0
+    @AppStorage("pxSharpDetail") private var detail: Double = 0.75
+    @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.35
+    @AppStorage("pxSharpClarity") private var clarity: Double = 0.0
+    @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.20
+    @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
+    @AppStorage("pxSharpHalo") private var halo: Double = 0.15
+    @AppStorage("pxSharpCoring") private var coring: Double = 0.05
+    @AppStorage("pxSharpChroma") private var chroma: Double = 0.5
+    @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
+    @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
+    @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
+    @AppStorage("pxSharpTemp") private var temp: Double = 0.5
+    @AppStorage("pxSharpGamut") private var gamut: Int = 0
+    @AppStorage("pxSharpHlBalance") private var hlBalance: Bool = true
+    @AppStorage("pxSharpBrightness") private var brightness: Double = 0.49
+    @AppStorage("pxSharpShadow") private var shadow: Double = 0.0
+    @AppStorage("pxSharpAuto") private var auto: Bool = false
+    @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.5
+    @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
+    @AppStorage("pxSharpDenoise") private var denoise: Double = 0.06
+    @AppStorage("pxSharpDeblock") private var deblock: Double = 0.14
+    @AppStorage("pxSharpDeband") private var deband: Double = 0.30
+    @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.0
+    @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
+    @AppStorage("pxSharpPacing") private var pacing: Bool = true
+    @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
+    @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+
+            pxHead("1 · Schärfe und Detail", "Nur diese Regler machen das Bild schärfer.")
+            pxSlider("Bildschärfe (Kanten)", $level, 0...1, pct(level),
+                     "Konturen und Text. Ab 85 % entstehen helle Säume an Kanten.")
+            pxSlider("Texturdichte (Feinstruktur)", $detail, 0...1, pct(detail),
+                     "Gras, Kies, Stoff, Metall. Der wichtigste Regler für Detail.")
+            pxSlider("Texturtiefe (grobe Struktur)", $texDepth, 0...1, pct(texDepth),
+                     "Mauerwerk, Fels, Bodenwellen. Zu hoch = fleckig.")
+            pxSlider("Clear Image (Vor-Schärfung 1080p)", $clearImage, 0...1, pct(clearImage),
+                     "Gibt dem Hochskalieren echte Kanten. 20–30 % ist der gute Bereich.")
+            pxSlider("Halo-Grenze", $halo, 0.05...0.55, pct(halo),
+                     "Wie viel Überschwinger erlaubt ist. Niedriger = sauberer, höher = knackiger.")
+
+            pxHead("2 · Farbe und Realismus", "Für natürliche Farben: alles hier auf neutral lassen.")
+            pxSlider("Sättigung", $saturation, 0.3...0.8, signed(saturation),
+                     "0 % ist neutral. Mehr wird schnell künstlich.")
+            pxSlider("Farbdynamik (nur blasse Farben)", $vibrance, 0...1, pct(vibrance),
+                     "Hebt nur schwache Farben — wirkt natürlicher als Sättigung.")
+            pxSlider("Kontrast", $contrast, 0.35...0.65, signedContrast(contrast),
+                     "0 % ist neutral.")
+            pxSlider("Farbtemperatur", $temp, 0.35...0.65,
+                     String(format: "%.0f K", 6500 + (temp - 0.5) * 8000),
+                     "6500 K ist der Referenz-Weißpunkt.")
+            Picker("Farbumfang", selection: $gamut) {
+                Text("BT.709 (realistisch)").tag(0)
+                Text("DCI-P3 (kräftiger)").tag(1)
+            }
+            Toggle("Wolken und Weiß neutral halten", isOn: $hlBalance)
+            Text("Zieht nur die hellen Flächen auf Weiß. Ohne das bleiben Wolken gelb-creme.")
+                .font(.caption).foregroundColor(.secondary)
+
+            pxHead("3 · Licht und Automatik", "Helligkeit und wie viel die App selbst regelt.")
+            pxSlider("Helligkeit", $brightness, 0.35...0.65,
+                     String(format: "%+.0f %%", (pow(2.0, (brightness - 0.5) * 1.6) - 1.0) * 100),
+                     "0 % ist neutral. Bei zu hellem Bild 3–5 % darunter.")
+            pxSlider("Schattendurchzeichnung", $shadow, 0...0.6, pct(shadow),
+                     "Nur für dunkle Szenen. Über 30 % wird das Bild flau.")
+            Toggle("Automatik (Belichtung)", isOn: $auto)
+            Text("Nimmt Überbelichtung zurück und hellt dunkle Szenen leicht auf. Maximal ±6 %.")
+                .font(.caption).foregroundColor(.secondary)
+            if auto {
+                pxSlider("Automatik-Stärke", $autoStrength, 0.2...1.0, pct(autoStrength),
+                         "50 % ist ein guter Wert. Höher greift stärker ein.")
+            }
+            Toggle("Bildautomatik (Feinabgleich)", isOn: $autoEngine)
+            Text("Kleine Korrekturen pro Szene: Lichter zurück, Schwärzen leicht hoch, Schärfe bei Rauschen runter. Bewusst klein gehalten.")
+                .font(.caption).foregroundColor(.secondary)
+
+            pxHead("4 · Kann das Bild verschlechtern", "Vorsicht: Diese Regler helfen nur bei schlechter Quelle.")
+            pxSlider("Rauschfilter", $denoise, 0...0.5, pct(denoise),
+                     "Zu hoch = Textur verschwindet.")
+            pxSlider("MPEG-Blöcke glätten", $deblock, 0...0.5, pct(deblock),
+                     "Zu hoch = matschig.")
+            pxSlider("Sanfte Verläufe (Deband)", $deband, 0...0.6, pct(deband),
+                     "Hilft gegen Streifen im Himmel. Zu hoch = Textur weg.")
+            pxSlider("Klarheit (lokaler Kontrast)", $clarity, 0...0.6, pct(clarity),
+                     "Mehr „Pop“, aber flach und teuer in der Rechnung.")
+            pxSlider("Lokales Dimming", $localDim, 0...1, pct(localDim),
+                     "Hebt in Tests das Schwarz an. Meist aus lassen.")
+            Toggle("TV-Helligkeit (dunkler machen)", isOn: $tvBrightness)
+
+            pxHead("5 · Ausgabe", "Bildrate und Rechenlast.")
+            Toggle("Frame Pacing", isOn: $pacing)
+            Picker("Bildrate", selection: $paceHz) {
+                Text("60 Hz").tag(60)
+                Text("120 Hz").tag(120)
+            }
+            Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
+        }
+    }
+
+    private func pct(_ v: Double) -> String { String(format: "%.0f %%", v * 100) }
+    private func signed(_ v: Double) -> String { String(format: "%+.0f %%", (v - 0.5) * 75) }
+    private func signedContrast(_ v: Double) -> String { String(format: "%+.0f %%", (v - 0.5) * 40) }
+
+    private func pxHead(_ t: String, _ sub: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(t).font(.system(size: 15, weight: .semibold))
+            Text(sub).font(.caption).foregroundColor(.secondary)
+        }
+        .padding(.top, 6)
+    }
+
+    private func pxSlider(_ title: String, _ value: Binding<Double>,
+                          _ range: ClosedRange<Double>, _ display: String,
+                          _ rule: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(title).font(.system(size: 13))
+                Spacer()
+                Text(display).font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: value, in: range)
+            Text(rule).font(.caption2).foregroundColor(.secondary)
+        }
+    }
+}
+ROW_EOF
+
+python3 - <<'PATCH_EOF'
+p = 'ios/Pylux/Views/SettingsView.swift'
+s = open(p, encoding='utf-8').read()
+changed = []
+
+old_support = '''    private var supportSection: some View {
+        Section {
+            Button {
+                showDonationPaywall = true
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Support Pylux")
+                        .foregroundColor(.primary)
+                    Text("Donate to support development. Thank you for using Pylux.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .sheet(isPresented: $showDonationPaywall) {
+                DonationPaywallView()
+            }
+        } header: {
+            Text("Support")
+        }
+    }'''
+new_support = '''    private var supportSection: some View {
+        EmptyView()
+    }'''
+if old_support in s:
+    s = s.replace(old_support, new_support, 1)
+    changed.append('donation-section')
+
+anchor = '            .onChange(of: prefs.codec) { _ in prefs.save() }\n'
+if 'SharpnessRow' not in s and anchor in s:
+    call = '\n            SharpnessRow(onMaxQuality: { prefs.resolutionIndex = 3; prefs.fps = 60; prefs.bitrate = 30000; prefs.codec = 1; prefs.save() }, onStableLink: { prefs.resolutionIndex = 3; prefs.fps = 60; prefs.bitrate = 18000; prefs.codec = 1; prefs.save() })\n'
+    s = s.replace(anchor, anchor + call, 1)
+    s = s.rstrip('\n') + '\n\n' + open('/tmp/SharpnessRow.swift', encoding='utf-8').read()
+    changed.append('sharpness-row')
+
+codec_old = '                Text("H.265 (PS5 only)").tag(1)\n'
+codec_new = '                Text("H.265 (HDR-f\u00e4hig)").tag(1)\n'
+if codec_old in s:
+    s = s.replace(codec_old, codec_new, 1)
+    changed.append('codec-label')
+
+if changed:
+    open(p, 'w', encoding='utf-8').write(s)
+print('settings changed:', changed)
+PATCH_EOF
+
+python3 - <<'HDR_PATCH_EOF'
+# HDR-Codec (H.265 HDR = BT.2020/PQ, 10 Bit) in der App anwaehlbar machen.
+p = 'ios/Pylux/Views/SettingsView.swift'
+s = open(p, encoding='utf-8').read()
+if 'H.265 + HDR' not in s:
+    for cand in ('                Text("H.265 (HDR-fähig)").tag(1)\n',
+                 '                Text("H.265 (PS5 only)").tag(1)\n'):
+        if cand in s:
+            s = s.replace(cand, cand + '                Text("H.265 + HDR (BT.2020, 10 Bit)").tag(2)\n', 1)
+            print('settings: HDR-Option eingebaut')
+            break
+s = s.replace('case 1080: return codec == 1 ? 12000 : 15000',
+              'case 1080: return codec >= 1 ? 12000 : 15000')
+open(p, 'w', encoding='utf-8').write(s)
+
+p2 = 'ios/Pylux/Views/ConnectInfoEntryView.swift'
+s2 = open(p2, encoding='utf-8').read()
+if 'H.265 HDR' not in s2:
+    s2 = s2.replace('private let codecs = ["H.264", "H.265"]',
+                    'private let codecs = ["H.264", "H.265", "H.265 HDR"]', 1)
+    s2 = s2.replace('let ci = clamped(codecIndex, min: 0, max: 1)',
+                    'let ci = clamped(codecIndex, min: 0, max: 2)', 1)
+    open(p2, 'w', encoding='utf-8').write(s2)
+    print('connect-info: HDR-Option')
+HDR_PATCH_EOF
+
+python3 - <<'PATCH_EOF'
+p = 'ios/Pylux/App/PyluxAppDelegate.swift'
+s = open(p, encoding='utf-8').read()
+anchor = '    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {\n'
+if 'PXTuner.shared.start()' not in s and anchor in s:
+    s = s.replace(anchor, anchor + '        PXTuner.shared.start()\n', 1)
+old = '                AppReviewHelper.shared.requestReviewIfEligible(in: scene)\n'
+if old in s:
+    s = s.replace(old, '                // pxsharp: App-Store-Bewertung deaktiviert\n', 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('review: disabled')
+else:
+    print('review: anchor not found')
+PATCH_EOF
+
+python3 - <<'HERO_UI_PATCH'
+# Startbildschirm: grosse zentrierte Konsolenkarte statt Liste mit Button oben.
+p = 'ios/Pylux/Views/RemotePlayView.swift'
+s = open(p, encoding='utf-8').read()
+old = '''
+    private var hostListView: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(hostStore.displayHosts) { host in
+                    HostCardView(
+                        host: host,
+                        onTap: { hostTriggered(host) },
+                        onWakeup: host.isRegistered ? { hostStore.wakeupHost(host) } : nil,
+                        onEdit: {
+                            if case .manual(let mh) = host {
+                                manualHostToEdit = mh.manualHost
+                            }
+                        },
+                        onDelete: {
+                            hostToDelete = host
+                            showDeleteAlert = true
+                        }
+                    )
+                }
+            }
+            .padding(.bottom, 96) // room for FAB
+        }
+    }
+'''
+new = '''
+    private var hostListView: some View {
+        ScrollView {
+            VStack(spacing: 26) {
+                ForEach(hostStore.displayHosts) { host in
+                    PXConsoleCard(
+                        name: host.name ?? "PlayStation",
+                        address: host.hostAddress,
+                        isPS5: host.isPS5,
+                        isRegistered: host.isRegistered,
+                        onConnect: { hostTriggered(host) },
+                        onWake: host.isRegistered ? { hostStore.wakeupHost(host) } : nil,
+                        onEdit: {
+                            if case .manual(let mh) = host {
+                                manualHostToEdit = mh.manualHost
+                            }
+                        },
+                        onDelete: {
+                            hostToDelete = host
+                            showDeleteAlert = true
+                        }
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 20)
+            .padding(.top, 36)
+            .padding(.bottom, 110)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+'''
+if old in s and 'PXConsoleCard(' not in s:
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('startbildschirm: zentrierte Karte')
+else:
+    print('startbildschirm: Anker nicht gefunden')
+HERO_UI_PATCH
+
+python3 - <<'TENBIT_DECODE_PATCH'
+# Sperre: Decoder gab immer 8 Bit aus -- damit war HDR (10 Bit) unmoeglich.
+h = 'ios/Pylux/Bridge/VideoDecoder.h'
+s = open(h, encoding='utf-8').read()
+if 'output10Bit' not in s:
+    anchor = '@property (nonatomic, copy, nullable) PyluxVideoDecoderFrameCallback frameCallback;'
+    if anchor in s:
+        s = s.replace(anchor, anchor + '\n/// 10-Bit-Ausgabe (HDR). Wird nur gesetzt, wenn der Stream HDR liefert.\n@property (nonatomic, assign) BOOL output10Bit;', 1)
+        open(h, 'w', encoding='utf-8').write(s)
+        print('header: output10Bit')
+
+m = 'ios/Pylux/Bridge/VideoDecoder.m'
+s = open(m, encoding='utf-8').read()
+changed = []
+old_fmt = '(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),'
+new_fmt = '(id)kCVPixelBufferPixelFormatTypeKey: @(self.output10Bit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),'
+if old_fmt in s and 'self.output10Bit ?' not in s:
+    s = s.replace(old_fmt, new_fmt, 1); changed.append('fmt')
+
+old_err = '    if (err != noErr) {\n        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[createSession] VTDecompressionSessionCreate FAILED %d", (int)err);\n    }'
+new_err = ('    if (err != noErr && self.output10Bit) {\n'
+           '        NSDictionary *attrs8 = @{\n'
+           '            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),\n'
+           '            (id)kCVPixelBufferIOSurfacePropertiesKey: @{}\n'
+           '        };\n'
+           '        err = VTDecompressionSessionCreate(kCFAllocatorDefault, self.formatDesc, NULL, (__bridge CFDictionaryRef)attrs8, &cb, &_session);\n'
+           '        os_log(g_vdec_log, "[createSession] 10-bit nicht moeglich, Fallback 8-bit err=%d", (int)err);\n'
+           '    }\n'
+           '    if (err != noErr) {\n'
+           '        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[createSession] VTDecompressionSessionCreate FAILED %d", (int)err);\n'
+           '    }')
+if old_err in s and 'Fallback 8-bit' not in s:
+    s = s.replace(old_err, new_err, 1); changed.append('fallback')
+if changed:
+    open(m, 'w', encoding='utf-8').write(s)
+print('decoder:', changed)
+
+# Swift: 10 Bit nur bei HDR-Codec (2)
+p = 'ios/Pylux/Services/StreamSession.swift'
+s = open(p, encoding='utf-8').read()
+old = ('            codec: (connectInfo.videoCodec == 1 || connectInfo.videoCodec == 2)\n'
+       '                ? PyluxVideoCodec(rawValue: 1)!\n'
+       '                : PyluxVideoCodec(rawValue: 0)!')
+new = ('            codec: (connectInfo.videoCodec == 1 || connectInfo.videoCodec == 2)\n'
+       '                ? PyluxVideoCodec(rawValue: 1)!\n'
+       '                : PyluxVideoCodec(rawValue: 0)!')
+cnt = s.count(old)
+if 'output10Bit = ' not in s and cnt:
+    s = s.replace(old, old, 1)
+    s = s.replace('        var cInfo = ChiakiSessionBridgeConnectInfo()\n        var err: Int32 = 0',
+                  '        // HDR (Codec 2) braucht 10 Bit, sonst ist PQ-Bild stark gebandet.\n'
+                  '        decoder.output10Bit = (connectInfo.videoCodec == 2)\n\n'
+                  '        var cInfo = ChiakiSessionBridgeConnectInfo()\n        var err: Int32 = 0', 2)
+    open(p, 'w', encoding='utf-8').write(s)
+print('swift: 10bit =', 'output10Bit' in s)
+TENBIT_DECODE_PATCH
+
+python3 - <<'QUEUE_PATCH'
+# Puffer-Reserve fuer hohe Bitraten (Idee aus iPlay5): der Reorder-Queue
+# verwirft Pakete, wenn er volllaeuft -- bei 65 Mbit sind 256 Eintraege
+# nur ~36 ms. 1024 Eintraege geben Reserve, ohne Latenz zu kosten.
+p = 'lib/src/takion.c'
+s = open(p, encoding='utf-8').read()
+old = '#define TAKION_REORDER_QUEUE_SIZE_EXP 8 // => 256 entries'
+new = '#define TAKION_REORDER_QUEUE_SIZE_EXP 10 // => 1024 entries (PXSHARP)'
+if old in s and 'PXSHARP' not in s.split(old)[0][-200:]:
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('takion: queue 1024')
+else:
+    print('takion: nichts zu tun')
+QUEUE_PATCH
+python3 - <<'LAUNCHSPEC_PATCH'
+# Die PS5 liest ihre Bitraten-Obergrenze aus dem LaunchSpec-Feld
+# "bwKbpsSent". Community-Ergebnisse: 25000 -> ~15 Mbit, 65000 -> ~63 Mbit,
+# 100000 -> ~97 Mbit. Wir heben die Untergrenze auf 65000, damit die
+# angeforderte Rate auch wirklich ankommt.
+p = 'lib/src/streamconnection.c'
+s = open(p, encoding='utf-8').read()
+old = 'launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;'
+new = ('launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;\n'
+       '\t// PXSHARP: Untergrenze 65000. Die Konsole uebernimmt diesen Wert als'
+       ' Ziel-Bitrate; 25000 (Standard) ergibt nur ~15 Mbit.\n'
+       '\tif(launch_spec.bw_kbps_sent < 100000)\n'
+       '\t\tlaunch_spec.bw_kbps_sent = 100000;')
+if old in s and 'PXSHARP: Untergrenze 65000' not in s:
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('launchspec: Untergrenze 65000')
+else:
+    print('launchspec: nichts zu tun')
+p2 = 'lib/src/launchspec.c'
+s2 = open(p2, encoding='utf-8').read()
+if '0.001000' in s2:
+    s2 = s2.replace('0.001000', '0.000000', 1)
+    open(p2, 'w', encoding='utf-8').write(s2)
+    print('launchspec: bwLoss 0')
+p3 = 'lib/src/streamconnection.c'
+s3 = open(p3, encoding='utf-8').read()
+if 'launch_spec.rtt = session->rtt_us / 1000;' in s3:
+    s3 = s3.replace('launch_spec.rtt = session->rtt_us / 1000;',
+        'launch_spec.rtt = session->rtt_us / 1000;\n\tif(launch_spec.rtt > 8) launch_spec.rtt = 8;', 1)
+    open(p3, 'w', encoding='utf-8').write(s3)
+    print('launchspec: rtt begrenzt')
+
+
+LAUNCHSPEC_PATCH
+python3 - <<'KEYFRAME_PATCH'
+# Keyframe-Anforderung: false im Sample-Callback meldet der Konsole ein
+# korruptes Bild -> sie sendet ein neues I-Frame. Bekanntes chiaki-Problem:
+# der Stream wird mit der Zeit schlechter; ein Keyframe holt die Qualitaet
+# zurueck, ohne die Sitzung zu trennen.
+h = 'ios/Pylux/Bridge/VideoDecoder.h'
+sh = open(h, encoding='utf-8').read()
+if 'PyluxVideoDecoderRequestKeyframe' not in sh:
+    a = 'bool PyluxVideoDecoderVideoSampleCallback('
+    ins = '/// Fordert beim naechsten Sample ein neues Keyframe an.\nvoid PyluxVideoDecoderRequestKeyframe(void);\n\n' + a
+    sh = sh.replace(a, ins, 1)
+    open(h, 'w', encoding='utf-8').write(sh)
+    print('keyframe: header')
+m = 'ios/Pylux/Bridge/VideoDecoder.m'
+sm = open(m, encoding='utf-8').read()
+if 'g_px_keyframe_request' not in sm:
+    a2 = 'bool PyluxVideoDecoderVideoSampleCallback(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool frame_recovered, void *user) {'
+    ins2 = 'static volatile int g_px_keyframe_request = 0;\n\nvoid PyluxVideoDecoderRequestKeyframe(void) { g_px_keyframe_request = 1; }\n\n' + a2
+    sm = sm.replace(a2, ins2, 1)
+    b_old = '    PyluxVideoDecoder *dec = (__bridge PyluxVideoDecoder *)user;\n    return [dec feedSample:buf size:buf_size framesLost:frames_lost frameRecovered:frame_recovered];'
+    b_new = '    PyluxVideoDecoder *dec = (__bridge PyluxVideoDecoder *)user;\n    if (g_px_keyframe_request) {\n        g_px_keyframe_request = 0;\n        return false;\n    }\n    return [dec feedSample:buf size:buf_size framesLost:frames_lost frameRecovered:frame_recovered];'
+    sm = sm.replace(b_old, b_new, 1)
+    open(m, 'w', encoding='utf-8').write(sm)
+    print('keyframe: impl')
+KEYFRAME_PATCH
+python3 - <<'HDR_ATTACH_PATCH'
+# HDR: VideoToolbox setzt bei selbst erzeugter Formatbeschreibung keine
+# Farb-Anhaenge. Ohne diese Markierung erkennt der Renderer PQ nie -> HDR
+# bleibt aus, selbst wenn die Konsole HDR sendet.
+p = 'ios/Pylux/Bridge/VideoDecoder.m'
+s = open(p, encoding='utf-8').read()
+old = '''    if (layer) {
+        CMVideoFormatDescriptionRef fmtDesc = NULL;'''
+new = '''    if (layer) {
+        // Nur im 10-Bit/HDR-Pfad markieren -- sonst wuerde SDR als PQ gerechnet.
+        OSType pxFmt = CVPixelBufferGetPixelFormatType(imageBuffer);
+        if (dec.output10Bit &&
+            (pxFmt == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+             pxFmt == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange)) {
+            CVBufferSetAttachment(imageBuffer, kCVImageBufferColorPrimariesKey,
+                                  kCVImageBufferColorPrimaries_ITU_R_2020,
+                                  kCVAttachmentMode_ShouldPropagate);
+            CVBufferSetAttachment(imageBuffer, kCVImageBufferTransferFunctionKey,
+                                  kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
+                                  kCVAttachmentMode_ShouldPropagate);
+        }
+        CMVideoFormatDescriptionRef fmtDesc = NULL;'''
+if old in s and 'kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ' not in s:
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('hdr-attach: gesetzt')
+else:
+    print('hdr-attach: nichts zu tun')
+HDR_ATTACH_PATCH
+
+python3 - <<'HOST_BITRATE_PATCH'
+# Vierte Sperre: manuell angelegte Hosts hatten 15000 kbit fest im Code.
+p = 'ios/Pylux/Views/ConnectInfoEntryView.swift'
+s = open(p, encoding='utf-8').read()
+old = 'let bitrate: UInt32 = r.h == 1080 ? 15000 : 10000'
+new = 'let bitrate: UInt32 = UInt32(max(2000, min(200000, StreamPreferences.load().effectiveBitrate)))'
+if old in s and 'StreamPreferences.load().effectiveBitrate)))' not in s:
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('host-bitrate: nutzt jetzt die Einstellung')
+else:
+    print('host-bitrate: nichts zu tun')
+HOST_BITRATE_PATCH
+
+python3 - <<'CTRL_BITRATE_PATCH'
+# Die angeforderte Bitrate wirklich an die Konsole senden.
+p = 'lib/src/ctrl.c'
+s = open(p, encoding='utf-8').read()
+if 'PXSHARP_REAL_BITRATE' not in s:
+    old = '\t\tuint8_t bitrate[4] = { 0 };\n'
+    new = ('\t\tuint8_t bitrate[4] = { 0 };\n'
+           '\t\t// PXSHARP_REAL_BITRATE: Kodierung wie streaming_type darunter --\n'
+           '\t\t// 32 Bit little-endian, in kbps. Vorher standen hier immer vier\n'
+           '\t\t// Nullbytes, deshalb waehlte die Konsole die Rate selbst und der\n'
+           '\t\t// Regler in der App hatte keine Wirkung.\n'
+           '\t\t{\n'
+           '\t\t\tunsigned int px_br = session->connect_info.video_profile.bitrate;\n'
+           '\t\t\tif(px_br >= 2000 && px_br <= 200000)\n'
+           '\t\t\t{\n'
+           '\t\t\t\tbitrate[0] = px_br & 0xff;\n'
+           '\t\t\t\tbitrate[1] = (px_br >> 8) & 0xff;\n'
+           '\t\t\t\tbitrate[2] = (px_br >> 16) & 0xff;\n'
+           '\t\t\t\tbitrate[3] = (px_br >> 24) & 0xff;\n'
+           '\t\t\t}\n'
+           '\t\t}\n')
+    if old in s:
+        s = s.replace(old, new, 1)
+        open(p, 'w', encoding='utf-8').write(s)
+        print('ctrl.c: Bitrate wird jetzt gesendet')
+    else:
+        print('ctrl.c: Anker nicht gefunden')
+else:
+    print('ctrl.c: schon gepatcht')
+CTRL_BITRATE_PATCH
+
+python3 - <<'CAPS_PATCH'
+p = 'ios/Pylux/Views/SettingsView.swift'
+s = open(p, encoding='utf-8').read()
+n = 0
+for old, new in [
+    ('(bitrate >= 2000 && bitrate <= 50000)', '(bitrate >= 2000 && bitrate <= 200000)'),
+    ('prefs.bitrate < 2000 || prefs.bitrate > 50000', 'prefs.bitrate < 2000 || prefs.bitrate > 200000'),
+    ('Valid range: 2000 - 50000 kbps', 'Valid range: 2000 - 200000 kbps'),
+    ('// Bitrate (with validation 2000-50000, matches Android)', '// Bitrate (PXSharp: 2000-200000 kbps)'),
+]:
+    if old in s:
+        s = s.replace(old, new, 1); n += 1
+if n:
+    open(p, 'w', encoding='utf-8').write(s)
+print('caps entfernt:', n)
+CAPS_PATCH
+
+python3 - <<'QUICKPANEL_PATCH'
+# Bild-Panel direkt im Stream (ohne die Einstellungen zu verlassen).
+p = 'ios/Pylux/Views/StreamView.swift'
+s = open(p, encoding='utf-8').read()
+changed = []
+
+anchor = '    @State private var showStats: Bool\n'
+if 'showPicturePanel' not in s and anchor in s:
+    s = s.replace(anchor, anchor + '    @State private var showPicturePanel = false\n', 1)
+    changed.append('state')
+
+anchor = '            Spacer()\n\n            // Display mode toggle group'
+if 'Bild einstellen' not in s and anchor in s:
+    btn = ('            Button {\n'
+           '                showPicturePanel = true\n'
+           '            } label: {\n'
+           '                Image(systemName: "slider.horizontal.3")\n'
+           '                    .font(.system(size: 15, weight: .medium))\n'
+           '                    .foregroundColor(.white)\n'
+           '                    .frame(width: 44, height: 36)\n'
+           '            }\n'
+           '            .overlay(\n'
+           '                RoundedRectangle(cornerRadius: 9)\n'
+           '                    .stroke(Color.white.opacity(0.45), lineWidth: 1)\n'
+           '            )\n'
+           '            .accessibilityLabel("Bild einstellen")\n\n'
+           '            Spacer()\n\n'
+           '            // Display mode toggle group')
+    s = s.replace(anchor, btn, 1)
+    changed.append('button')
+
+anchor = ('            if showOverlay {\n'
+          '                VStack {\n'
+          '                    Spacer()\n'
+          '                    overlayBar\n'
+          '                }\n'
+          '                .transition(.move(edge: .bottom))\n'
+          '            }\n')
+if 'PXQuickPicturePanel(' not in s and anchor in s:
+    panel = anchor + ('\n'
+        '            if showPicturePanel {\n'
+        '                ZStack {\n'
+        '                    Color.black.opacity(0.45).ignoresSafeArea()\n'
+        '                        .onTapGesture { showPicturePanel = false }\n'
+        '                    PXQuickPicturePanel(isPresented: $showPicturePanel)\n'
+        '                        .frame(maxWidth: 540)\n'
+        '                        .padding(.horizontal, 20)\n'
+        '                }\n'
+        '                .transition(.opacity)\n'
+        '                .zIndex(15_000)\n'
+        '            }\n')
+    s = s.replace(anchor, panel, 1)
+    changed.append('panel')
+
+# Leiste als schwebende Karte statt voller schwarzer Streifen
+s = s.replace('                    overlayBar\n',
+              '                    overlayBar\n                        .padding(.horizontal, 22)\n                        .padding(.bottom, 14)\n', 1)
+s = s.replace('        .background(Color.black.opacity(0.6))\n    }',
+              '        .background(\n'
+              '            RoundedRectangle(cornerRadius: 14, style: .continuous)\n'
+              '                .fill(Color.black.opacity(0.55))\n'
+              '                .overlay(\n'
+              '                    RoundedRectangle(cornerRadius: 14, style: .continuous)\n'
+              '                        .stroke(Color.white.opacity(0.08), lineWidth: 1)\n'
+              '                )\n'
+              '        )\n    }', 1)
+
+open(p, 'w', encoding='utf-8').write(s)
+print('quickpanel:', changed)
+QUICKPANEL_PATCH
+
+python3 - <<'BITRATE_PATCH_EOF'
+# Automatik-Bitrate fuer 1080p. Der alte Deckel (12000) begrenzte die
+# Bildqualitaet: die PS5 liefert ueber Remote Play praktisch bis ~30 Mbit.
+# Wichtig: der HDR-Patch oben schreibt die Zeile ggf. schon in die Form
+# "codec >= 1" um. Deshalb per Regex ersetzen, nicht per festem String.
+import re
+p = 'ios/Pylux/Views/SettingsView.swift'
+s = open(p, encoding='utf-8').read()
+pat = re.compile(r'case 1080: return codec\s*[=><!]+\s*1\s*\?\s*\d+\s*:\s*\d+')
+new = 'case 1080: return codec >= 1 ? 60000 : 40000'
+s2, n = pat.subn(new, s, count=1)
+if n:
+    open(p, 'w', encoding='utf-8').write(s2)
+    print('bitrate auto: 1080p -> 60000 (H.265) / 40000 (H.264)')
+else:
+    print('bitrate auto: anchor not found')
+BITRATE_PATCH_EOF
+
+cat > /tmp/pxaudio.txt <<'PX_AUDIO_EOF'
+// ---- PXSHARP_AUDIO_DSP: 5-Band-EQ + 3D-Weite + Soft-Limiter ----------------
+#include <math.h>
+#include <stdint.h>
+
+typedef struct {
+    float b0, b1, b2, a1, a2;
+    float x1[2], x2[2], y1[2], y2[2];
+} PXBiquad;
+
+static PXBiquad g_px_bands[5];
+static float g_px_db[5] = {0,0,0,0,0};
+static float g_px_3d = 0.0f;
+static int g_px_ready = 0;
+static int g_px_tick = 0;
+static float g_px_delay[64];
+static int g_px_dpos = 0;
+
+static void px_band(PXBiquad *q, float fs, float f, float db, float Q) {
+    float A = powf(10.0f, db / 40.0f);
+    float w0 = 2.0f * (float)M_PI * f / fs;
+    float cw = cosf(w0), sw = sinf(w0);
+    float al = sw / (2.0f * Q);
+    float a0 = 1.0f + al / A;
+    q->b0 = (1.0f + al * A) / a0;
+    q->b1 = (-2.0f * cw) / a0;
+    q->b2 = (1.0f - al * A) / a0;
+    q->a1 = (-2.0f * cw) / a0;
+    q->a2 = (1.0f - al / A) / a0;
+}
+
+static float px_bq(PXBiquad *q, float x, int ch) {
+    float y = q->b0 * x + q->b1 * q->x1[ch] + q->b2 * q->x2[ch]
+            - q->a1 * q->y1[ch] - q->a2 * q->y2[ch];
+    q->x2[ch] = q->x1[ch]; q->x1[ch] = x;
+    q->y2[ch] = q->y1[ch]; q->y1[ch] = y;
+    return y;
+}
+
+static void px_dsp_update(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    static const float freqs[5] = {45.0f, 150.0f, 600.0f, 2400.0f, 9000.0f};
+    for (int i = 0; i < 5; i++) {
+        NSString *k = [NSString stringWithFormat:@"pxAudioEQ%d", i];
+        float v = (float)[d doubleForKey:k];
+        if (v < -18.0f) v = -18.0f;
+        if (v > 18.0f) v = 18.0f;
+        if (!g_px_ready || fabsf(v - g_px_db[i]) > 0.05f) {
+            g_px_db[i] = v;
+            px_band(&g_px_bands[i], 48000.0f, freqs[i], v, 0.75f);
+        }
+    }
+    float w = (float)[d doubleForKey:@"pxAudio3D"];
+    if (w < 0.0f) w = 0.0f;
+    if (w > 1.0f) w = 1.0f;
+    g_px_3d = w;
+    g_px_ready = 1;
+}
+
+static inline float px_soft(float x) {
+    float a = fabsf(x);
+    if (a <= 0.95f) return x;
+    float over = a - 0.95f;
+    float y = 0.95f + over / (1.0f + over * 2.2f);
+    return x < 0 ? -y : y;
+}
+
+/// Wird pro Audio-Puffer aufgerufen. frames = Samples pro Kanal.
+static void pylux_audio_process(int16_t *buf, size_t frames, int channels) {
+    if (channels < 1) return;
+    if (!g_px_ready || (++g_px_tick & 31) == 0) px_dsp_update();
+    int nch = channels > 2 ? 2 : channels;
+    float amt = g_px_3d;
+
+    // Headroom: bei starkem Bass- oder 3D-Einsatz den Eingang absenken, damit
+    // der Limiter nicht dauerhaft arbeitet (das klang "schmutzig").
+    float boost = 0.0f;
+    for (int b = 0; b < 3; b++) if (g_px_db[b] > 0) boost += g_px_db[b];
+    float head = 1.0f / (1.0f + boost * 0.012f + amt * 0.20f);
+    if (head < 0.55f) head = 0.55f;
+
+    for (size_t i = 0; i < frames; i++) {
+        int16_t *fr = buf + i * channels;
+        float L = fr[0] / 32768.0f * head;
+        float R = nch > 1 ? fr[1] / 32768.0f * head : L;
+
+        for (int b = 0; b < 5; b++) {
+            L = px_bq(&g_px_bands[b], L, 0);
+            R = px_bq(&g_px_bands[b], R, 1);
+        }
+
+        if (amt > 0.01f) {
+            float mid = (L + R) * 0.5f;
+            float side = (L - R) * 0.5f;
+            g_px_delay[g_px_dpos & 63] = side;
+            float sd = g_px_delay[(g_px_dpos - 9) & 63];
+            g_px_dpos++;
+            // Breitere 3D-Buehne: mehr Seitenanteil und laengerer Haas-Abstand.
+            // 2,30 war zu viel: mit vollem EQ kam ein unsauberer, dröhnender
+            // Bass. Jetzt milder und mit geregeltem Seitenanteil.
+            side = side * (1.0f + 1.45f * amt) + sd * 0.55f * amt;
+            L = mid + side;
+            R = mid - side;
+        }
+
+        L = px_soft(L);
+        R = px_soft(R);
+        fr[0] = (int16_t)lrintf(fmaxf(-1.0f, fminf(1.0f, L)) * 32767.0f);
+        if (nch > 1) fr[1] = (int16_t)lrintf(fmaxf(-1.0f, fminf(1.0f, R)) * 32767.0f);
+    }
+}
+// ---- ENDE PXSHARP_AUDIO_DSP ------------------------------------------------
+PX_AUDIO_EOF
+
+python3 - <<'TENBIT_PATCH_EOF'
+print('10-Bit-Decoder deaktiviert (verursachte Absturz in Build 89)')
+TENBIT_PATCH_EOF
+
+python3 - <<'METRICS_PATCH_EOF'
+# Stream-Messwerte (Bitrate, Paketverlust) bereitstellen.
+p = 'ios/Pylux/Views/StreamView.swift'
+s = open(p, encoding='utf-8').read()
+anchor = '    private func updateStats() {\n'
+add = (
+    '        // pxsharp: Messwerte der Leitung bereitstellen (auch ohne Overlay)\n'
+    '        if isConnected, let pxm = session.metrics() {\n'
+    '            UserDefaults.standard.set(String(format: "%.1f", pxm.bitrateMbps), forKey: "pxSharpStreamMbps")\n'
+    '            UserDefaults.standard.set(String(format: "%.2f", pxm.packetLoss * 100.0), forKey: "pxSharpStreamLoss")\n'
+    '            UserDefaults.standard.set("\\(pxm.width)x\\(pxm.height)", forKey: "pxSharpStreamRes")\n'
+    '        }\n'
+)
+if anchor in s and 'pxSharpStreamMbps' not in s:
+    s = s.replace(anchor, anchor + add, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('stream-metrics: eingebaut')
+else:
+    print('stream-metrics: uebersprungen')
+METRICS_PATCH_EOF
+
+python3 - <<'AUDIO_PATCH_EOF'
+p = 'ios/Pylux/Bridge/ChiakiAudioOutputIOS.m'
+s = open(p, encoding='utf-8').read()
+if 'PXSHARP_AUDIO_DSP' not in s:
+    dsp = open('/tmp/pxaudio.txt', encoding='utf-8').read()
+    anchor = 'static void aq_output_callback(void *userdata, AudioQueueRef q, AudioQueueBufferRef buf) {'
+    if anchor in s:
+        s = s.replace(anchor, dsp + '\n' + anchor, 1)
+    old_tail = '    buf->mAudioDataByteSize = cap;\n    AudioQueueEnqueueBuffer(ao->aq, buf, 0, NULL);'
+    new_tail = ('    buf->mAudioDataByteSize = cap;\n'
+                '    int pch = (int)(ao->channels > 2 ? 2 : (ao->channels > 0 ? ao->channels : 2));\n'
+                '    pylux_audio_process((int16_t *)buf->mAudioData, (size_t)(cap / 2 / pch), pch);\n'
+                '    AudioQueueEnqueueBuffer(ao->aq, buf, 0, NULL);')
+    if old_tail in s:
+        s = s.replace(old_tail, new_tail, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('audio-dsp: eingebaut')
+else:
+    print('audio-dsp: schon vorhanden')
+AUDIO_PATCH_EOF
+
+python3 - <<'PATCH_EOF'
+# Spenden-Aufforderung ("Keep Pylux alive") komplett abschalten.
+p = 'ios/Pylux/Donation/DonationPromptCoordinator.swift'
+s = open(p, encoding='utf-8').read()
+done = []
+a = '    func scheduleOfferIfEligible() {\n'
+if a in s and 'pxsharp-spenden-aus' not in s:
+    s = s.replace(a, a + '        return  // pxsharp-spenden-aus\n', 1)
+    done.append('auto-prompt')
+b = '    func openSupportFromSettings() {\n'
+if b in s and s.count('pxsharp-spenden-aus') < 2:
+    s = s.replace(b, b + '        return  // pxsharp-spenden-aus\n', 1)
+    done.append('settings-entry')
+if done:
+    open(p, 'w', encoding='utf-8').write(s)
+print('spenden-aufforderung:', done)
+PATCH_EOF
+
+git --no-pager diff --stat | tail -8
+
+echo "--- Abhängigkeiten ---"
+brew install cmake ninja protobuf@29 python-setuptools
+pip3 install --user --break-system-packages 'protobuf>=5,<6'
+export PATH="$(brew --prefix)/opt/protobuf@29/bin:$PATH"
+
+echo "--- iOS Toolchain ---"
+if [ ! -f ios.toolchain.cmake ]; then
+  curl -sL -o ios.toolchain.cmake \
+    https://raw.githubusercontent.com/leetal/ios-cmake/master/ios.toolchain.cmake
+fi
+
+echo "--- Baue chiaki-lib ---"
+cmake -S . -B build-iphoneos -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+  -DPLATFORM=OS64 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUSE_LIBIDN2=OFF \
+  -DCURL_USE_LIBPSL=OFF \
+  -DUSE_NGHTTP2=OFF \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+cmake --build build-iphoneos --config Release --target chiaki-lib
+
+echo "--- Kombiniere statische Libs ---"
+find build-iphoneos -name "*.a" -print0 | \
+  xargs -0 libtool -static -o build-iphoneos/libchiaki_complete.a
+
+echo "--- Baue App (ohne Signatur) ---"
+xcodebuild -project Pylux.xcodeproj -scheme Pylux \
+  -sdk iphoneos -configuration Release \
+  -derivedDataPath build-derived \
+  MARKETING_VERSION=1.0.0 \
+  CURRENT_PROJECT_VERSION=${BUILD_NUM} \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY="" \
+  DEVELOPMENT_TEAM="" \
+  build
+
+echo "--- Packe IPA ---"
+APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
+test -d "$APP"
+/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist"
+mkdir -p out/Payload
+cp -R "$APP" out/Payload/
+cd out
+zip -qry PXSharp-unsigned.ipa Payload
+ls -lh PXSharp-unsigned.ipa
