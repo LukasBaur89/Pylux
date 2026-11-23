@@ -149,6 +149,11 @@ jobs:
               private var hlGainR: Double = 1.0
               private var hlGainB: Double = 1.0
               private var hlCounter: Int = 0
+              // Automatischer Bereich (Schwarz-/Weisspunkt). Echte Fotos nutzen den
+              // vollen Wertebereich; unser Stream endet gemessen bei 237 statt 255 und
+              // beginnt bei 0 statt ~24. Das ist der Hauptgrund fuer den flauen Look.
+              private var lvlBlack: Double = 0.0
+              private var lvlWhite: Double = 1.0
 
               private var casKernel: CIKernel?
               private var casTried = false
@@ -516,12 +521,30 @@ jobs:
                   }
                   guard drawn else { return }
                   var rs: [Double] = []; var gs: [Double] = []; var bs: [Double] = []
+                  var lumas: [Double] = []
                   for i in stride(from: 0, to: w * h * 4, by: 4) {
                       let R = Double(buf[i]) / 255.0
                       let G = Double(buf[i + 1]) / 255.0
                       let B = Double(buf[i + 2]) / 255.0
                       let y = 0.2126 * R + 0.7152 * G + 0.0722 * B
+                      lumas.append(y)
                       if y > 0.72 { rs.append(R); gs.append(G); bs.append(B) }
+                  }
+                  // Bereich messen: 2- und 98-Perzentil der Helligkeit.
+                  if lumas.count > 200 {
+                      lumas.sort()
+                      let p2 = lumas[Int(Double(lumas.count) * 0.02)]
+                      let p98 = lumas[Int(Double(lumas.count) * 0.98)]
+                      // Nur eingreifen, wenn wirklich Bereich fehlt.
+                      if p98 > 0.55 {
+                          var whiteT = min(max(p98, 0.80), 0.97)
+                          if whiteT < 0.86 { whiteT = 0.86 }
+                          var blackT = p2 - 0.008
+                          if blackT < 0 { blackT = 0 }
+                          if blackT > 0.05 { blackT = 0.05 }
+                          lvlWhite = lvlWhite * 0.85 + whiteT * 0.15
+                          lvlBlack = lvlBlack * 0.85 + blackT * 0.15
+                      }
                   }
                   // Zu wenige helle Pixel (Nacht, dunkler Raum): nichts tun.
                   guard rs.count >= 40 else { return }
@@ -923,8 +946,8 @@ jobs:
                       && hueSat < 0.001 && castK < 0.001
                   if isNeutral { return input }
 
-                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.4f/%.4f",
-                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK, hlGainR, hlGainB)
+                  let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.4f/%.4f/%.4f/%.4f",
+                                   gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK, hlGainR, hlGainB, lvlBlack, lvlWhite)
                   if key != colorLUTKey || colorLUTData == nil {
                       // Die LUT hat 33^3 = 35.937 Stützpunkte (statt 65^3 = 274.625).
                       // 33er-Würfel sind der Standard für 3D-LUTs, der Unterschied ist
@@ -1076,6 +1099,20 @@ jobs:
                                   var oR = pow(r, 1.0 / 2.2)
                                   var oG = pow(gg2, 1.0 / 2.2)
                                   var oB = pow(b, 1.0 / 2.2)
+
+                                  // AUTOMATISCHER BEREICH: Schwarz- und Weisspunkt
+                                  // spreizen, wie ein Fernseher es bei "Auto" macht.
+                                  // Gleichmaessige Skalierung aller Kanaele -> Farbton
+                                  // bleibt unveraendert.
+                                  if lvlWhite - lvlBlack > 0.05 && (lvlWhite < 0.995 || lvlBlack > 0.002) {
+                                      let yOut0 = 0.2126 * oR + 0.7152 * oG + 0.0722 * oB
+                                      if yOut0 > 0.002 {
+                                          var ys = (yOut0 - lvlBlack) / (lvlWhite - lvlBlack)
+                                          if ys < 0 { ys = 0 }; if ys > 1 { ys = 1 }
+                                          let sc = ys / yOut0
+                                          oR *= sc; oG *= sc; oB *= sc
+                                      }
+                                  }
 
                                   // Wolken-Abgleich: wirkt nur oberhalb ~62 % Helligkeit,
                                   // damit Mitten und Schatten unveraendert bleiben.
