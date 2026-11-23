@@ -162,6 +162,7 @@ jobs:
               private var midGainB: Double = 1.0
               private var hlNearWhiteShare: Double = 0.0
               private var lastClipShare: Double = 0.0
+              private var lowRateAccum: Double = 0
 
               private var casKernel: CIKernel?
               private var casTried = false
@@ -360,7 +361,12 @@ jobs:
                       parts.append("hdr=\(hdr ? 1 : 0)")
                       let line = parts.joined(separator: "  ·  ")
                       UserDefaults.standard.set(line, forKey: "pxSharpDiag")
-                      DispatchQueue.main.async { [weak self] in self?.diagLabel.text = line }
+                      DispatchQueue.main.async { [weak self] in
+                      guard let self = self else { return }
+                      let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
+                      if self.diagLabel.isHidden == showDiag { self.diagLabel.isHidden = !showDiag }
+                      self.diagLabel.text = line
+                  }
                       os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
                              CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), hdr ? 1 : 0)
                   }
@@ -1997,6 +2003,22 @@ jobs:
                   // A/B-Vergleich: schaltet JEDE Nachbearbeitung ab, damit man den
                   // Unterschied zwischen "verarbeitet" und "roh" direkt sieht.
                   let bypassNow = UserDefaults.standard.bool(forKey: "pxSharpBypass")
+
+                  // QUALITAETS-WATCHDOG. Bekanntes Problem in chiaki: der Stream wird
+                  // mit der Zeit schlechter, bis man die Verbindung neu aufbaut. Ein
+                  // neues Keyframe holt die Qualitaet zurueck, ohne die Sitzung zu
+                  // trennen. Faellt die Rate 6 Sekunden unter 7 Mbit, fordern wir eins an.
+                  let rateNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0
+                  if rateNow > 0.2 && rateNow < 7.0 {
+                      lowRateAccum += 1.0 / 60.0
+                      if lowRateAccum > 6.0 {
+                          lowRateAccum = 0
+                          PyluxVideoDecoderRequestKeyframe()
+                          os_log(.default, log: videoViewLog, "[px] keyframe angefordert (%.1f Mbit)", rateNow)
+                      }
+                  } else {
+                      lowRateAccum = 0
+                  }
 
                   // ---- Bildautomatik ------------------------------------------------
                   // Misst jede Szene und korrigiert nur das, was messbar danebenliegt:
@@ -4627,6 +4649,31 @@ jobs:
           print('swift: 10bit =', 'output10Bit' in s)
           TENBIT_DECODE_PATCH
 
+          python3 - <<'KEYFRAME_PATCH'
+          # Keyframe-Anforderung: false im Sample-Callback meldet der Konsole ein
+          # korruptes Bild -> sie sendet ein neues I-Frame. Bekanntes chiaki-Problem:
+          # der Stream wird mit der Zeit schlechter; ein Keyframe holt die Qualitaet
+          # zurueck, ohne die Sitzung zu trennen.
+          h = 'ios/Pylux/Bridge/VideoDecoder.h'
+          sh = open(h, encoding='utf-8').read()
+          if 'PyluxVideoDecoderRequestKeyframe' not in sh:
+              a = 'bool PyluxVideoDecoderVideoSampleCallback('
+              ins = '/// Fordert beim naechsten Sample ein neues Keyframe an.\nvoid PyluxVideoDecoderRequestKeyframe(void);\n\n' + a
+              sh = sh.replace(a, ins, 1)
+              open(h, 'w', encoding='utf-8').write(sh)
+              print('keyframe: header')
+          m = 'ios/Pylux/Bridge/VideoDecoder.m'
+          sm = open(m, encoding='utf-8').read()
+          if 'g_px_keyframe_request' not in sm:
+              a2 = 'bool PyluxVideoDecoderVideoSampleCallback(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool frame_recovered, void *user) {'
+              ins2 = 'static volatile int g_px_keyframe_request = 0;\n\nvoid PyluxVideoDecoderRequestKeyframe(void) { g_px_keyframe_request = 1; }\n\n' + a2
+              sm = sm.replace(a2, ins2, 1)
+              b_old = '    PyluxVideoDecoder *dec = (__bridge PyluxVideoDecoder *)user;\n    return [dec feedSample:buf size:buf_size framesLost:frames_lost frameRecovered:frame_recovered];'
+              b_new = '    PyluxVideoDecoder *dec = (__bridge PyluxVideoDecoder *)user;\n    if (g_px_keyframe_request) {\n        g_px_keyframe_request = 0;\n        return false;\n    }\n    return [dec feedSample:buf size:buf_size framesLost:frames_lost frameRecovered:frame_recovered];'
+              sm = sm.replace(b_old, b_new, 1)
+              open(m, 'w', encoding='utf-8').write(sm)
+              print('keyframe: impl')
+          KEYFRAME_PATCH
           python3 - <<'HDR_ATTACH_PATCH'
           # HDR: VideoToolbox setzt bei selbst erzeugter Formatbeschreibung keine
           # Farb-Anhaenge. Ohne diese Markierung erkennt der Renderer PQ nie -> HDR
