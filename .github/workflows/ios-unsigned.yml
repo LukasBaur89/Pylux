@@ -1085,7 +1085,11 @@ jobs:
                       let now = CACurrentMediaTime()
                       if colorLUTData == nil || now - lutLastBuild > 0.08 {
                           lutLastBuild = now
-                          let n = 33
+                          // Farbtiefe der 3D-LUT: 33^3 ist schnell, 65^3 ist die
+                          // "10-Bit-Stufe" -- feinere Abstufungen, weniger Banding,
+                          // aber rund dreimal so teuer beim Aufbau.
+                          let lutPref = (UserDefaults.standard.object(forKey: "pxSharpLutSize") as? Int) ?? 33
+                          let n = lutPref >= 65 ? 65 : 33
                           var data = [Float](repeating: 0, count: n * n * n * 4)
                           var idx = 0
                           for bi in 0..<n {
@@ -4524,6 +4528,7 @@ jobs:
               @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
+              @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
               @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
               @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
               @AppStorage("pxRenderMs") private var liveRender: String = "—"
@@ -4640,7 +4645,38 @@ jobs:
                           .font(.caption)
                           .foregroundColor(.secondary)
 
-                      pxHead("6 · Verbindung", "Gilt beim nächsten Verbinden.")
+                      pxHead("6 · GPU-Techniken", "Was moderne Karten können — als Option, soweit übertragbar.")
+                      Picker("Upscaler (DLSS-Super-Resolution-Prinzip)", selection: $metalFX) {
+                          Text("Lanczos — bewährt").tag(false)
+                          Text("MetalFX — Apples KI-Scaler").tag(true)
+                      }
+                      Text("Bildet DLSS Super Resolution nach: rekonstruiert Kanten beim Hochskalieren. Lanczos ist stabil, MetalFX schärfer — wird das Bild grau, zurück auf Lanczos.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      Picker("Farbtiefe der Tabelle (10-Bit-Prinzip)", selection: $lutSize) {
+                          Text("33³ — schnell").tag(33)
+                          Text("65³ — präzise, weniger Banding").tag(65)
+                      }
+                      Text("Entspricht der 10-Bit-Verarbeitung moderner Karten: feinere Farbstufen in Verläufen. Kostet Rechenzeit beim Aufbau, wirkt sofort.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      Picker("Latenz-Modus (Reflex-Prinzip)", selection: $paceHz) {
+                          Text("60 Hz — 1:1 mit der Quelle").tag(60)
+                          Text("120 Hz — Bild früher auf dem Glas").tag(120)
+                      }
+                      Text("Reflex senkt die Latenz der Render-Pipeline. Bei uns entspricht das der Anzeige-Frequenz: 120 Hz zeigt jedes Bild bis zu 8 ms früher.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      VStack(alignment: .leading, spacing: 4) {
+                          Text("Nicht übertragbar:").font(.caption).bold()
+                          Text("• Frame Generation braucht Bewegungsvektoren je Pixel — die liefert nur die Engine, nicht der Stream.")
+                          Text("• Ray Reconstruction braucht Raytracing-Daten. Der Stream enthält nur ein fertiges Bild.")
+                          Text("• 3D-Guided Rendering braucht Tiefe und Material-IDs.")
+                      }
+                      .font(.caption2)
+                      .foregroundColor(.secondary)
+
+                      pxHead("7 · Verbindung", "Gilt beim nächsten Verbinden.")
                       Picker("Codec", selection: $codecIdx) {
                           Text("H.264 (kompatibel)").tag(0)
                           Text("H.265 (bessere Qualität)").tag(1)
