@@ -289,7 +289,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             os_log(.default, log: videoViewLog, "[StreamVideoUIView] drawableSize=%.0fx%.0f (Faktor %.2f)",
                    size.width, size.height, Double(factor))
         }
-        let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
+        let showDiag = UserDefaults.standard.bool(forKey: "pxSharpShowDiag")
         diagLabel.isHidden = !showDiag
         if showDiag {
             diagLabel.frame = CGRect(x: 12, y: 12, width: max(200, bounds.width - 24), height: 48)
@@ -366,7 +366,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             UserDefaults.standard.set(line, forKey: "pxSharpDiag")
             DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            let showDiag = UserDefaults.standard.object(forKey: "pxSharpShowDiag") as? Bool ?? true
+            let showDiag = UserDefaults.standard.bool(forKey: "pxSharpShowDiag")
             self.diagLabel.isHidden = !showDiag
             self.diagLabel.text = line
         }
@@ -459,14 +459,14 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                                                               width: Int(input.width),
                                                               height: Int(input.height),
                                                               mipmapped: false)
-        inDesc.usage = [.shaderRead, .renderTarget]
+        inDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
         inDesc.storageMode = .private
 
         let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
                                                                width: Int(output.width),
                                                                height: Int(output.height),
                                                                mipmapped: false)
-        outDesc.usage = [.shaderRead, .renderTarget]
+        outDesc.usage = [.shaderRead, .shaderWrite, .renderTarget]
         outDesc.storageMode = .private
 
         guard let it = device.makeTexture(descriptor: inDesc),
@@ -3233,6 +3233,7 @@ final class PXTuner {
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
             o["pxRequestedBitrate"] = String(prefs.effectiveBitrate)
+            o["pxReqRes"] = "\(prefs.resolution.width)x\(prefs.resolution.height)"
             // Thermischer Zustand des iPads: nominal / fair / serious / critical.
             // Damit laesst sich belegen, ob Einbrueche von der Waerme kommen.
             switch ProcessInfo.processInfo.thermalState {
@@ -3295,7 +3296,7 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpBlack") private var black: Double = 0.0
     @AppStorage("pxSharpRange") private var rangeMode: Int = 0
     @AppStorage("pxSharpDiag") private var diag: String = "—"
-    @AppStorage("pxSharpShowDiag") private var showDiag: Bool = true
+    @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 1600
     @AppStorage("pxSharpPacing") private var pacing: Bool = true
     @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
@@ -4514,6 +4515,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
     @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
+    @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
     @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
     @AppStorage("pxRenderMs") private var liveRender: String = "—"
@@ -4554,6 +4556,11 @@ struct PXSettingsClean: View {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color(uiColor: .tertiarySystemFill))
             )
+
+            Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
+            Text("Blendet die Messzeile oben links ein (Format, Aufloesung, Farbraum). Aus lassen, wenn nicht gebraucht - der Text liegt sonst ueber dem Bild.")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             pxHead("1 · Schärfe und Detail", "Nur diese Regler machen das Bild schärfer.")
             pxSlider("Bildschärfe (Kanten)", $level, 0...1, pct(level),
@@ -4636,13 +4643,6 @@ struct PXSettingsClean: View {
                 Text("MetalFX — Apples KI-Scaler").tag(true)
             }
             Text("Bildet DLSS Super Resolution nach: rekonstruiert Kanten beim Hochskalieren. Lanczos ist stabil, MetalFX schärfer — wird das Bild grau, zurück auf Lanczos.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Picker("Farbtiefe der Tabelle (10-Bit-Prinzip)", selection: $lutSize) {
-                Text("33³ — schnell").tag(33)
-                Text("65³ — präzise, weniger Banding").tag(65)
-            }
-            Text("Entspricht der 10-Bit-Verarbeitung moderner Karten: feinere Farbstufen in Verläufen. Kostet Rechenzeit beim Aufbau, wirkt sofort.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Picker("Latenz-Modus (Reflex-Prinzip)", selection: $paceHz) {
