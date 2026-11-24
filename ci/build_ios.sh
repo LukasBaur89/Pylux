@@ -2515,6 +2515,21 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // 13 ms (Budget 16,7) -- die App ist nicht der Bremsklotz, der Stream ist es.
         image = applyDetailStage(image)
 
+        // ---- Chroma-Nachschaerfung auf PANEL-Aufloesung --------------------
+        // Die Farbe kommt im Stream nur mit halber Aufloesung (4:2:0) und wird
+        // beim Hochskalieren ein zweites Mal weich. Gemessen bei 2732 px:
+        // Helligkeit 1,0 px, Farbe 5,0 px. Das Limit fuer 4:2:0 liegt bei
+        // 2,85 px -- hier wird die Farbe auf ~3,0 px zurueckgeholt.
+        let chromaPost = Float((UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)
+                               * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0))
+        if !bypassNow, chromaPost > 0.01, let ck = chromaKernelInstance(),
+           let out = ck.apply(extent: image.extent,
+                              roiCallback: { _, rect in rect.insetBy(dx: -5, dy: -5) },
+                              arguments: [image, NSNumber(value: 2.2),
+                                          NSNumber(value: chromaPost * 1.1), NSNumber(value: 0.006)]) {
+            image = out
+        }
+
         // Kontrast: 50 % = neutral
         let contrastRaw = Float(UserDefaults.standard.object(forKey: "pxSharpContrast") as? Double ?? 0.5)
         if !colorEngine && abs(contrastRaw - 0.5) > 0.01 {
@@ -4634,6 +4649,8 @@ struct PXSettingsClean: View {
             pxHead("1 · Schärfe und Detail", "Nur diese Regler machen das Bild schärfer.")
             pxSlider("Bildschärfe (Kanten)", $level, 0...1, pct(level),
                      "Konturen und Text. Ab 85 % entstehen helle Säume an Kanten.")
+            pxSlider("Farbschärfe (Farbkanten)", $chroma, 0...1, pct(chroma),
+                     "Schärft nur die FARBE, nicht die Helligkeit. Die Farbe kommt im Stream mit halber Auflösung — hier wird sie zurückgeholt. Wirkt auf farbige Kanten, Schilder, Text.")
             pxSlider("Texturdichte (Feinstruktur)", $detail, 0...1, pct(detail),
                      "Gras, Kies, Stoff, Metall. Der wichtigste Regler für Detail.")
             pxSlider("Texturtiefe (grobe Struktur)", $texDepth, 0...1, pct(texDepth),
