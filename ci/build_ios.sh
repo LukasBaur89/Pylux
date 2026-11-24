@@ -4529,8 +4529,13 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
     @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpMfxActive") private var mfxActive: String = "0"
-    @AppStorage("pxSharpHz") private var deviceHz: String = "-"
     @State private var requestedRes: String = "-"
+
+    /// Was das Panel wirklich kann -- vom System, nicht von mir behauptet.
+    private var deviceMaxHz: Int {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return scenes.compactMap { $0.screen.maximumFramesPerSecond }.max() ?? 0
+    }
     @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
     @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
     @AppStorage("pxRenderMs") private var liveRender: String = "—"
@@ -4566,7 +4571,7 @@ struct PXSettingsClean: View {
                 HStack(spacing: 12) {
                     Text("Auflösung " + requestedRes + " → " + streamRes)
                     Text("Pacing " + String(paceHz) + " Hz")
-                    Text("Gerät max " + deviceHz + " Hz")
+                    Text("Gerät max " + String(deviceMaxHz) + " Hz")
                     Text(mfxActive == "1" ? "MetalFX" : "Lanczos")
                 }
                 .font(.system(size: 10, design: .monospaced))
