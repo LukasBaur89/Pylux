@@ -3302,7 +3302,6 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpHlBalance") private var hlBalance: Bool = true
     @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
-    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
     @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
     @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.20
     @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
@@ -4509,6 +4508,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpPacing") private var pacing: Bool = true
     @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
+    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
     @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
     @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
     @AppStorage("pxRenderMs") private var liveRender: String = "—"
