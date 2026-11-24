@@ -1679,6 +1679,14 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             float lumaC = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
             float lumaGate = smoothstep(0.03, 0.15, lumaC);
             vec3 outv = c.rgb + delta * (amount * k * lumaGate);
+            // Halo-Begrenzung wie bei NVIDIA NIS/CAS: die Farbe darf den
+            // lokalen Nachbarschaftsbereich nicht verlassen. Ohne das
+            // entstehen farbige Raender an weisser Schrift (gemessen:
+            // rote Saeume um UI-Text, orange Ringe um Buttons).
+            vec3 mn = min(min(min(a, b), min(e, f)), min(min(g, h), min(i, j)));
+            vec3 mx = max(max(max(a, b), max(e, f)), max(max(g, h), max(i, j)));
+            vec3 span = mx - mn;
+            outv = clamp(outv, mn - span * 0.02, mx + span * 0.02);
             return vec4(clamp(outv, vec3(0.0), vec3(1.0)), c.a);
         }
         """
