@@ -185,6 +185,23 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         if UserDefaults.standard.object(forKey: "pxSharpTunedV3") == nil {
             SharpnessRow.applyCalibratedPreset()
         }
+        // ABSTURZ-SCHUTZ: zaehlt Starts, die keinen Stream zustande bringen.
+        // Beim dritten Start werden die Einstellungen auf sicher zurueckgesetzt,
+        // damit eine falsche Einstellung die App nicht dauerhaft blockiert.
+        // HDR-Codec beim Start abschalten -- 10-Bit-Decode stuerzt ab.
+        var prefsNow = StreamPreferences.load()
+        if prefsNow.codec == 2 {
+            prefsNow.codec = 1
+            prefsNow.save()
+            os_log(.error, log: videoViewLog, "[px] Codec 2 (HDR) auf H.265 zurueckgesetzt")
+        }
+        let launches = UserDefaults.standard.integer(forKey: "pxLaunchCount") + 1
+        UserDefaults.standard.set(launches, forKey: "pxLaunchCount")
+        if launches >= 3 {
+            SharpnessRow.applyCalibratedPreset()
+            UserDefaults.standard.set(1, forKey: "pxLaunchCount")
+            os_log(.error, log: videoViewLog, "[px] Safe-Mode: Einstellungen zurueckgesetzt")
+        }
         diagLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         diagLabel.textColor = .white
         diagLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
@@ -1968,6 +1985,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         bufferLock.unlock()
         guard let pixelBuffer0 = pb else { return }
         PXProbe.shared.note(pixelBuffer0)
+        // Stream laeuft -> Startzaehler zuruecksetzen (kein Safe-Mode noetig).
+        if UserDefaults.standard.integer(forKey: "pxLaunchCount") > 0 {
+            UserDefaults.standard.set(0, forKey: "pxLaunchCount")
+        }
         // Szenenanalyse fuer die Automatik (Belichtung, Rauschen).
         PXScene.shared.analyze(PXProbe.shared.frozenBuffer ?? pixelBuffer0)
         let pixelBuffer = PXProbe.shared.frozenBuffer ?? pixelBuffer0
@@ -4600,7 +4621,6 @@ struct PXSettingsClean: View {
             Picker("Codec", selection: $codecIdx) {
                 Text("H.264 (kompatibel)").tag(0)
                 Text("H.265 (bessere Qualität)").tag(1)
-                Text("H.265 + HDR (nur mit HDR-Spiel)").tag(2)
             }
             .onChange(of: codecIdx) { v in
                 var p = StreamPreferences.load()
@@ -4628,7 +4648,8 @@ struct PXSettingsClean: View {
                 .foregroundColor(.secondary)
         }
         .onAppear {
-            let p = StreamPreferences.load()
+            var p = StreamPreferences.load()
+            if p.codec == 2 { p.codec = 1; p.save() }
             codecIdx = p.codec
             bitrateVal = p.bitrate == 0 ? 30000 : p.bitrate
             resIdx = p.resolutionIndex
