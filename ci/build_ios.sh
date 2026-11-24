@@ -114,6 +114,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var needsPresent = false
     private var hdrStreak = 0
     private var mfxScaler: MTLFXSpatialScaler?
+    private var mfxStateFlag: Bool? = nil
     private var mfxIn: MTLTexture?
     private var mfxOut: MTLTexture?
     private var mfxKey = ""
@@ -2621,6 +2622,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                     blit.endEncoding()
                 }
 
+                if mfxStateFlag != true {
+                    mfxStateFlag = true
+                    UserDefaults.standard.set("1", forKey: "pxSharpMfxActive")
+                }
                 cb.present(drawable)
                 cb.commit()
 
@@ -2657,6 +2662,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
         let composited = image.composited(over: canvas)
 
+        if mfxStateFlag != false {
+            mfxStateFlag = false
+            UserDefaults.standard.set("0", forKey: "pxSharpMfxActive")
+        }
         let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
         if let c = ctx {
             PXProbe.shared.set(composited, context: c, space: outSpace,
@@ -3234,6 +3243,9 @@ final class PXTuner {
             o["pxBitratePref"] = String(prefs.bitrate)
             o["pxRequestedBitrate"] = String(prefs.effectiveBitrate)
             o["pxReqRes"] = "\(prefs.resolution.width)x\(prefs.resolution.height)"
+            let hz = UIScreen.main.maximumFramesPerSecond
+            d.set(String(hz), forKey: "pxSharpHz")
+            o["pxSharpHz"] = String(hz)
             // Thermischer Zustand des iPads: nominal / fair / serious / critical.
             // Damit laesst sich belegen, ob Einbrueche von der Waerme kommen.
             switch ProcessInfo.processInfo.thermalState {
@@ -4516,6 +4528,9 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
     @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
+    @AppStorage("pxSharpMfxActive") private var mfxActive: String = "0"
+    @AppStorage("pxSharpHz") private var deviceHz: String = "-"
+    @State private var requestedRes: String = "-"
     @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
     @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
     @AppStorage("pxRenderMs") private var liveRender: String = "—"
@@ -4547,6 +4562,14 @@ struct PXSettingsClean: View {
                     Text("Bild " + liveRender + " ms").font(.system(size: 11, design: .monospaced))
                     Text("Verlust " + streamLoss + " %").font(.system(size: 11, design: .monospaced))
                 }
+                .foregroundColor(.secondary)
+                HStack(spacing: 12) {
+                    Text("Auflösung " + requestedRes + " → " + streamRes)
+                    Text("Pacing " + String(paceHz) + " Hz")
+                    Text("Gerät max " + deviceHz + " Hz")
+                    Text(mfxActive == "1" ? "MetalFX" : "Lanczos")
+                }
+                .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.secondary)
             }
             .padding(.vertical, 8)
@@ -4699,6 +4722,7 @@ struct PXSettingsClean: View {
             codecIdx = p.codec
             bitrateVal = p.bitrate == 0 ? 30000 : p.bitrate
             resIdx = p.resolutionIndex
+            requestedRes = "\(p.resolution.width)×\(p.resolution.height)"
         }
     }
 
