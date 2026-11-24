@@ -3302,6 +3302,7 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpHlBalance") private var hlBalance: Bool = true
     @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
+    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
     @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
     @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.20
     @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
@@ -4616,6 +4617,13 @@ struct PXSettingsClean: View {
                 Text("120 Hz").tag(120)
             }
             Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
+            Picker("Upscaler", selection: $metalFX) {
+                Text("Lanczos (stabil)").tag(false)
+                Text("MetalFX (kantenschärfer)").tag(true)
+            }
+            Text("Lanczos ist der bewährte Weg. MetalFX ist Apples GPU-Scaler — er kann Kanten besser schärfen, war aber bisher instabil. Wenn das Bild grau wird: zurück auf Lanczos.")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             pxHead("6 · Verbindung", "Gilt beim nächsten Verbinden.")
             Picker("Codec", selection: $codecIdx) {
