@@ -4648,6 +4648,7 @@ struct PXSettingsClean: View {
             Picker("Latenz-Modus (Reflex-Prinzip)", selection: $paceHz) {
                 Text("60 Hz — 1:1 mit der Quelle").tag(60)
                 Text("120 Hz — Bild früher auf dem Glas").tag(120)
+                Text("240 Hz — Maximum").tag(240)
             }
             Text("Reflex senkt die Latenz der Render-Pipeline. Bei uns entspricht das der Anzeige-Frequenz: 120 Hz zeigt jedes Bild bis zu 8 ms früher.")
                 .font(.caption)
@@ -4672,6 +4673,7 @@ struct PXSettingsClean: View {
                 p.save()
             }
             Picker("Auflösung", selection: $resIdx) {
+                Text("4K (3840×2160, experimentell)").tag(4)
                 Text("1080p").tag(3)
                 Text("720p").tag(2)
                 Text("540p").tag(1)
@@ -5030,6 +5032,21 @@ if 'g_px_keyframe_request' not in sm:
     open(m, 'w', encoding='utf-8').write(sm)
     print('keyframe: impl')
 KEYFRAME_PATCH
+python3 - <<'FOURK_PATCH'
+# 4K als Auswahl: die PS5 bekommt im LaunchSpec 3840x2160 angeboten.
+# Ob sie es annimmt, entscheidet die Konsole -- deshalb experimentell.
+p = 'ios/Pylux/Views/SettingsView.swift'
+s = open(p, encoding='utf-8').read()
+old = '    StreamResolution(width: 1920, height: 1080),\n]'
+new = ('    StreamResolution(width: 1920, height: 1080),\n'
+       '    StreamResolution(width: 3840, height: 2160),   // PXSHARP_4K (experimentell)\n]')
+if old in s and 'PXSHARP_4K' not in s:
+    s = s.replace(old, new, 1)
+    open(p, 'w', encoding='utf-8').write(s)
+    print('4k: Auswahl ergaenzt')
+else:
+    print('4k: nichts zu tun')
+FOURK_PATCH
 python3 - <<'HDR_ATTACH_PATCH'
 # HDR: VideoToolbox setzt bei selbst erzeugter Formatbeschreibung keine
 # Farb-Anhaenge. Ohne diese Markierung erkennt der Renderer PQ nie -> HDR
