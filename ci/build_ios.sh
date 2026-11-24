@@ -115,6 +115,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var hdrStreak = 0
     private var mfxScaler: MTLFXSpatialScaler?
     private var mfxStateFlag: Bool? = nil
+    private var lastDiagCheck: CFTimeInterval = 0
+    private var diagVisibleCache: Bool = false
     private var mfxIn: MTLTexture?
     private var mfxOut: MTLTexture?
     private var mfxKey = ""
@@ -374,6 +376,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             os_log(.default, log: videoViewLog, "[StreamVideoUIView] first frame %dx%d hdr=%d",
                    CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), hdr ? 1 : 0)
         }
+        // Diagnose-Overlay: der Schalter muss sofort wirken, nicht erst
+        // beim naechsten Layout (das war der Grund, warum er "klebte").
+        let nowT = CACurrentMediaTime()
+        if nowT - lastDiagCheck > 0.25 {
+            lastDiagCheck = nowT
+            let vis = UserDefaults.standard.bool(forKey: "pxSharpShowDiag")
+            if vis != diagVisibleCache {
+                diagVisibleCache = vis
+                self.diagLabel.isHidden = !vis
+            }
+        }
         if pacingEnabled {
             needsPresent = true
         } else {
@@ -403,7 +416,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // sichtbar als Mikro-Ruckler und unnoetige GPU-Last. Mit 60 Hz liegt
         // Present und Frame im Verhaeltnis 1:1.
         let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
-        let hz = Float(hzPref == 0 ? 60 : hzPref)
+        // Nie mehr anfordern, als das Panel kann -- sonst taktet der
+    // Display-Link unregelmaessig (Eingaben wirken verspaetet).
+    let deviceHz = Float(UIScreen.main.maximumFramesPerSecond)
+    let hz = Float(min(hzPref == 0 ? 60 : hzPref, Int(deviceHz)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: max(60, hz), preferred: hz)
         appliedPaceHz = hz
         link.add(to: .main, forMode: .common)
@@ -421,7 +437,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // null Wirkung, solange die Sitzung lief.
         if let link = displayLink {
             let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
-            let hz = Float(hzPref == 0 ? 60 : hzPref)
+            // Nie mehr anfordern, als das Panel kann -- sonst taktet der
+    // Display-Link unregelmaessig (Eingaben wirken verspaetet).
+    let deviceHz = Float(UIScreen.main.maximumFramesPerSecond)
+    let hz = Float(min(hzPref == 0 ? 60 : hzPref, Int(deviceHz)))
             if abs(appliedPaceHz - hz) > 0.5 {
                 appliedPaceHz = hz
                 link.preferredFrameRateRange = CAFrameRateRange(minimum: 60,
@@ -1905,7 +1924,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let coringBase = (UserDefaults.standard.object(forKey: "pxSharpCoring") as? Double ?? 0.04)
         let coringVal = Float(min(0.080, coringBase * 0.040 + Double(min(autoNoise, 1.0)) * 0.024))
         var haloLimitD = Float(UserDefaults.standard.object(forKey: "pxSharpHalo") as? Double ?? 0.12)
-        let master = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
+        let master = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0))
         let s1 = min(max(level, 0), 1) * 2.10 * sharpDamp * autoDetailScale * master
         let s2 = min(max(detail, 0), 1) * 1.70 * sharpDamp * autoDetailScale * master
         // Texturtiefe: vergroessert den zweiten Radius (2,7 -> 5,0 px auf dem
@@ -2310,7 +2329,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
         // ---- Chroma-Rekonstruktion -----------------------------------------
         let chromaAmt = Float((UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)
-                              * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0))
+                              * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0))
         if !bypassNow, chromaAmt > 0.01, let ck = chromaKernelInstance(),
            let out = ck.apply(extent: image.extent,
                               roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
@@ -2322,7 +2341,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Clear Image: Kantenvorverstärkung bei Quellauflösung, damit der Upscaler
         // echte Kanten statt weicher Pixel bekommt — ebenfalls CAS, damit die
         // Vorverstärkung keine Halos in die Skalierung schickt.
-        let clearImage = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
+        let clearImage = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClearImage") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0)))
         if clearImage > 0.05 {
             if let k = casKernelInstance(),
                let out = k.apply(extent: image.extent,
@@ -2344,7 +2363,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
 
         // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
-        let deconvAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
+        let deconvAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0)))
         // Deconvolution läuft IMMER — sie ist die Stufe mit dem größten
         // Texturgewinn (+44 % gemessen). Sie wird von keiner Lastregel
         // abgeschaltet, auch nicht bei Hitze.
@@ -2361,7 +2380,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
         // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
         // ein Drittel der Pixel.
-        let clarityAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 2.0)))
+        let clarityAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0)))
         if clarityAmt > 0.02, let lc = diffKernelInstance() {
             let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
             let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
@@ -2598,9 +2617,21 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 // beginnt z.B. bei x=406,y=255). Mit bounds=(0,0,1920,1080) wurde
                 // nur eine Ecke gerendert; der Rest der Textur blieb undefinierter
                 // Speicher — genau das war das lila Bild bei MetalFX.
-                let norm = image.transformed(by: CGAffineTransform(
+                var norm = image.transformed(by: CGAffineTransform(
                     translationX: -image.extent.origin.x,
                     y: -image.extent.origin.y))
+                // Metal-Texturen und Core Image zaehlen die Y-Achse
+                // unterschiedlich. Ergebnis: das Bild stand kopf.
+                // Die Lage ist deshalb einstellbar (0=aus, 1=Y, 2=X, 3=beide).
+                let flip = (UserDefaults.standard.object(forKey: "pxSharpMfxFlip") as? Int) ?? 0
+                if flip == 1 || flip == 3 {
+                    norm = norm.transformed(by: CGAffineTransform(translationX: 0, y: norm.extent.height)
+                        .scaledBy(x: 1, y: -1))
+                }
+                if flip == 2 || flip == 3 {
+                    norm = norm.transformed(by: CGAffineTransform(translationX: norm.extent.width, y: 0)
+                        .scaledBy(x: -1, y: 1))
+                }
                 ciContext?.render(norm, to: inTex, commandBuffer: cb,
                                   bounds: CGRect(x: 0, y: 0,
                                                  width: CGFloat(Int(src.width)),
@@ -2635,8 +2666,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 // rechnete. Das war ein Messfehler, kein Scaler-Fehler.
                 cb.waitUntilCompleted()
                 if let c = ciContext,
-                   let outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) {
+                   var outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) {
                     let r = CGRect(x: 0, y: 0, width: CGFloat(outW), height: CGFloat(outH))
+                    let fl = (UserDefaults.standard.object(forKey: "pxSharpMfxFlip") as? Int) ?? 0
+                    if fl == 1 || fl == 3 {
+                        outCI = outCI.transformed(by: CGAffineTransform(translationX: 0, y: outCI.extent.height)
+                            .scaledBy(x: 1, y: -1))
+                    }
+                    if fl == 2 || fl == 3 {
+                        outCI = outCI.transformed(by: CGAffineTransform(translationX: outCI.extent.width, y: 0)
+                            .scaledBy(x: -1, y: 1))
+                    }
                     PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
                                        width: outW, height: outH)
                 }
@@ -3729,7 +3769,7 @@ struct SharpnessRow: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            sliderRow("Gesamtstärke der Bearbeitung", value: $master, range: 0...2, step: 0.05,
+            sliderRow("Gesamtstärke der Bearbeitung", value: $master, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", master * 100),
                       rule: "Skaliert Schärfe, Detail, Klarheit, Sättigung und Kontrast gemeinsam. 0 % = unbearbeitet, 100 % = wie eingestellt, 200 % = doppelt so stark. Ein Regler für den ganzen Bildeindruck.")
             Toggle("Bildautomatik (passt sich jeder Szene an)", isOn: $autoEngine)
@@ -4352,7 +4392,7 @@ struct PXQuickPicturePanel: View {
                 Text("Stärke")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.white.opacity(0.8))
-                Slider(value: $master, in: 0...2).tint(.white)
+                Slider(value: $master, in: 0...1).tint(.white)
                 Text(String(format: "%.0f%%", master * 100))
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.white.opacity(0.6))
@@ -4529,6 +4569,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
     @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpMfxActive") private var mfxActive: String = "0"
+    @AppStorage("pxSharpMfxFlip") private var mfxFlip: Int = 0
     @State private var requestedRes: String = "-"
 
     /// Was das Panel wirklich kann -- vom System, nicht von mir behauptet.
@@ -4670,6 +4711,15 @@ struct PXSettingsClean: View {
                 Text("Lanczos — bewährt").tag(false)
                 Text("MetalFX — Apples KI-Scaler").tag(true)
             }
+            Picker("Bildlage bei MetalFX", selection: $mfxFlip) {
+                Text("normal").tag(0)
+                Text("kopfüber").tag(1)
+                Text("seitenverkehrt").tag(2)
+                Text("beides").tag(3)
+            }
+            Text("Metal-Texturen und Core Image zählen die Y-Achse verschieden — deshalb kann das Bild bei MetalFX kopfüber stehen. Die passende Lage hier einmal einstellen; sie bleibt gespeichert.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             Text("Bildet DLSS Super Resolution nach: rekonstruiert Kanten beim Hochskalieren. Lanczos ist stabil, MetalFX schärfer — wird das Bild grau, zurück auf Lanczos.")
                 .font(.caption)
                 .foregroundColor(.secondary)
