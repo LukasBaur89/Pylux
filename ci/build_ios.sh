@@ -81,6 +81,8 @@ final class SharpeningDisplayLayer: AVSampleBufferDisplayLayer {
     var metalDraws = false
     private(set) var sentToApple = 0
     private(set) var dropped = 0
+    private(set) var skipped = 0
+    private var flushCounter = 0
 
     override func enqueue(_ sampleBuffer: CMSampleBuffer) {
         // ZURUECKGENOMMEN: Der Versuch, hier Bilder wegzulassen, hat den
@@ -89,6 +91,25 @@ final class SharpeningDisplayLayer: AVSampleBufferDisplayLayer {
         // behandelt (Bremse im Renderer).
         if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
             frameSink?.enqueueFrame(imageBuffer)
+        }
+        // ---- Schalter fuer den Speicher-Test (Standard: aus) -------------
+        // pxSharpAvSkip: Anzeiger ganz ueberspringen, solange unser eigenes Bild
+        // gezeichnet wird. Wenn der Anzeiger nicht sichtbar ist, haelt er
+        // sonst Bilder fest.
+        if metalDraws, UserDefaults.standard.bool(forKey: "pxSharpAvSkip") {
+            skipped += 1
+            if skipped % 60 == 0 { UserDefaults.standard.set(skipped, forKey: "pxSharpAvSkipped") }
+            return
+        }
+        // pxSharpAvFlushEvery: Anzeiger alle N Bilder leeren (0 = aus). Gibt
+        // festgehaltene Bilder frei, ohne den Dekoder anzuhalten.
+        let every = UserDefaults.standard.integer(forKey: "pxSharpAvFlushEvery")
+        if every > 0 {
+            flushCounter += 1
+            if flushCounter >= every {
+                flushCounter = 0
+                flush()
+            }
         }
         if requiresFlushToResumeDecoding { flush() }
         super.enqueue(sampleBuffer)
@@ -3190,10 +3211,13 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // unter Druck freigibt. Gemessen wuchs der Speicher 300-400 MB/min bis
         // zum Absturz. Ab 900 MB wird hier aktiv aufgeraeumt statt gewartet.
         memGuardFrame += 1
-        if memGuardFrame >= 30 {
+        let guardEvery = max(1, UserDefaults.standard.integer(forKey: "pxSharpMemBrakeEvery") == 0
+                             ? 30 : UserDefaults.standard.integer(forKey: "pxSharpMemBrakeEvery"))
+        let guardAbove = UserDefaults.standard.object(forKey: "pxSharpMemBrakeMB") as? Int ?? 900
+        if memGuardFrame >= guardEvery {
             memGuardFrame = 0
             let mb = Self.pxFootprintMB()
-            if mb > 900 {
+            if mb > Double(guardAbove) {
                 ciContext?.clearCaches()
                 hdrContext?.clearCaches()
                 memGuardRuns += 1
@@ -3767,6 +3791,9 @@ final class PXTuner {
         o["pxNeuralMsg"] = UserDefaults.standard.string(forKey: "pxNeuralMsg") ?? ""
         o["pxAvSent"] = String(UserDefaults.standard.integer(forKey: "pxAvSent"))
         o["pxAvDrop"] = String(UserDefaults.standard.integer(forKey: "pxAvDrop"))
+        o["pxSharpAvSkip"] = UserDefaults.standard.bool(forKey: "pxSharpAvSkip") ? "1" : "0"
+        o["pxSharpAvSkipped"] = String(UserDefaults.standard.integer(forKey: "pxSharpAvSkipped"))
+        o["pxSharpAvFlushEvery"] = String(UserDefaults.standard.integer(forKey: "pxSharpAvFlushEvery"))
         o["pxNeuralPause"] = String(format: "%.1f", PXNeuralDenoise.shared.pauseLeft())
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
