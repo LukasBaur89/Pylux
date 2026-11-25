@@ -3828,6 +3828,14 @@ final class PXNeuralDenoise {
               let outBuf = result.featureValue(for: "output")?.imageBufferValue else {
             return nil
         }
+        // Sicherung gegen schwarze Bilder: das Ergebnis muss dieselbe Groesse
+        // haben wie die Eingabe. Sonst verwerfen und das Original behalten.
+        let inW = CVPixelBufferGetWidth(pixelBuffer), inH = CVPixelBufferGetHeight(pixelBuffer)
+        let outW = CVPixelBufferGetWidth(outBuf), outH = CVPixelBufferGetHeight(outBuf)
+        if inW != outW || inH != outH {
+            os_log(.error, log: videoViewLog, "[PXNeural] Groesse passt nicht: %dx%d -> %dx%d", inW, inH, outW, outH)
+            return nil
+        }
         let ms = (CACurrentMediaTime() - t0) * 1000.0
         lastMs = ms
         avgMs = avgMs == 0 ? ms : (avgMs * 0.9 + ms * 0.1)
