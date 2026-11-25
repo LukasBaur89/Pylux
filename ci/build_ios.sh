@@ -1963,6 +1963,21 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
     /// Panel-Auflösung, nie auf dem 1080p-Signal.
+    /// Zaehlt gerenderte Bilder und schreibt die Rate nach /state.
+    /// WICHTIG: muss in BEIDEN Pfaden laufen -- der MetalFX-Zweig verlaesst
+    /// draw() vorher, dadurch standen fps und Renderzeit still (gemessen:
+    /// 51 blieb konstant, auch bei eingefrorenem Bild).
+    private func noteFrameRendered() {
+        frameCount += 1
+        let now = CACurrentMediaTime()
+        if now - fpsWindowStart >= 1.0 {
+            let fps = Double(frameCount) / (now - fpsWindowStart)
+            UserDefaults.standard.set(String(format: "%.0f", fps), forKey: "pxSharpFPS")
+            frameCount = 0
+            fpsWindowStart = now
+        }
+    }
+
     private func applyDetailStage(_ input: CIImage, radiusScale: Float = 1.0) -> CIImage {
         if UserDefaults.standard.bool(forKey: "pxSharpBypass") { return input }
         var image = input
@@ -2690,6 +2705,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             outSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         }
 
+        let renderStartMFX = CACurrentMediaTime()
         if useMFX, let device = metalView?.device {
             let fit = min(target.width / src.width, target.height / src.height)
             let outW = max(2, Int((src.width * fit).rounded(.down)))
@@ -2756,7 +2772,11 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                     UserDefaults.standard.set("1", forKey: "pxSharpMfxActive")
                 }
                 cb.present(drawable)
+                cb.addCompletedHandler { _ in
+                    PXScene.shared.noteRenderMs((CACurrentMediaTime() - renderStartMFX) * 1000.0)
+                }
                 cb.commit()
+                noteFrameRendered()
 
                 // Probe ERST nach der GPU. Vorher wurde outTex gelesen, bevor der
                 // Command-Buffer überhaupt abgeschickt war — deshalb lieferte /shot
@@ -2822,16 +2842,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         cb.present(drawable)
         cb.commit()
 
-        // Renderrate messen: /state liefert pxSharpFPS. Nur so ist belegbar, ob ein
-        // Bildblock (z. B. CAS) noch mit 60 Bildern/s laeuft oder Frames kostet.
-        frameCount += 1
-        let now = CACurrentMediaTime()
-        if now - fpsWindowStart >= 1.0 {
-            let fps = Double(frameCount) / (now - fpsWindowStart)
-            UserDefaults.standard.set(String(format: "%.0f", fps), forKey: "pxSharpFPS")
-            frameCount = 0
-            fpsWindowStart = now
-        }
+        // Renderrate messen: /state liefert pxSharpFPS.
+        noteFrameRendered()
     }
 }
 
