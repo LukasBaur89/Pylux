@@ -3089,8 +3089,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                         outCI = outCI.transformed(by: CGAffineTransform(translationX: outCI.extent.width, y: 0)
                             .scaledBy(x: -1, y: 1))
                     }
-                    PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
-                                       width: outW, height: outH)
+                    if !UserDefaults.standard.bool(forKey: "pxProbeOff") {
+                        PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
+                                           width: outW, height: outH)
+                    }
                 }
                 return
             }
@@ -3128,7 +3130,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             UserDefaults.standard.set("0", forKey: "pxSharpMfxActive")
         }
         let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
-        if let c = ctx {
+        if let c = ctx, !UserDefaults.standard.bool(forKey: "pxProbeOff") {
             PXProbe.shared.set(composited, context: c, space: outSpace,
                                width: Int(target.width), height: Int(target.height))
         }
@@ -3755,6 +3757,7 @@ final class PXNeuralDenoise {
 
     static let shared = PXNeuralDenoise()
 
+    private var model: MLModel?
     private var vnModel: VNCoreMLModel?
     private var tried = false
     private var request: VNCoreMLRequest?
@@ -3788,6 +3791,7 @@ final class PXNeuralDenoise {
             let vn = try VNCoreMLModel(for: ml)
             let req = VNCoreMLRequest(model: vn)
             req.imageCropAndScaleOption = .scaleFill
+            self.model = ml
             self.vnModel = vn
             self.request = req
             os_log(.default, log: videoViewLog, "[PXNeural] Modell geladen")
@@ -3812,14 +3816,18 @@ final class PXNeuralDenoise {
         guard ensureLoaded(), let req = request else { return nil }
 
         let t0 = CACurrentMediaTime()
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-        do {
-            try handler.perform([req])
-        } catch {
-            pauseUntil = now + 5.0
+        // Direkter MLModel-Aufruf statt Vision: Vision macht Umformatierung,
+        // Skalierung und Binding -- gemessen 30 ms, davon ein grosser Teil
+        // Overhead.
+        guard let model = self.model else { return nil }
+        let provider = try? MLDictionaryFeatureProvider(dictionary: [
+            "input": MLFeatureValue(pixelBuffer: pixelBuffer)
+        ])
+        guard let provider = provider,
+              let result = try? model.prediction(from: provider),
+              let outBuf = result.featureValue(for: "output")?.imageBufferValue else {
             return nil
         }
-        guard let obs = req.results?.first as? VNPixelBufferObservation else { return nil }
         let ms = (CACurrentMediaTime() - t0) * 1000.0
         lastMs = ms
         avgMs = avgMs == 0 ? ms : (avgMs * 0.9 + ms * 0.1)
@@ -3829,7 +3837,7 @@ final class PXNeuralDenoise {
             pauseUntil = now + 2.0
             os_log(.default, log: videoViewLog, "[PXNeural] zu langsam (%.1f ms) - pausiert", avgMs)
         }
-        return obs.pixelBuffer
+        return outBuf
     }
 
     // MARK: - Szenenhelligkeit
