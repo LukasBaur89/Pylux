@@ -2980,6 +2980,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                     norm = norm.transformed(by: CGAffineTransform(translationX: norm.extent.width, y: 0)
                         .scaledBy(x: -1, y: 1))
                 }
+                // Schulter auch im MetalFX-Pfad: dieser Zweig verlaesst draw()
+                // vorher, deshalb fehlte sie hier (gemessen: 0,65 % ueber 0,99
+                // mit MetalFX, 0,00 % ohne).
+                if !bypassNow, (UserDefaults.standard.object(forKey: "pxSharpShoulder") as? Bool ?? true),
+                   let sk = shoulderKernelInstance(),
+                   let sho = sk.apply(extent: norm.extent,
+                                      roiCallback: { _, rect in rect },
+                                      arguments: [norm, NSNumber(value: 0.92)]) {
+                    norm = sho
+                }
+
                 ciContext?.render(norm, to: inTex, commandBuffer: cb,
                                   bounds: CGRect(x: 0, y: 0,
                                                  width: CGFloat(Int(src.width)),
