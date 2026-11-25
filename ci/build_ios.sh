@@ -4150,36 +4150,82 @@ final class PXAiUpscale {
         return n > 0 ? sum / n : 128.0
     }
 
+    /// YUV -> 32BGRA (das Format, das Core ML als Bildeingang nimmt).
+    private var convContext: CIContext?
+    private var convBuffer: CVPixelBuffer?
+    private func bgra(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        if convContext == nil {
+            convContext = CIContext(options: [.cacheIntermediates: false])
+        }
+        if convBuffer == nil || CVPixelBufferGetWidth(convBuffer!) != w || CVPixelBufferGetHeight(convBuffer!) != h {
+            var out: CVPixelBuffer?
+            let attrs: [String: Any] = [
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+            ]
+            CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA,
+                                attrs as CFDictionary, &out)
+            convBuffer = out
+        }
+        guard let dst = convBuffer, let ctx = convContext else { return nil }
+        ctx.render(CIImage(cvPixelBuffer: pb), to: dst)
+        return dst
+    }
+
     /// Gibt das hochgerechnete Bild zurueck, oder nil (dann bleibt der alte Weg).
     func upscale(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
-        guard ensureLoaded(), let req = request else { return nil }
+        guard ensureLoaded() else { return nil }
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         guard w == 1920, h == 1080 else { return nil }
         let t0 = CACurrentMediaTime()
-        // GEMESSEN beim Entrauscher: der direkte Core-ML-Weg lieferte ein
-        // SCHWARZES Bild (24 von 24 Aufnahmen). Vision wandelt beide
-        // Richtungen richtig um -- deshalb geht auch der Upscaler ueber Vision.
-        let handler = VNImageRequestHandler(cvPixelBuffer: pb, options: [:])
-        guard (try? handler.perform([req])) != nil,
-              let obs = req.results?.first as? VNPixelBufferObservation else {
-            msg = "kein Ergebnis"
+        var out: CVPixelBuffer?
+        var path = "-"
+        // 1. Direkter Weg: schneller, weil Vision nichts umpacken muss.
+        if let model = model {
+            let fmt = CVPixelBufferGetPixelFormatType(pb)
+            let src = (fmt == kCVPixelFormatType_32BGRA) ? pb : (bgra(pb) ?? pb)
+            if CVPixelBufferGetPixelFormatType(src) == kCVPixelFormatType_32BGRA,
+               let provider = try? MLDictionaryFeatureProvider(dictionary: [
+                   "input": MLFeatureValue(pixelBuffer: src)
+               ]),
+               let result = try? model.prediction(from: provider) {
+                out = result.featureValue(for: "output")?.imageBufferValue
+                path = "direkt"
+            }
+        }
+        // 2. Vision als Rueckfall.
+        if out == nil, let req = request {
+            let handler = VNImageRequestHandler(cvPixelBuffer: pb, options: [:])
+            if (try? handler.perform([req])) != nil,
+               let obs = req.results?.first as? VNPixelBufferObservation {
+                out = obs.pixelBuffer
+                path = "Vision"
+            }
+        }
+        let ms = (CACurrentMediaTime() - t0) * 1000.0
+        avgMs = avgMs == 0 ? ms : (avgMs * 0.9 + ms * 0.1)
+        guard let out = out else {
+            msg = "kein Ergebnis (\(path))"
             return nil
         }
-        let out = obs.pixelBuffer
         let ow = CVPixelBufferGetWidth(out), oh = CVPixelBufferGetHeight(out)
         guard ow >= 3000, oh >= 1700 else {
             msg = "falsche Groesse \(ow)x\(oh)"
             return nil
         }
-        // Sicherung: ein schwarzes Ergebnis wird verworfen, das Original bleibt.
-        if meanLuma(out) < 4.0 {
-            msg = "schwarz verworfen"
+        ranCount += 1
+        // Sicherung: ein schwarzes oder weisses Ergebnis wird verworfen.
+        let luma = meanLuma(out)
+        if luma < 4.0 || luma > 251.0 {
+            msg = String(format: "%@ verworfen (%.1f, %.0f ms)", path, luma, ms)
+            // Auch ein unbrauchbares Ergebnis kostet Zeit: reisst die Notbremse.
+            if ranCount > 45 && avgMs > 34.0 {
+                UserDefaults.standard.set(false, forKey: "pxSharpAiUpscale")
+                msg = String(format: "verworfen, zu langsam (%.0f ms), aus", avgMs)
+            }
             return nil
         }
-        let ms = (CACurrentMediaTime() - t0) * 1000.0
-        avgMs = avgMs == 0 ? ms : (avgMs * 0.9 + ms * 0.1)
-        ranCount += 1
-        msg = "ok"
+        msg = String(format: "%@ ok (%.1f)", path, luma)
         // Notbremse: wenn das Netz dauerhaft zu lange braucht, schaltet es sich
         // selbst aus -- sonst ruckelt das Bild und niemand weiss warum.
         if ranCount > 45 && avgMs > 34.0 {
@@ -6485,7 +6531,7 @@ class Net(nn.Module):
                                nn.Conv2d(ch,ch,3,padding=1), nn.ReLU(inplace=True),
                                nn.Conv2d(ch,ch,3,padding=1), nn.ReLU(inplace=True),
                                nn.Conv2d(ch,3,3,padding=1))
-    def forward(s, x): return torch.clamp(x + s.body(x), 0, 1)
+    def forward(s, x): return torch.clamp((x + s.body(x)) * 255.0, 0.0, 255.0)
 net = Net(); convs = [m for m in net.body if isinstance(m, nn.Conv2d)]
 sd = {}
 for i, c in enumerate(convs):
@@ -6513,7 +6559,7 @@ class Up(nn.Module):
             nn.Conv2d(16,12,3,padding=1),
             nn.PixelShuffle(2))
     def forward(s, x):
-        return torch.clamp(F.interpolate(x, scale_factor=2, mode="nearest") + s.body(x), 0, 1)
+        return torch.clamp((F.interpolate(x, scale_factor=2, mode="nearest") + s.body(x)) * 255.0, 0.0, 255.0)
 up = Up(); sd2 = {}
 for i in range(3):
     sd2["body.%d.weight" % (2*i)] = torch.from_numpy(np.ascontiguousarray(d["w%d" % i]))
