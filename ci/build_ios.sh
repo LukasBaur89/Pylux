@@ -4088,9 +4088,9 @@ final class PXAiUpscale {
     static let shared = PXAiUpscale()
 
     private var model: MLModel?
+    private var vnModel: VNCoreMLModel?
+    private var request: VNCoreMLRequest?
     private var tried = false
-    private var convContext: CIContext?
-    private var convBuffer: CVPixelBuffer?
     private let lock = NSLock()
 
     private(set) var avgMs: Double = 0
@@ -4099,7 +4099,7 @@ final class PXAiUpscale {
 
     func ensureLoaded() -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if tried { return model != nil }
+        if tried { return request != nil }
         tried = true
         guard let url = Bundle.main.url(forResource: "pxup", withExtension: "mlmodelc") else {
             msg = "pxup fehlt im Bundle"
@@ -4108,7 +4108,13 @@ final class PXAiUpscale {
         do {
             let cfg = MLModelConfiguration()
             cfg.computeUnits = .all
-            model = try MLModel(contentsOf: url, configuration: cfg)
+            let ml = try MLModel(contentsOf: url, configuration: cfg)
+            let vn = try VNCoreMLModel(for: ml)
+            let req = VNCoreMLRequest(model: vn)
+            req.imageCropAndScaleOption = .scaleFill
+            model = ml
+            vnModel = vn
+            request = req
             msg = "geladen"
             return true
         } catch {
@@ -4118,45 +4124,56 @@ final class PXAiUpscale {
         }
     }
 
-    /// YUV -> 32BGRA (das einzige Format, das Core ML als Bild nimmt).
-    private func bgra(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
+    /// Sehr schnelle Helligkeitsprobe (Raster). Erkennt ein schwarzes Ergebnis.
+    private func meanLuma(_ pb: CVPixelBuffer) -> Double {
+        let fmt = CVPixelBufferGetPixelFormatType(pb)
+        guard fmt == kCVPixelFormatType_32BGRA || fmt == kCVPixelFormatType_32ARGB else { return 128.0 }
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return 128.0 }
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
-        if convContext == nil {
-            convContext = CIContext(options: [.cacheIntermediates: false])
+        let bpr = CVPixelBufferGetBytesPerRow(pb)
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var sum = 0.0, n = 0.0
+        let stepX = max(1, w / 32), stepY = max(1, h / 32)
+        var y = 0
+        while y < h {
+            var x = 0
+            while x < w {
+                let p = bytes + y * bpr + x * 4
+                sum += 0.114 * Double(p[0]) + 0.587 * Double(p[1]) + 0.299 * Double(p[2])
+                n += 1
+                x += stepX
+            }
+            y += stepY
         }
-        if convBuffer == nil || CVPixelBufferGetWidth(convBuffer!) != w || CVPixelBufferGetHeight(convBuffer!) != h {
-            var out: CVPixelBuffer?
-            let attrs: [String: Any] = [
-                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
-            ]
-            CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA,
-                                attrs as CFDictionary, &out)
-            convBuffer = out
-        }
-        guard let dst = convBuffer, let ctx = convContext else { return nil }
-        ctx.render(CIImage(cvPixelBuffer: pb), to: dst)
-        return dst
+        return n > 0 ? sum / n : 128.0
     }
 
     /// Gibt das hochgerechnete Bild zurueck, oder nil (dann bleibt der alte Weg).
     func upscale(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
-        guard ensureLoaded(), let model = model else { return nil }
+        guard ensureLoaded(), let req = request else { return nil }
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         guard w == 1920, h == 1080 else { return nil }
         let t0 = CACurrentMediaTime()
-        let fmt = CVPixelBufferGetPixelFormatType(pb)
-        let src = (fmt == kCVPixelFormatType_32BGRA) ? pb : (bgra(pb) ?? pb)
-        guard let provider = try? MLDictionaryFeatureProvider(dictionary: [
-                  "input": MLFeatureValue(pixelBuffer: src)
-              ]),
-              let result = try? model.prediction(from: provider),
-              let out = result.featureValue(for: "output")?.imageBufferValue else {
+        // GEMESSEN beim Entrauscher: der direkte Core-ML-Weg lieferte ein
+        // SCHWARZES Bild (24 von 24 Aufnahmen). Vision wandelt beide
+        // Richtungen richtig um -- deshalb geht auch der Upscaler ueber Vision.
+        let handler = VNImageRequestHandler(cvPixelBuffer: pb, options: [:])
+        guard (try? handler.perform([req])) != nil,
+              let obs = req.results?.first as? VNPixelBufferObservation else {
             msg = "kein Ergebnis"
             return nil
         }
+        let out = obs.pixelBuffer
         let ow = CVPixelBufferGetWidth(out), oh = CVPixelBufferGetHeight(out)
         guard ow >= 3000, oh >= 1700 else {
             msg = "falsche Groesse \(ow)x\(oh)"
+            return nil
+        }
+        // Sicherung: ein schwarzes Ergebnis wird verworfen, das Original bleibt.
+        if meanLuma(out) < 4.0 {
+            msg = "schwarz verworfen"
             return nil
         }
         let ms = (CACurrentMediaTime() - t0) * 1000.0
@@ -6446,7 +6463,7 @@ dummy = torch.rand(1,3,1080,1920)
 traced = torch.jit.trace(net, dummy)
 m = ct.convert(traced,
     inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
-    outputs=[ct.ImageType(name="output", scale=255.0, color_layout=ct.colorlayout.RGB)],
+    outputs=[ct.ImageType(name="output", color_layout=ct.colorlayout.RGB)],
     convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17)
 m.save("/tmp/pxdenoise.mlpackage")
 print("Entrauscher gespeichert")
@@ -6472,7 +6489,7 @@ up.load_state_dict(sd2); up.eval()
 traced2 = torch.jit.trace(up, dummy)
 m2 = ct.convert(traced2,
     inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
-    outputs=[ct.ImageType(name="output", scale=255.0, color_layout=ct.colorlayout.RGB)],
+    outputs=[ct.ImageType(name="output", color_layout=ct.colorlayout.RGB)],
     convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17)
 m2.save("/tmp/pxup.mlpackage")
 print("Upscaler gespeichert")
