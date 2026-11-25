@@ -4098,6 +4098,7 @@ final class PXAiUpscale {
     private var request: VNCoreMLRequest?
     private var tried = false
     private var loadedUnits = -1
+    private var loadedMode = -1
     private let lock = NSLock()
 
     private(set) var avgMs: Double = 0
@@ -4117,18 +4118,28 @@ final class PXAiUpscale {
         }
     }
 
+    /// 0 = 2x-Netz (1080p -> 2160p), 1 = Detail-Netz 1:1 (1080p -> 1080p).
+    /// Das 1:1-Netz holt 85 % des Gewinns bei einem Drittel der Rechnung,
+    /// weil das 2160p-Bild komplett entfaellt.
+    private var mode: Int { UserDefaults.standard.integer(forKey: "pxSharpAiMode") }
+    private var modelName: String { mode == 1 ? "pxup1x" : "pxup" }
+    private var outW: Int { mode == 1 ? 1920 : 3840 }
+    private var outH: Int { mode == 1 ? 1080 : 2160 }
+
     func ensureLoaded() -> Bool {
         lock.lock(); defer { lock.unlock() }
         let want = UserDefaults.standard.integer(forKey: "pxSharpAiUnits")
-        if tried && loadedUnits == want { return request != nil }
-        if tried && loadedUnits != want {
+        let wantMode = UserDefaults.standard.integer(forKey: "pxSharpAiMode")
+        if tried && loadedUnits == want && loadedMode == wantMode { return request != nil }
+        if tried {
             model = nil; vnModel = nil; request = nil
-            loadedUnits = -1
-            msg = "Einheit gewechselt, lade neu"
+            loadedUnits = -1; loadedMode = -1
+            outBuffers = []
+            msg = "lade neu"
         }
-        guard let url = Bundle.main.url(forResource: "pxup", withExtension: "mlmodelc") else {
+        guard let url = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc") else {
             tried = true
-            msg = "pxup fehlt im Bundle"
+            msg = "\(modelName) fehlt im Bundle"
             return false
         }
         tried = true
@@ -4143,7 +4154,9 @@ final class PXAiUpscale {
             vnModel = vn
             request = req
             loadedUnits = want
-            msg = "geladen (\(unitsName))"
+            loadedMode = wantMode
+            avgMs = 0; netMs = 0; convMs = 0; ranCount = 0
+            msg = "\(modelName) geladen (\(unitsName))"
             return true
         } catch {
             msg = "Laden fehlgeschlagen"
@@ -4237,13 +4250,14 @@ final class PXAiUpscale {
     private var outBuffers: [CVPixelBuffer] = []
     private var outIndex = 0
     private func outputBuffer() -> CVPixelBuffer? {
-        if outBuffers.isEmpty {
+        if outBuffers.isEmpty || CVPixelBufferGetWidth(outBuffers[0]) != outW {
+            outBuffers = []
             for _ in 0..<2 {
                 var pb: CVPixelBuffer?
                 let attrs: [String: Any] = [
                     kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
                 ]
-                CVPixelBufferCreate(kCFAllocatorDefault, 3840, 2160, kCVPixelFormatType_32BGRA,
+                CVPixelBufferCreate(kCFAllocatorDefault, outW, outH, kCVPixelFormatType_32BGRA,
                                     attrs as CFDictionary, &pb)
                 if let pb = pb { outBuffers.append(pb) }
             }
@@ -4307,8 +4321,8 @@ final class PXAiUpscale {
             return nil
         }
         let ow = CVPixelBufferGetWidth(out), oh = CVPixelBufferGetHeight(out)
-        guard ow >= 3000, oh >= 1700 else {
-            msg = "falsche Groesse \(ow)x\(oh)"
+        guard ow == outW, oh == outH else {
+            msg = "falsche Groesse \(ow)x\(oh) (erwartet \(outW)x\(outH))"
             return nil
         }
         ranCount += 1
@@ -4319,7 +4333,7 @@ final class PXAiUpscale {
             _ = brakeIfSlow(ms)
             return nil
         }
-        msg = String(format: "%@/%@ ok (%.1f)", unitsName, path, luma)
+        msg = String(format: "%@ %@/%@ ok (%.1f)", modelName, unitsName, path, luma)
         if brakeIfSlow(ms) { return nil }
         return out
     }
@@ -6668,13 +6682,41 @@ m2 = ct.convert(traced2,
     convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17,
     compute_precision=ct.precision.FLOAT16)
 m2.save("/tmp/pxup.mlpackage")
-print("Upscaler gespeichert")
+print("Upscaler 2x gespeichert")
+
+# ---- 3. Detail-Netz 1:1 (1080p -> 1080p, kein Hochrechnen) ----
+b64 = open("ci/pxsr1x_b64.txt").read().strip()
+d = np.load(io.BytesIO(base64.b64decode(b64)))
+class One(nn.Module):
+    def __init__(s):
+        super().__init__()
+        s.body = nn.Sequential(
+            nn.Conv2d(3,24,3,padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(24,16,3,padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(16,3,3,padding=1))
+    def forward(s, x):
+        return torch.clamp((x + s.body(x)) * 255.0, 0.0, 255.0)
+one = One(); sd3 = {}
+for i in range(3):
+    sd3["body.%d.weight" % (2*i)] = torch.from_numpy(np.ascontiguousarray(d["w%d" % i]))
+    sd3["body.%d.bias" % (2*i)]   = torch.from_numpy(np.ascontiguousarray(d["b%d" % i]))
+one.load_state_dict(sd3); one.eval()
+traced3 = torch.jit.trace(one, dummy)
+m3 = ct.convert(traced3,
+    inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
+    outputs=[ct.ImageType(name="output", color_layout=ct.colorlayout.RGB)],
+    convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17,
+    compute_precision=ct.precision.FLOAT16)
+m3.save("/tmp/pxup1x.mlpackage")
+print("Detail-Netz 1:1 gespeichert")
 PXMODEL
 python3 /tmp/pxmake.py || echo "PXMODEL FEHLER"
 xcrun coremlcompiler compile /tmp/pxdenoise.mlpackage /tmp/pxout 2>&1 | tail -3 || true
 ls -d /tmp/pxout/pxdenoise.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout/pxdenoise.mlmodelc "$APP/" && echo "MLMODEL im Bundle" || echo "MLMODEL FEHLT"
 xcrun coremlcompiler compile /tmp/pxup.mlpackage /tmp/pxout2 2>&1 | tail -3 || true
 ls -d /tmp/pxout2/pxup.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout2/pxup.mlmodelc "$APP/" && echo "UPMODEL im Bundle" || echo "UPMODEL FEHLT"
+xcrun coremlcompiler compile /tmp/pxup1x.mlpackage /tmp/pxout3 2>&1 | tail -3 || true
+ls -d /tmp/pxout3/pxup1x.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout3/pxup1x.mlmodelc "$APP/" && echo "UP1XMODEL im Bundle" || echo "UP1XMODEL FEHLT"
 
 echo "--- Packe IPA ---"
 APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
