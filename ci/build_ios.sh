@@ -4180,6 +4180,13 @@ final class PXAiUpscale {
         avgMs = avgMs == 0 ? ms : (avgMs * 0.9 + ms * 0.1)
         ranCount += 1
         msg = "ok"
+        // Notbremse: wenn das Netz dauerhaft zu lange braucht, schaltet es sich
+        // selbst aus -- sonst ruckelt das Bild und niemand weiss warum.
+        if ranCount > 45 && avgMs > 34.0 {
+            UserDefaults.standard.set(false, forKey: "pxSharpAiUpscale")
+            msg = String(format: "zu langsam (%.0f ms), aus", avgMs)
+            return nil
+        }
         return out
     }
 }
@@ -4272,6 +4279,7 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
     @AppStorage("pxSharpCoring") private var coring: Double = 0.03
     @AppStorage("pxSharpHalo") private var halo: Double = 0.12
+    @AppStorage("pxSharpAiUpscale") private var aiUpscale: Bool = false
     @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
     @AppStorage("pxSharpScaler") private var scaler: Int = 0
     @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
@@ -5448,6 +5456,8 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpDirSharp") private var dirSharp: Bool = true
     @AppStorage("pxSharpDiffuse") private var diffuse: Bool = true
     @AppStorage("pxSharpNeural") private var neural: Bool = true
+    @AppStorage("pxSharpAiUpscale") private var aiUpscale: Bool = false
+    @AppStorage("pxSharpBypass") private var bypass: Bool = false
     @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpMfxActive") private var mfxActive: String = "0"
     @AppStorage("pxSharpMfxFlip") private var mfxFlip: Int = 0
@@ -5511,6 +5521,29 @@ struct PXSettingsClean: View {
             Text("Blendet die Messzeile oben links ein (Format, Aufloesung, Farbraum). Aus lassen, wenn nicht gebraucht - der Text liegt sonst ueber dem Bild.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+
+            // KI-Upscaler: eigener Block ganz oben, damit er sofort zu finden ist.
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: $aiUpscale) {
+                    Text("KI-Upscaler 2× — schärfere Texturen")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                .toggleStyle(.switch)
+                Text("Rechnet das Bild mit einem selbst trainierten Netz von 1080p auf 2160p hoch, bevor es auf das Panel kommt. Mehr echte Textur, aber 4× Rechenarbeit — wenn es ruckelt, wieder aus.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Toggle("Vorher/Nachher: Rohbild zeigen (A/B)", isOn: $bypass)
+                    .padding(.top, 4)
+                Text("An = du siehst den unveränderten Stream. Damit kannst du direkt umschalten und vergleichen.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(uiColor: .tertiarySystemFill))
+            )
+            .padding(.bottom, 10)
 
             pxHead("1 · Schärfe und Detail", "Nur diese Regler machen das Bild schärfer.")
             pxSlider("Bildschärfe (Kanten)", $level, 0...1, pct(level),
