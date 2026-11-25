@@ -116,6 +116,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var mfxScaler: MTLFXSpatialScaler?
     private var mfxStateFlag: Bool? = nil
     private var lastDiagCheck: CFTimeInterval = 0
+    private var decodeCount: Int = 0
+    private var decodeWindowStart: CFTimeInterval = 0
     private var diagVisibleCache: Bool = false
     private var mfxIn: MTLTexture?
     private var mfxOut: MTLTexture?
@@ -333,6 +335,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     func enqueueFrame(_ pixelBuffer: CVPixelBuffer) {
         guard sharpeningEnabled, metalView != nil else { return }
+        // Dekodier-Rate getrennt erfassen: zeigt, ob die Konsole wirklich
+        // 60 Bilder liefert oder ob der Verlust schon VOR dem Renderer liegt.
+        decodeCount += 1
+        let nowD = CACurrentMediaTime()
+        if decodeWindowStart == 0 { decodeWindowStart = nowD }
+        if nowD - decodeWindowStart >= 1.0 {
+            let r = Double(decodeCount) / (nowD - decodeWindowStart)
+            UserDefaults.standard.set(String(format: "%.0f", r), forKey: "pxSharpDecodeFPS")
+            decodeCount = 0
+            decodeWindowStart = nowD
+        }
         bufferLock.lock()
         latestBuffer = pixelBuffer
         bufferLock.unlock()
@@ -3400,6 +3413,7 @@ final class PXTuner {
             let hz = UIScreen.main.maximumFramesPerSecond
             d.set(String(hz), forKey: "pxSharpHz")
             o["pxSharpHz"] = String(hz)
+            o["pxSharpDecodeFPS"] = d.string(forKey: "pxSharpDecodeFPS") ?? "-"
             // Thermischer Zustand des iPads: nominal / fair / serious / critical.
             // Damit laesst sich belegen, ob Einbrueche von der Waerme kommen.
             switch ProcessInfo.processInfo.thermalState {
