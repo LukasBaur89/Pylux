@@ -2168,7 +2168,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // ab 22 Mbit), darunter linear weniger. Nur unter 8 Mbit wird deutlich
         // gedaempft -- dort besteht die Quelle aus Kompressionsbloecken.
         let bfD2 = Float(min(max((mbpsD - 3.0) / 9.0, 0.0), 1.0))
-        let sharpDamp = (1.0 - min(autoNoise * 0.30, 0.25)) * (0.55 + 0.45 * bfD2)
+        // Untergrenze 35 % statt 55 %: bei 4-7 Mbit war die Schaerfe messbar zu
+        // stark (BRISQUE schlechter als die Quelle, Schaerfe-Index doppelt so
+        // hoch). Ab 12 Mbit unveraendert volle Staerke.
+        let sharpDamp = (1.0 - min(autoNoise * 0.30, 0.25)) * (0.35 + 0.65 * bfD2)
         // Coring-Schwelle: Regler + gemessenes Rauschen der Szene.
         // Coring-Schwelle: fast ausschliesslich vom GEMESSENEN Rauschen
         // bestimmt. In einer sauberen Szene bleibt Textur voll erhalten, in
