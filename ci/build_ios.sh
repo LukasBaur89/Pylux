@@ -338,7 +338,14 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     // MARK: - Frame input
 
+    // JEDER Frame braucht einen eigenen Autorelease-Pool. Ohne ihn sammeln
+    // sich Core-Video-/Core-Image-Objekte an, der Speicher waechst stetig
+    // (gemessen: ~400 MB pro Minute) und iOS beendet die App.
     func enqueueFrame(_ pixelBuffer: CVPixelBuffer) {
+        autoreleasepool { enqueueFrameInner(pixelBuffer) }
+    }
+
+    private func enqueueFrameInner(_ pixelBuffer: CVPixelBuffer) {
         guard sharpeningEnabled, metalView != nil else { return }
         // Dekodier-Rate getrennt erfassen: zeigt, ob die Konsole wirklich
         // 60 Bilder liefert oder ob der Verlust schon VOR dem Renderer liegt.
@@ -2280,6 +2287,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        autoreleasepool { drawInner(in: view) }
+    }
+
+    private func drawInner(in view: MTKView) {
         // ---- Panel-Aufloesung (Leistung) -----------------------------------
         // 0,83 = 2266 px statt 2732 px: 31 % weniger Pixel zu rechnen. Bei Hitze
         // haelt das die 60 fps, kostet rund 6 % Schaerfe. Der Layer skaliert die
@@ -3667,6 +3678,8 @@ final class PXTuner {
                 o["pxMemPeakMB"] = String(format: "%.0f", max(peak, mb))
             }
             o["pxLastBeat"] = String(format: "%.0f", Date().timeIntervalSince1970)
+            o["pxNeuralRun"] = String(PXNeuralDenoise.shared.ranCount)
+            o["pxNeuralMs"] = String(format: "%.2f", PXNeuralDenoise.shared.avgMs)
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
             o["pxRequestedBitrate"] = String(prefs.effectiveBitrate)
@@ -6089,7 +6102,6 @@ xcodebuild -project Pylux.xcodeproj -scheme Pylux \
 cd ..
 
 echo "--- Neuronales Netz (Core ML) ---"
-APP="${APP:-ios/build-derived/Build/Products/Release-iphoneos/Pylux.app}"
 python3 -m pip install --quiet --upgrade pip || true
 python3 -m pip install --quiet numpy || true
 python3 -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu || python3 -m pip install --quiet torch || true
