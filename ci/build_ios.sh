@@ -4228,6 +4228,28 @@ final class PXAiUpscale {
         return true
     }
 
+    /// Zwei fertige Zielpuffer (33 MB), die immer wiederverwendet werden.
+    /// Vorher bekam JEDES Bild einen neuen Puffer vom System -- 60-mal pro
+    /// Sekunde 33 MB anfordern und wegwerfen ist reine Verschwendung.
+    private var outBuffers: [CVPixelBuffer] = []
+    private var outIndex = 0
+    private func outputBuffer() -> CVPixelBuffer? {
+        if outBuffers.isEmpty {
+            for _ in 0..<2 {
+                var pb: CVPixelBuffer?
+                let attrs: [String: Any] = [
+                    kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+                ]
+                CVPixelBufferCreate(kCFAllocatorDefault, 3840, 2160, kCVPixelFormatType_32BGRA,
+                                    attrs as CFDictionary, &pb)
+                if let pb = pb { outBuffers.append(pb) }
+            }
+        }
+        guard !outBuffers.isEmpty else { return nil }
+        outIndex = (outIndex + 1) % outBuffers.count
+        return outBuffers[outIndex]
+    }
+
     /// Gibt das hochgerechnete Bild zurueck, oder nil (dann bleibt der alte Weg).
     func upscale(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
         guard ensureLoaded() else { return nil }
@@ -4248,10 +4270,20 @@ final class PXAiUpscale {
             if CVPixelBufferGetPixelFormatType(src) == kCVPixelFormatType_32BGRA,
                let provider = try? MLDictionaryFeatureProvider(dictionary: [
                    "input": MLFeatureValue(pixelBuffer: src)
-               ]),
-               let result = try? model.prediction(from: provider) {
-                out = result.featureValue(for: "output")?.imageBufferValue
-                path = "direkt"
+               ]) {
+                // Erst in unseren eigenen Puffer schreiben lassen (keine Allokation).
+                if let dst = outputBuffer() {
+                    let opts = MLPredictionOptions()
+                    opts.outputBackings = ["output": dst]
+                    if (try? model.prediction(from: provider, options: opts)) != nil {
+                        out = dst
+                        path = "direkt/puffer"
+                    }
+                }
+                if out == nil, let result = try? model.prediction(from: provider) {
+                    out = result.featureValue(for: "output")?.imageBufferValue
+                    path = "direkt"
+                }
             }
             let n = (CACurrentMediaTime() - tp) * 1000.0
             netMs = netMs == 0 ? n : (netMs * 0.8 + n * 0.2)
