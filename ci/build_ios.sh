@@ -2181,9 +2181,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             thermalCheckAt = now
             cachedThermal = ProcessInfo.processInfo.thermalState
         }
+        // Schaerfe bleibt IMMER voll. Nur bei kritischer Hitze wird leicht
+        // gedaempft, damit die App nicht abgeschaltet wird.
         switch cachedThermal {
-        case .serious: return 0.5
-        case .critical: return 0.25
+        case .critical: return 0.6
         default: return 1.0
         }
     }
