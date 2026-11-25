@@ -278,7 +278,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let cdnOK = chromaDNKernelInstance() != nil
         let ldnOK = lumaDNKernelInstance() != nil
         let difOK = diffuseKernelInstance() != nil
-        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0) cl=\(clOK ? 1 : 0) cdn=\(cdnOK ? 1 : 0) ldn=\(ldnOK ? 1 : 0) dif=\(difOK ? 1 : 0)",
+        let shOK = shoulderKernelInstance() != nil
+        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0) cl=\(clOK ? 1 : 0) cdn=\(cdnOK ? 1 : 0) ldn=\(ldnOK ? 1 : 0) dif=\(difOK ? 1 : 0) sh=\(shOK ? 1 : 0)",
                                   forKey: "pxSharpKernels")
         os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
     }
@@ -1726,6 +1727,33 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     /// schaerft NUR den Farbanteil nach, in einem eigenen Band, ohne die
     /// Luma-Kante anzufassen. Der Chroma-Zweig im CAS-Kernel konnte das nicht,
     /// weil der anschliessende Clamp den Farbueberschuss wieder entfernt hat.
+    private var shoulderKernel: CIKernel?
+    private var shoulderTried = false
+
+    /// Weiche Spitzlicht-Schulter. Die Schaerfung hebt den lokalen Kontrast,
+    /// dadurch schiessen helle Pixel ueber 1,0 und werden hart abgeschnitten
+    /// (gemessen: 0,55 % der Flaeche, in der Quelle 0,00 %). Die Schulter
+    /// rollt Werte ueber 0,92 asymptotisch gegen 1,0 -- kein Abschneiden mehr,
+    /// ohne sichtbare Aufhellung (p98 bleibt 0,90).
+    private func shoulderKernelInstance() -> CIKernel? {
+        if shoulderTried { return shoulderKernel }
+        shoulderTried = true
+        let src = """
+        kernel vec4 pxShoulder(sampler src, float knee) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            float span = 1.0 - knee;
+            vec3 t = max(c.rgb - vec3(knee), vec3(0.0));
+            vec3 soft = vec3(knee) + span * (vec3(1.0) - exp(-t / span));
+            vec3 o = mix(c.rgb, soft, step(vec3(knee), c.rgb));
+            return vec4(clamp(o, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        shoulderKernel = CIKernel(source: src)
+        if shoulderKernel == nil { os_log(.error, log: videoViewLog, "[px] shoulder kernel compile failed") }
+        return shoulderKernel
+    }
+
     private var diffuseKernel: CIKernel?
     private var diffuseTried = false
 
@@ -2800,6 +2828,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let dy = (target.height - placed.height) / 2 - placed.origin.y
         image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
 
+
         // Kantengerichtete Schärfung (Option): 1:1 nach der Skalierung.
         if (UserDefaults.standard.object(forKey: "pxSharpScaler") as? Int ?? 0) == 1,
            let dk = dirKernelInstance() {
@@ -3019,6 +3048,15 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let saum = image.extent.insetBy(dx: 4, dy: 4)
         if saum.width > 16, saum.height > 16 {
             image = image.cropped(to: saum)
+        }
+
+        // ---- Weiche Spitzlicht-Schulter (letzter Schritt) -------------------
+        if !bypassNow, (UserDefaults.standard.object(forKey: "pxSharpShoulder") as? Bool ?? true),
+           let sk = shoulderKernelInstance(),
+           let out = sk.apply(extent: image.extent,
+                              roiCallback: { _, rect in rect },
+                              arguments: [image, NSNumber(value: 0.92)]) {
+            image = out
         }
 
         let canvasRect = CGRect(origin: .zero, size: target)
