@@ -1417,14 +1417,14 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             // Radius 2 px: holt Strukturen von 2 px Groesse (Blattwerk,
             // Schrift, Gitter). Gemessen: +15 % Detail bei 10,2 %
             // Ueberschwingern -- weniger als ganz ohne Schaerfung (10,4 %).
-            vec4 l  = sample(src, samplerTransform(src, p + vec2(-2.0, 0.0)));
-            vec4 r  = sample(src, samplerTransform(src, p + vec2( 2.0, 0.0)));
-            vec4 u  = sample(src, samplerTransform(src, p + vec2( 0.0,-2.0)));
-            vec4 d  = sample(src, samplerTransform(src, p + vec2( 0.0, 2.0)));
-            vec4 ul = sample(src, samplerTransform(src, p + vec2(-2.0,-2.0)));
-            vec4 ur = sample(src, samplerTransform(src, p + vec2( 2.0,-2.0)));
-            vec4 dl = sample(src, samplerTransform(src, p + vec2(-2.0, 2.0)));
-            vec4 dr = sample(src, samplerTransform(src, p + vec2( 2.0, 2.0)));
+            vec4 l  = sample(src, samplerTransform(src, p + vec2(-1.4, 0.0)));
+            vec4 r  = sample(src, samplerTransform(src, p + vec2( 1.4, 0.0)));
+            vec4 u  = sample(src, samplerTransform(src, p + vec2( 0.0,-1.4)));
+            vec4 d  = sample(src, samplerTransform(src, p + vec2( 0.0, 1.4)));
+            vec4 ul = sample(src, samplerTransform(src, p + vec2(-1.4,-1.4)));
+            vec4 ur = sample(src, samplerTransform(src, p + vec2( 1.4,-1.4)));
+            vec4 dl = sample(src, samplerTransform(src, p + vec2(-1.4, 1.4)));
+            vec4 dr = sample(src, samplerTransform(src, p + vec2( 1.4, 1.4)));
             vec3 L = vec3(0.299, 0.587, 0.114);
             float yc = dot(c.rgb, L);
             float r0 = yc - (dot(l.rgb, L) + dot(r.rgb, L)) * 0.5;
