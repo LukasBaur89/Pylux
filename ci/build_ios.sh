@@ -3808,6 +3808,10 @@ final class PXTuner {
         o["pxAiUpConv"] = String(format: "%.2f", PXAiUpscale.shared.convMs)
         o["pxAiUpNet"] = String(format: "%.2f", PXAiUpscale.shared.netMs)
         o["pxAiUpMsg"] = PXAiUpscale.shared.msg
+        // Fuer die Einstellungen: Tempo und Klartext direkt unter dem Schalter.
+        UserDefaults.standard.set(PXAiUpscale.shared.msg, forKey: "pxAiUpMsgUI")
+        UserDefaults.standard.set(String(format: "%.0f", PXAiUpscale.shared.convMs), forKey: "pxAiUpConvUI")
+        UserDefaults.standard.set(String(format: "%.0f", PXAiUpscale.shared.netMs), forKey: "pxAiUpNetUI")
         o["pxNeuralPause"] = String(format: "%.1f", PXNeuralDenoise.shared.pauseLeft())
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
@@ -4176,6 +4180,34 @@ final class PXAiUpscale {
         return dst
     }
 
+    /// Notbremse ueber ein Zeitfenster: zaehlt nur die letzten zwei Sekunden.
+    /// Dadurch laesst sich der Schalter danach wieder einschalten -- vorher
+    /// blockierte der Zaehler jede weitere Aktivierung.
+    private var winStart: CFTimeInterval = 0
+    private var winCount = 0
+    private var winSum = 0.0
+
+    private func brakeIfSlow(_ ms: Double) -> Bool {
+        let now = CACurrentMediaTime()
+        if now - winStart > 2.0 {
+            winStart = now
+            winCount = 0
+            winSum = 0
+        }
+        winCount += 1
+        winSum += ms
+        guard winCount >= 20 else { return false }
+        let avg = winSum / Double(winCount)
+        guard avg > 34.0 else { return false }
+        winStart = now
+        winCount = 0
+        winSum = 0
+        avgMs = avg
+        UserDefaults.standard.set(false, forKey: "pxSharpAiUpscale")
+        msg = String(format: "zu langsam (%.0f ms), aus", avg)
+        return true
+    }
+
     /// Gibt das hochgerechnete Bild zurueck, oder nil (dann bleibt der alte Weg).
     func upscale(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
         guard ensureLoaded() else { return nil }
@@ -4229,21 +4261,11 @@ final class PXAiUpscale {
         let luma = meanLuma(out)
         if luma < 4.0 || luma > 251.0 {
             msg = String(format: "%@ verworfen (%.1f, %.0f ms)", path, luma, ms)
-            // Auch ein unbrauchbares Ergebnis kostet Zeit: reisst die Notbremse.
-            if ranCount > 45 && avgMs > 34.0 {
-                UserDefaults.standard.set(false, forKey: "pxSharpAiUpscale")
-                msg = String(format: "verworfen, zu langsam (%.0f ms), aus", avgMs)
-            }
+            _ = brakeIfSlow(ms)
             return nil
         }
         msg = String(format: "%@ ok (%.1f)", path, luma)
-        // Notbremse: wenn das Netz dauerhaft zu lange braucht, schaltet es sich
-        // selbst aus -- sonst ruckelt das Bild und niemand weiss warum.
-        if ranCount > 45 && avgMs > 34.0 {
-            UserDefaults.standard.set(false, forKey: "pxSharpAiUpscale")
-            msg = String(format: "zu langsam (%.0f ms), aus", avgMs)
-            return nil
-        }
+        if brakeIfSlow(ms) { return nil }
         return out
     }
 }
@@ -5515,6 +5537,9 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpNeural") private var neural: Bool = true
     @AppStorage("pxSharpAiUpscale") private var aiUpscale: Bool = false
     @AppStorage("pxSharpBypass") private var bypass: Bool = false
+    @AppStorage("pxAiUpMsgUI") private var aiMsg: String = ""
+    @AppStorage("pxAiUpConvUI") private var aiConv: String = "0"
+    @AppStorage("pxAiUpNetUI") private var aiNet: String = "0"
     @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpMfxActive") private var mfxActive: String = "0"
     @AppStorage("pxSharpMfxFlip") private var mfxFlip: Int = 0
@@ -5594,6 +5619,10 @@ struct PXSettingsClean: View {
                 Text("An = du siehst den unveränderten Stream. Damit kannst du direkt umschalten und vergleichen.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                Text(aiMsg.isEmpty ? "Tempo: noch nicht gemessen" : "Tempo: \(aiConv) ms Umwandlung + \(aiNet) ms Netz  ·  \(aiMsg)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(aiMsg.contains("aus") ? .orange : .secondary)
+                    .padding(.top, 2)
             }
             .padding(12)
             .background(
