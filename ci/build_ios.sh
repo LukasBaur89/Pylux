@@ -76,12 +76,35 @@ struct StreamVideoView: UIViewRepresentable {
 /// Intercepts sample buffers before they reach the display layer.
 final class SharpeningDisplayLayer: AVSampleBufferDisplayLayer {
     weak var frameSink: StreamVideoUIView?
+    /// true = unser Metal-Bild wird gezeigt. Dann braucht Apples eigener
+    /// Anzeiger fast keine Bilder mehr.
+    var metalDraws = false
+    private var feedCount = 0
+    private(set) var sentToApple = 0
+    private(set) var heldBack = 0
 
     override func enqueue(_ sampleBuffer: CMSampleBuffer) {
+        // Unser Bild zuerst: das ist der Weg, den man sieht.
         if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
             frameSink?.enqueueFrame(imageBuffer)
         }
-        // Keep the normal path alive so PiP and the fallback still work.
+        // Apples Anzeiger liegt DARUNTER und zeigt nichts. Frueher bekam er
+        // trotzdem jedes Bild und sammelte sie an -- das war der Speicher-
+        // fresser. Jetzt bekommt er nur noch jedes 30. Bild (fuer Bild-im-Bild).
+        // pxAvFull=true stellt das alte Verhalten wieder her (Sicherheitsnetz).
+        if metalDraws && !UserDefaults.standard.bool(forKey: "pxAvFull") {
+            feedCount += 1
+            if feedCount % 30 != 0 {
+                heldBack += 1
+                if feedCount % 600 == 0 {
+                    UserDefaults.standard.set(sentToApple, forKey: "pxAvSent")
+                    UserDefaults.standard.set(heldBack, forKey: "pxAvHeld")
+                }
+                return
+            }
+        }
+        if requiresFlushToResumeDecoding { flush() }
+        sentToApple += 1
         super.enqueue(sampleBuffer)
     }
 }
@@ -281,6 +304,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
         addSubview(mv)
         metalView = mv
+        // Ab jetzt zeichnet Metal. Apples Anzeiger bekommt nur noch Restbilder.
+        (layer as? SharpeningDisplayLayer)?.metalDraws = true
         bringSubviewToFront(diagLabel)
         PXTuner.shared.start()
         // Kernelstatus sichtbar machen (per Tuner /state abrufbar), damit ein
@@ -3754,6 +3779,8 @@ final class PXTuner {
             o["pxNeuralRun"] = String(PXNeuralDenoise.shared.ranCount)
             o["pxNeuralMs"] = String(format: "%.2f", PXNeuralDenoise.shared.avgMs)
         o["pxNeuralMsg"] = UserDefaults.standard.string(forKey: "pxNeuralMsg") ?? ""
+        o["pxAvSent"] = String(UserDefaults.standard.integer(forKey: "pxAvSent"))
+        o["pxAvHeld"] = String(UserDefaults.standard.integer(forKey: "pxAvHeld"))
         o["pxNeuralPause"] = String(format: "%.1f", PXNeuralDenoise.shared.pauseLeft())
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
