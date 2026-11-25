@@ -274,7 +274,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let lcOK = diffKernelInstance() != nil
         let ldOK = localDimKernelInstance() != nil
         let ceOK = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? NSNumber)?.boolValue ?? true
-        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0)",
+        let clOK = cleanKernelInstance() != nil
+        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0) cl=\(clOK ? 1 : 0)",
                                   forKey: "pxSharpKernels")
         os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
     }
@@ -2404,7 +2405,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let filterBoost = 1.0 + (1.0 - bitrateFactor) * 0.35   // bis +35 % Filter
         denoise = min(1.0, denoise * filterBoost)
 
-        let aD = denoise > 0.02 ? min(denoise, 1.0) * 0.85 : 0.0
+        let aD = denoise > 0.02 ? min(min(denoise, 1.0) * 2.0, 1.0) : 0.0
         let aB = deblock > 0.02 ? min(max(deblock, 0), 1) * 0.90 * filterBoost : 0.0
         // Deband laeuft IMMER. Der Sparmodus hatte sie abgeschaltet — dadurch
         // kamen die Treppenstufen in dunklen Verlaeufen zurueck (im 100-%-Bild
@@ -2416,7 +2417,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
            let out = k.apply(extent: image.extent,
                              roiCallback: { _, rect in rect.insetBy(dx: -9, dy: -9) },
                              arguments: [image,
-                                         NSNumber(value: 2.4), NSNumber(value: 0.075), NSNumber(value: aD),
+                                         NSNumber(value: 2.4), NSNumber(value: 0.055), NSNumber(value: aD),
                                          NSNumber(value: 1.7), NSNumber(value: 0.042), NSNumber(value: aB),
                                          NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
             image = out
