@@ -3650,6 +3650,23 @@ final class PXTuner {
             o["pxPerfLevel"] = String(PXScene.shared.perfLevel)
             // Angeforderte Bitrate sichtbar machen: 0 = automatisch (1080p H.265
             // = 12000 kbit/s). Genau dieser Automatikwert war der Deckel.
+            // Speicher im Blick behalten: sporadische Abstuerze sind meist
+            // Speicherdruck. phys_footprint ist das, was iOS wirklich zaehlt.
+            var vmInfo = task_vm_info_data_t()
+            var vmCount = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+            let vmKr = withUnsafeMutablePointer(to: &vmInfo) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(vmCount)) {
+                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &vmCount)
+                }
+            }
+            if vmKr == KERN_SUCCESS {
+                let mb = Double(vmInfo.phys_footprint) / 1_048_576.0
+                o["pxMemMB"] = String(format: "%.0f", mb)
+                let peak = UserDefaults.standard.double(forKey: "pxMemPeak")
+                if mb > peak { UserDefaults.standard.set(mb, forKey: "pxMemPeak") }
+                o["pxMemPeakMB"] = String(format: "%.0f", max(peak, mb))
+            }
+            o["pxLastBeat"] = String(format: "%.0f", Date().timeIntervalSince1970)
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
             o["pxRequestedBitrate"] = String(prefs.effectiveBitrate)
