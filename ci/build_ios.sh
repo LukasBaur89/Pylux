@@ -83,29 +83,14 @@ final class SharpeningDisplayLayer: AVSampleBufferDisplayLayer {
     private(set) var dropped = 0
 
     override func enqueue(_ sampleBuffer: CMSampleBuffer) {
-        // Unser Weg zuerst: das Bild, das man sieht. Er wird NIE gebremst.
+        // ZURUECKGENOMMEN: Der Versuch, hier Bilder wegzulassen, hat den
+        // Dekoder angehalten -- das Bild wurde schwarz. Der Anzeiger bekommt
+        // wieder jedes Bild, genau wie vorher. Speicher wird woanders
+        // behandelt (Bremse im Renderer).
         if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
             frameSink?.enqueueFrame(imageBuffer)
         }
-        // Ab hier ist Apples Anzeiger ein Verbraucher mit Rueckstau, genau wie
-        // eine GPU-Queue. Er sagt selbst, ob er ein Bild annimmt:
-        //   isReadyForMoreMediaData == false  ->  Bild verwerfen, NICHT draengeln
-        //   requiresFlushToResumeDecoding     ->  einmal leeren, dann weiter
-        // Frueher wurde trotzdem jedes Bild hineingeschoben. Der Stau wuchs
-        // (gemessen 450 MB in 10 s) und beim Entspannen blitzte es schwarz.
-        if requiresFlushToResumeDecoding {
-            flush()
-            return
-        }
-        guard isReadyForMoreMediaData else {
-            dropped += 1
-            return
-        }
-        sentToApple += 1
-        if sentToApple % 60 == 0 {
-            UserDefaults.standard.set(sentToApple, forKey: "pxAvSent")
-            UserDefaults.standard.set(dropped, forKey: "pxAvDrop")
-        }
+        if requiresFlushToResumeDecoding { flush() }
         super.enqueue(sampleBuffer)
     }
 }
