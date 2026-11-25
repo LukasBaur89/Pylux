@@ -2987,7 +2987,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                    let sk = shoulderKernelInstance(),
                    let sho = sk.apply(extent: norm.extent,
                                       roiCallback: { _, rect in rect },
-                                      arguments: [norm, NSNumber(value: 0.92)]) {
+                                      arguments: [norm, NSNumber(value: 0.88)]) {
                     norm = sho
                 }
 
@@ -3066,7 +3066,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
            let sk = shoulderKernelInstance(),
            let out = sk.apply(extent: image.extent,
                               roiCallback: { _, rect in rect },
-                              arguments: [image, NSNumber(value: 0.92)]) {
+                              arguments: [image, NSNumber(value: 0.88)]) {
             image = out
         }
 
