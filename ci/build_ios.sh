@@ -2461,7 +2461,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
         let deblock = Float(UserDefaults.standard.object(forKey: "pxSharpDeblock") as? Double ?? 0.14)
         let dbnBase = Float(UserDefaults.standard.object(forKey: "pxSharpDeband") as? Double ?? 0.30)
-        let dbn = min(1.0, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
+        let dbn = min(1.6, dbnBase * (1.0 + Float(scene.darkFrac) * 1.4))
 
         // ---- Bitraten-Adaption -------------------------------------------
         // Bei 8 Mbit ist ein 1080p60-Bild stark komprimiert (Blockkanten,
@@ -2482,7 +2482,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // kamen die Treppenstufen in dunklen Verlaeufen zurueck (im 100-%-Bild
         // als diagonale Streifen sichtbar). Sie kostet im zusammengefassten
         // Kernel nur einen Ring, nicht einen eigenen Durchgang.
-        let aG = dbn > 0.02 ? min(dbn, 1.0) * 0.65 * filterBoost : 0.0
+        let aG = dbn > 0.02 ? min(dbn, 1.6) * 0.65 * filterBoost : 0.0
 
         if (aD + aB + aG) > 0.02, let k = cleanKernelInstance(),
            let out = k.apply(extent: image.extent,
@@ -4901,9 +4901,9 @@ struct PXSettingsClean: View {
                      "Zu hoch = Textur verschwindet.")
             pxSlider("MPEG-Blöcke glätten", $deblock, 0...0.5, pct(deblock),
                      "Zu hoch = matschig.")
-            pxSlider("Sanfte Verläufe (Deband)", $deband, 0...0.6, pct(deband),
+            pxSlider("Sanfte Verläufe (Deband)", $deband, 0...1.2, pct(deband),
                      "Hilft gegen Streifen im Himmel. Zu hoch = Textur weg.")
-            pxSlider("Klarheit (lokaler Kontrast)", $clarity, 0...0.6, pct(clarity),
+            pxSlider("Klarheit (lokaler Kontrast)", $clarity, 0...1.2, pct(clarity),
                      "Mehr „Pop“, aber flach und teuer in der Rechnung.")
             pxSlider("Lokales Dimming", $localDim, 0...1, pct(localDim),
                      "Hebt in Tests das Schwarz an. Meist aus lassen.")
