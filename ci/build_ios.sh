@@ -3753,6 +3753,8 @@ final class PXTuner {
             o["pxLastBeat"] = String(format: "%.0f", Date().timeIntervalSince1970)
             o["pxNeuralRun"] = String(PXNeuralDenoise.shared.ranCount)
             o["pxNeuralMs"] = String(format: "%.2f", PXNeuralDenoise.shared.avgMs)
+        o["pxNeuralMsg"] = UserDefaults.standard.string(forKey: "pxNeuralMsg") ?? ""
+        o["pxNeuralPause"] = String(format: "%.1f", PXNeuralDenoise.shared.pauseLeft())
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
             o["pxRequestedBitrate"] = String(prefs.effectiveBitrate)
@@ -3842,6 +3844,33 @@ final class PXNeuralDenoise {
         }
     }
 
+    // MARK: - Umwandlung fuer Core ML
+
+    private var convContext: CIContext?
+    private var convBuffer: CVPixelBuffer?
+
+    /// Wandelt ein YUV-Bild in 32BGRA um: das einzige Format, das Core ML
+    /// als Bildeingang akzeptiert. Der Puffer wird wiederverwendet, damit pro
+    /// Bild keine neue Flaeche angefordert werden muss.
+    private func bgraBuffer(from pb: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        if convContext == nil {
+            convContext = CIContext(options: [.cacheIntermediates: false])
+        }
+        if convBuffer == nil || CVPixelBufferGetWidth(convBuffer!) != w || CVPixelBufferGetHeight(convBuffer!) != h {
+            var out: CVPixelBuffer?
+            let attrs: [String: Any] = [
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+            ]
+            CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA,
+                                attrs as CFDictionary, &out)
+            convBuffer = out
+        }
+        guard let dst = convBuffer, let ctx = convContext else { return nil }
+        ctx.render(CIImage(cvPixelBuffer: pb), to: dst)
+        return dst
+    }
+
     // MARK: - Anwenden
 
     /// Gibt ein entrauschtes Pixelbuffer zurueck, oder nil wenn nicht angewendet.
@@ -3856,18 +3885,32 @@ final class PXNeuralDenoise {
         guard ensureLoaded(), let req = request else { return nil }
 
         let t0 = CACurrentMediaTime()
-        // Direkter MLModel-Aufruf statt Vision: Vision macht Umformatierung,
-        // Skalierung und Binding -- gemessen 30 ms, davon ein grosser Teil
-        // Overhead.
-        guard let model = self.model else { return nil }
-        let provider = try? MLDictionaryFeatureProvider(dictionary: [
-            "input": MLFeatureValue(pixelBuffer: pixelBuffer)
-        ])
-        guard let provider = provider,
-              let result = try? model.prediction(from: provider),
-              let outBuf = result.featureValue(for: "output")?.imageBufferValue else {
-            return nil
+        // Core ML nimmt als Bild-Eingang NUR 32BGRA. Der Decoder liefert aber
+        // YUV (420v/x420). Ohne Umwandlung schlaegt jede Vorhersage fehl --
+        // genau deshalb lief das Netz in 197 gar nicht (pxNeuralRun blieb 0).
+        let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        let src = (fmt == kCVPixelFormatType_32BGRA) ? pixelBuffer : (bgraBuffer(from: pixelBuffer) ?? pixelBuffer)
+        var outBuf: CVPixelBuffer?
+        if let model = self.model,
+           let provider = try? MLDictionaryFeatureProvider(dictionary: [
+               "input": MLFeatureValue(pixelBuffer: src)
+           ]),
+           let result = try? model.prediction(from: provider) {
+            outBuf = result.featureValue(for: "output")?.imageBufferValue
+            if outBuf == nil { UserDefaults.standard.set("kein Ausgabebild", forKey: "pxNeuralMsg") }
+        } else {
+            UserDefaults.standard.set("direkt fehlgeschlagen", forKey: "pxNeuralMsg")
         }
+        // Rueckfall auf Vision: das konvertiert selbst und kann jedes Format.
+        if outBuf == nil, let req = request {
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+            if (try? handler.perform([req])) != nil,
+               let obs = req.results?.first as? VNPixelBufferObservation {
+                outBuf = obs.pixelBuffer
+                UserDefaults.standard.set("ueber Vision", forKey: "pxNeuralMsg")
+            }
+        }
+        guard let outBuf = outBuf else { return nil }
         // Sicherung gegen schwarze Bilder: das Ergebnis muss dieselbe Groesse
         // haben wie die Eingabe. Sonst verwerfen und das Original behalten.
         let inW = CVPixelBufferGetWidth(pixelBuffer), inH = CVPixelBufferGetHeight(pixelBuffer)
@@ -3881,11 +3924,16 @@ final class PXNeuralDenoise {
         avgMs = avgMs == 0 ? ms : (avgMs * 0.9 + ms * 0.1)
         ranCount += 1
         // Schutz gegen Ruckeln: wenn es dauerhaft ueber 13 ms liegt, kurz pausieren.
-        if avgMs > 13.0 {
+        if avgMs > 40.0 {
             pauseUntil = now + 2.0
             os_log(.default, log: videoViewLog, "[PXNeural] zu langsam (%.1f ms) - pausiert", avgMs)
         }
         return outBuf
+    }
+
+    /// Restzeit der Schonpause in Sekunden (fuer /state).
+    func pauseLeft() -> Double {
+        max(0, pauseUntil - CACurrentMediaTime())
     }
 
     // MARK: - Szenenhelligkeit
