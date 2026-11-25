@@ -4097,6 +4097,7 @@ final class PXAiUpscale {
     private var vnModel: VNCoreMLModel?
     private var request: VNCoreMLRequest?
     private var tried = false
+    private var loadedUnits = -1
     private let lock = NSLock()
 
     private(set) var avgMs: Double = 0
@@ -4105,17 +4106,35 @@ final class PXAiUpscale {
     private(set) var ranCount: Int = 0
     private(set) var msg: String = ""
 
+    /// 0 = alles (ANE/GPU/CPU), 1 = nur GPU+CPU, 2 = nur CPU.
+    /// Das Netz kann auf dem einen oder anderen Weg deutlich schneller sein --
+    /// welcher, sagt die Messung, nicht die Annahme.
+    private var unitsName: String {
+        switch UserDefaults.standard.integer(forKey: "pxSharpAiUnits") {
+        case 1: return "GPU"
+        case 2: return "CPU"
+        default: return "ANE"
+        }
+    }
+
     func ensureLoaded() -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if tried { return request != nil }
-        tried = true
+        let want = UserDefaults.standard.integer(forKey: "pxSharpAiUnits")
+        if tried && loadedUnits == want { return request != nil }
+        if tried && loadedUnits != want {
+            model = nil; vnModel = nil; request = nil
+            loadedUnits = -1
+            msg = "Einheit gewechselt, lade neu"
+        }
         guard let url = Bundle.main.url(forResource: "pxup", withExtension: "mlmodelc") else {
+            tried = true
             msg = "pxup fehlt im Bundle"
             return false
         }
+        tried = true
         do {
             let cfg = MLModelConfiguration()
-            cfg.computeUnits = .all
+            cfg.computeUnits = want == 1 ? .cpuAndGPU : (want == 2 ? .cpuOnly : .all)
             let ml = try MLModel(contentsOf: url, configuration: cfg)
             let vn = try VNCoreMLModel(for: ml)
             let req = VNCoreMLRequest(model: vn)
@@ -4123,7 +4142,8 @@ final class PXAiUpscale {
             model = ml
             vnModel = vn
             request = req
-            msg = "geladen"
+            loadedUnits = want
+            msg = "geladen (\(unitsName))"
             return true
         } catch {
             msg = "Laden fehlgeschlagen"
@@ -4264,7 +4284,7 @@ final class PXAiUpscale {
             _ = brakeIfSlow(ms)
             return nil
         }
-        msg = String(format: "%@ ok (%.1f)", path, luma)
+        msg = String(format: "%@/%@ ok (%.1f)", unitsName, path, luma)
         if brakeIfSlow(ms) { return nil }
         return out
     }
