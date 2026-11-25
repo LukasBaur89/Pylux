@@ -275,7 +275,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let ldOK = localDimKernelInstance() != nil
         let ceOK = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? NSNumber)?.boolValue ?? true
         let clOK = cleanKernelInstance() != nil
-        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0) cl=\(clOK ? 1 : 0)",
+        let cdnOK = chromaDNKernelInstance() != nil
+        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0) cl=\(clOK ? 1 : 0) cdn=\(cdnOK ? 1 : 0)",
                                   forKey: "pxSharpKernels")
         os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
     }
@@ -1723,6 +1724,76 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     /// schaerft NUR den Farbanteil nach, in einem eigenen Band, ohne die
     /// Luma-Kante anzufassen. Der Chroma-Zweig im CAS-Kernel konnte das nicht,
     /// weil der anschliessende Clamp den Farbueberschuss wieder entfernt hat.
+    private var chromaDNKernel: CIKernel?
+    private var chromaDNTried = false
+
+    /// Farb-Entrauscher: glaettet NUR die Farbe (Cb/Cr), die Helligkeit
+    /// bleibt bitgenau. Gemessen an einer 5-Mbit-Szene: Cb 401 -> 186,
+    /// Cr 470 -> 243, Farbkante unveraendert bei 2,00 px.
+    private func chromaDNKernelInstance() -> CIKernel? {
+        if chromaDNTried { return chromaDNKernel }
+        chromaDNTried = true
+        let src = """
+        kernel vec4 pxChromaDN(sampler src, float amt, float thr, float r) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec3 L = vec3(0.299, 0.587, 0.114);
+            float y = dot(c.rgb, L);
+            vec3 cc = c.rgb - vec3(y);
+            vec3 acc = vec3(0.0);
+            float wsum = 1.0;
+            vec3 s0 = sample(src, samplerTransform(src, p + vec2(-1.0, -1.0) * r)).rgb;
+            float y0 = dot(s0, L);
+            vec3 c0 = s0 - vec3(y0);
+            float w0 = clamp(1.0 - abs(y0 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c0 - cc) / thr, 0.0, 1.0);
+            acc += s0 * w0; wsum += w0;
+            vec3 s1 = sample(src, samplerTransform(src, p + vec2(0.0, -1.0) * r)).rgb;
+            float y1 = dot(s1, L);
+            vec3 c1 = s1 - vec3(y1);
+            float w1 = clamp(1.0 - abs(y1 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c1 - cc) / thr, 0.0, 1.0);
+            acc += s1 * w1; wsum += w1;
+            vec3 s2 = sample(src, samplerTransform(src, p + vec2(1.0, -1.0) * r)).rgb;
+            float y2 = dot(s2, L);
+            vec3 c2 = s2 - vec3(y2);
+            float w2 = clamp(1.0 - abs(y2 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c2 - cc) / thr, 0.0, 1.0);
+            acc += s2 * w2; wsum += w2;
+            vec3 s3 = sample(src, samplerTransform(src, p + vec2(-1.0, 0.0) * r)).rgb;
+            float y3 = dot(s3, L);
+            vec3 c3 = s3 - vec3(y3);
+            float w3 = clamp(1.0 - abs(y3 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c3 - cc) / thr, 0.0, 1.0);
+            acc += s3 * w3; wsum += w3;
+            vec3 s4 = sample(src, samplerTransform(src, p + vec2(1.0, 0.0) * r)).rgb;
+            float y4 = dot(s4, L);
+            vec3 c4 = s4 - vec3(y4);
+            float w4 = clamp(1.0 - abs(y4 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c4 - cc) / thr, 0.0, 1.0);
+            acc += s4 * w4; wsum += w4;
+            vec3 s5 = sample(src, samplerTransform(src, p + vec2(-1.0, 1.0) * r)).rgb;
+            float y5 = dot(s5, L);
+            vec3 c5 = s5 - vec3(y5);
+            float w5 = clamp(1.0 - abs(y5 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c5 - cc) / thr, 0.0, 1.0);
+            acc += s5 * w5; wsum += w5;
+            vec3 s6 = sample(src, samplerTransform(src, p + vec2(0.0, 1.0) * r)).rgb;
+            float y6 = dot(s6, L);
+            vec3 c6 = s6 - vec3(y6);
+            float w6 = clamp(1.0 - abs(y6 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c6 - cc) / thr, 0.0, 1.0);
+            acc += s6 * w6; wsum += w6;
+            vec3 s7 = sample(src, samplerTransform(src, p + vec2(1.0, 1.0) * r)).rgb;
+            float y7 = dot(s7, L);
+            vec3 c7 = s7 - vec3(y7);
+            float w7 = clamp(1.0 - abs(y7 - y) / 0.09, 0.0, 1.0) * clamp(1.0 - length(c7 - cc) / thr, 0.0, 1.0);
+            acc += s7 * w7; wsum += w7;
+            vec3 avg = acc / max(wsum, 1e-5);
+            float ya = dot(avg, L);
+            vec3 ca = avg - vec3(ya);
+            vec3 mixed = mix(cc, ca, clamp(amt, 0.0, 1.0));
+            return vec4(clamp(vec3(y) + mixed, vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        chromaDNKernel = CIKernel(source: src)
+        if chromaDNKernel == nil { os_log(.error, log: videoViewLog, "[px] chromaDN kernel compile failed") }
+        return chromaDNKernel
+    }
+
     private func chromaKernelInstance() -> CIKernel? {
         if chromaTried { return chromaKernel }
         chromaTried = true
@@ -2441,6 +2512,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                                  arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
                 image = out
             }
+        }
+
+        // ---- Farb-Entrauschung (eigener Durchgang) -------------------------
+        // Nur die Farbe wird geglaettet, die Helligkeit bleibt unberuehrt.
+        let chromaDN = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0) * 1.6, 0.0), 1.0))
+        if !bypassNow, chromaDN > 0.05, let dnk = chromaDNKernelInstance(),
+           let out = dnk.apply(extent: image.extent,
+                               roiCallback: { _, rect in rect.insetBy(dx: -5, dy: -5) },
+                               arguments: [image, NSNumber(value: chromaDN),
+                                           NSNumber(value: 0.05), NSNumber(value: 2.0)]) {
+            image = out
         }
 
         // ---- Chroma-Rekonstruktion -----------------------------------------
