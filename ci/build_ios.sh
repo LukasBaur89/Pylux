@@ -79,32 +79,33 @@ final class SharpeningDisplayLayer: AVSampleBufferDisplayLayer {
     /// true = unser Metal-Bild wird gezeigt. Dann braucht Apples eigener
     /// Anzeiger fast keine Bilder mehr.
     var metalDraws = false
-    private var feedCount = 0
     private(set) var sentToApple = 0
-    private(set) var heldBack = 0
+    private(set) var dropped = 0
 
     override func enqueue(_ sampleBuffer: CMSampleBuffer) {
-        // Unser Bild zuerst: das ist der Weg, den man sieht.
+        // Unser Weg zuerst: das Bild, das man sieht. Er wird NIE gebremst.
         if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
             frameSink?.enqueueFrame(imageBuffer)
         }
-        // Apples Anzeiger liegt DARUNTER und zeigt nichts. Frueher bekam er
-        // trotzdem jedes Bild und sammelte sie an -- das war der Speicher-
-        // fresser. Jetzt bekommt er nur noch jedes 30. Bild (fuer Bild-im-Bild).
-        // pxAvFull=true stellt das alte Verhalten wieder her (Sicherheitsnetz).
-        if metalDraws && !UserDefaults.standard.bool(forKey: "pxAvFull") {
-            feedCount += 1
-            if feedCount % 30 != 0 {
-                heldBack += 1
-                if feedCount % 600 == 0 {
-                    UserDefaults.standard.set(sentToApple, forKey: "pxAvSent")
-                    UserDefaults.standard.set(heldBack, forKey: "pxAvHeld")
-                }
-                return
-            }
+        // Ab hier ist Apples Anzeiger ein Verbraucher mit Rueckstau, genau wie
+        // eine GPU-Queue. Er sagt selbst, ob er ein Bild annimmt:
+        //   isReadyForMoreMediaData == false  ->  Bild verwerfen, NICHT draengeln
+        //   requiresFlushToResumeDecoding     ->  einmal leeren, dann weiter
+        // Frueher wurde trotzdem jedes Bild hineingeschoben. Der Stau wuchs
+        // (gemessen 450 MB in 10 s) und beim Entspannen blitzte es schwarz.
+        if requiresFlushToResumeDecoding {
+            flush()
+            return
         }
-        if requiresFlushToResumeDecoding { flush() }
+        guard isReadyForMoreMediaData else {
+            dropped += 1
+            return
+        }
         sentToApple += 1
+        if sentToApple % 60 == 0 {
+            UserDefaults.standard.set(sentToApple, forKey: "pxAvSent")
+            UserDefaults.standard.set(dropped, forKey: "pxAvDrop")
+        }
         super.enqueue(sampleBuffer)
     }
 }
@@ -3780,7 +3781,7 @@ final class PXTuner {
             o["pxNeuralMs"] = String(format: "%.2f", PXNeuralDenoise.shared.avgMs)
         o["pxNeuralMsg"] = UserDefaults.standard.string(forKey: "pxNeuralMsg") ?? ""
         o["pxAvSent"] = String(UserDefaults.standard.integer(forKey: "pxAvSent"))
-        o["pxAvHeld"] = String(UserDefaults.standard.integer(forKey: "pxAvHeld"))
+        o["pxAvDrop"] = String(UserDefaults.standard.integer(forKey: "pxAvDrop"))
         o["pxNeuralPause"] = String(format: "%.1f", PXNeuralDenoise.shared.pauseLeft())
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
