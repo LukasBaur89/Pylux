@@ -3884,6 +3884,33 @@ final class PXNeuralDenoise {
         return dst
     }
 
+    /// Sehr schnelle Helligkeitsprobe: liest nur ein Raster von Punkten aus.
+    /// Erkennt ein schwarzes Ergebnis, ohne das ganze Bild zu durchsuchen.
+    private func meanLuma(_ pb: CVPixelBuffer) -> Double {
+        let fmt = CVPixelBufferGetPixelFormatType(pb)
+        guard fmt == kCVPixelFormatType_32BGRA || fmt == kCVPixelFormatType_32ARGB else { return 128.0 }
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return 128.0 }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        let bpr = CVPixelBufferGetBytesPerRow(pb)
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var sum = 0.0, n = 0.0
+        let stepX = max(1, w / 16), stepY = max(1, h / 16)
+        var y = 0
+        while y < h {
+            var x = 0
+            while x < w {
+                let p = bytes + y * bpr + x * 4
+                sum += 0.114 * Double(p[0]) + 0.587 * Double(p[1]) + 0.299 * Double(p[2])
+                n += 1
+                x += stepX
+            }
+            y += stepY
+        }
+        return n > 0 ? sum / n : 128.0
+    }
+
     // MARK: - Anwenden
 
     /// Gibt ein entrauschtes Pixelbuffer zurueck, oder nil wenn nicht angewendet.
@@ -3934,6 +3961,14 @@ final class PXNeuralDenoise {
         let outW = CVPixelBufferGetWidth(outBuf), outH = CVPixelBufferGetHeight(outBuf)
         if inW != outW || inH != outH {
             os_log(.error, log: videoViewLog, "[PXNeural] Groesse passt nicht: %dx%d -> %dx%d", inW, inH, outW, outH)
+            return nil
+        }
+        // Sicherung gegen schwarze Bilder: wenn das Netz ein (fast) schwarzes
+        // Bild liefert, wird es verworfen und das Original gezeigt. Kostet nur
+        // ein paar Mikrosekunden (Stichprobe von Punkten, kein Vollbild).
+        let outLuma = meanLuma(outBuf)
+        if outLuma < 3.0 {
+            UserDefaults.standard.set("Ausgabe schwarz - verworfen", forKey: "pxNeuralMsg")
             return nil
         }
         let ms = (CACurrentMediaTime() - t0) * 1000.0
