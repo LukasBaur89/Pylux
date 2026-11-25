@@ -3805,6 +3805,8 @@ final class PXTuner {
         o["pxSharpAvFlushEvery"] = String(UserDefaults.standard.integer(forKey: "pxSharpAvFlushEvery"))
         o["pxAiUpRun"] = String(PXAiUpscale.shared.ranCount)
         o["pxAiUpMs"] = String(format: "%.2f", PXAiUpscale.shared.avgMs)
+        o["pxAiUpConv"] = String(format: "%.2f", PXAiUpscale.shared.convMs)
+        o["pxAiUpNet"] = String(format: "%.2f", PXAiUpscale.shared.netMs)
         o["pxAiUpMsg"] = PXAiUpscale.shared.msg
         o["pxNeuralPause"] = String(format: "%.1f", PXNeuralDenoise.shared.pauseLeft())
             let prefs = StreamPreferences.load()
@@ -4094,6 +4096,8 @@ final class PXAiUpscale {
     private let lock = NSLock()
 
     private(set) var avgMs: Double = 0
+    private(set) var convMs: Double = 0
+    private(set) var netMs: Double = 0
     private(set) var ranCount: Int = 0
     private(set) var msg: String = ""
 
@@ -4184,6 +4188,11 @@ final class PXAiUpscale {
         if let model = model {
             let fmt = CVPixelBufferGetPixelFormatType(pb)
             let src = (fmt == kCVPixelFormatType_32BGRA) ? pb : (bgra(pb) ?? pb)
+            if fmt != kCVPixelFormatType_32BGRA {
+                let c = (CACurrentMediaTime() - t0) * 1000.0
+                convMs = convMs == 0 ? c : (convMs * 0.8 + c * 0.2)
+            }
+            let tp = CACurrentMediaTime()
             if CVPixelBufferGetPixelFormatType(src) == kCVPixelFormatType_32BGRA,
                let provider = try? MLDictionaryFeatureProvider(dictionary: [
                    "input": MLFeatureValue(pixelBuffer: src)
@@ -4192,6 +4201,8 @@ final class PXAiUpscale {
                 out = result.featureValue(for: "output")?.imageBufferValue
                 path = "direkt"
             }
+            let n = (CACurrentMediaTime() - tp) * 1000.0
+            netMs = netMs == 0 ? n : (netMs * 0.8 + n * 0.2)
         }
         // 2. Vision als Rueckfall.
         if out == nil, let req = request {
@@ -6543,7 +6554,8 @@ traced = torch.jit.trace(net, dummy)
 m = ct.convert(traced,
     inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
     outputs=[ct.ImageType(name="output", color_layout=ct.colorlayout.RGB)],
-    convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17)
+    convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17,
+    compute_precision=ct.precision.FLOAT16)
 m.save("/tmp/pxdenoise.mlpackage")
 print("Entrauscher gespeichert")
 
@@ -6569,7 +6581,8 @@ traced2 = torch.jit.trace(up, dummy)
 m2 = ct.convert(traced2,
     inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
     outputs=[ct.ImageType(name="output", color_layout=ct.colorlayout.RGB)],
-    convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17)
+    convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17,
+    compute_precision=ct.precision.FLOAT16)
 m2.save("/tmp/pxup.mlpackage")
 print("Upscaler gespeichert")
 PXMODEL
