@@ -361,7 +361,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Neuronales Entrauschen: nur bei heller Szene (siehe PXNeuralDenoise).
         // Gemessen: Tag -34 % Korn, Nacht +19 % -- deshalb der Schwellwert.
         var frameToUse = pixelBuffer
-        if let lum = PXNeuralDenoise.lumaMean(pixelBuffer),
+        if thermalAllowsNeural(),
+           let lum = PXNeuralDenoise.lumaMean(pixelBuffer),
            let den = PXNeuralDenoise.shared.process(pixelBuffer, brightness: lum) {
             frameToUse = den
         }
@@ -2168,6 +2169,34 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     /// Kanten (luma-only), Textur und Klarheit — immer auf der finalen
     /// Panel-Auflösung, nie auf dem 1080p-Signal.
+    /// Hitze-Schutz: bei "serious" wird die Klarheit halbiert und das neuronale
+    /// Netz abgeschaltet, bei "critical" zusaetzlich die Schaerfe gedaempft.
+    /// Das iPad drosselt sonst weiter, bis die Bildrate einbricht.
+    private var cachedThermal: ProcessInfo.ThermalState = .nominal
+    private var thermalCheckAt: CFTimeInterval = 0
+
+    private func thermalScale() -> Float {
+        let now = CACurrentMediaTime()
+        if now - thermalCheckAt > 2.0 {
+            thermalCheckAt = now
+            cachedThermal = ProcessInfo.processInfo.thermalState
+        }
+        switch cachedThermal {
+        case .serious: return 0.5
+        case .critical: return 0.25
+        default: return 1.0
+        }
+    }
+
+    private func thermalAllowsNeural() -> Bool {
+        let now = CACurrentMediaTime()
+        if now - thermalCheckAt > 2.0 {
+            thermalCheckAt = now
+            cachedThermal = ProcessInfo.processInfo.thermalState
+        }
+        return cachedThermal == .nominal || cachedThermal == .fair
+    }
+
     /// Zaehlt gerenderte Bilder und schreibt die Rate nach /state.
     /// WICHTIG: muss in BEIDEN Pfaden laufen -- der MetalFX-Zweig verlaesst
     /// draw() vorher, dadurch standen fps und Renderzeit still (gemessen:
@@ -2729,7 +2758,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
         // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
         // ein Drittel der Pixel.
-        let clarityAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0)))
+        let clarityAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0) * Double(thermalScale())))
         if clarityAmt > 0.02, let lc = diffKernelInstance() {
             let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
             let blurred = small.applyingFilter("CIGaussianBlur", parameters: [
