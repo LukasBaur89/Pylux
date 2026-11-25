@@ -276,7 +276,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let ceOK = (UserDefaults.standard.object(forKey: "pxSharpColorEngine") as? NSNumber)?.boolValue ?? true
         let clOK = cleanKernelInstance() != nil
         let cdnOK = chromaDNKernelInstance() != nil
-        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0) cl=\(clOK ? 1 : 0) cdn=\(cdnOK ? 1 : 0)",
+        let ldnOK = lumaDNKernelInstance() != nil
+        UserDefaults.standard.set("cas=\(casOK ? 1 : 0) db=\(dbOK ? 1 : 0) lc=\(lcOK ? 1 : 0) ld=\(ldOK ? 1 : 0) ce=\(ceOK ? 1 : 0) cl=\(clOK ? 1 : 0) cdn=\(cdnOK ? 1 : 0) ldn=\(ldnOK ? 1 : 0)",
                                   forKey: "pxSharpKernels")
         os_log(.default, log: videoViewLog, "[StreamVideoUIView] Metal path active (sharpness=%.2f)", sharpness)
     }
@@ -1724,6 +1725,48 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     /// schaerft NUR den Farbanteil nach, in einem eigenen Band, ohne die
     /// Luma-Kante anzufassen. Der Chroma-Zweig im CAS-Kernel konnte das nicht,
     /// weil der anschliessende Clamp den Farbueberschuss wieder entfernt hat.
+    private var lumaDNKernel: CIKernel?
+    private var lumaDNTried = false
+
+    /// Helligkeits-Entrauscher: kantengefuehrter Mittelwert der acht Nachbarn.
+    /// Ersetzt den alten "clean"-Pfad, der messbar wirkungslos war
+    /// (Regler 0,45 -> 852 Korn, Regler 2,0 -> 843 Korn).
+    private func lumaDNKernelInstance() -> CIKernel? {
+        if lumaDNTried { return lumaDNKernel }
+        lumaDNTried = true
+        let src = """
+        kernel vec4 pxLumaDN(sampler src, float amt, float thr, float r) {
+            vec2 p = destCoord();
+            vec4 c = sample(src, samplerTransform(src, p));
+            vec3 L = vec3(0.299, 0.587, 0.114);
+            float y = dot(c.rgb, L);
+            vec3 acc = c.rgb;
+            float wsum = 1.0;
+            vec3 s0 = sample(src, samplerTransform(src, p + vec2(-1.0, -1.0) * r)).rgb;
+            float y0 = dot(s0, L); float w0 = clamp(1.0 - abs(y0 - y) / thr, 0.0, 1.0); acc += s0 * w0; wsum += w0;
+            vec3 s1 = sample(src, samplerTransform(src, p + vec2( 0.0, -1.0) * r)).rgb;
+            float y1 = dot(s1, L); float w1 = clamp(1.0 - abs(y1 - y) / thr, 0.0, 1.0); acc += s1 * w1; wsum += w1;
+            vec3 s2 = sample(src, samplerTransform(src, p + vec2( 1.0, -1.0) * r)).rgb;
+            float y2 = dot(s2, L); float w2 = clamp(1.0 - abs(y2 - y) / thr, 0.0, 1.0); acc += s2 * w2; wsum += w2;
+            vec3 s3 = sample(src, samplerTransform(src, p + vec2(-1.0,  0.0) * r)).rgb;
+            float y3 = dot(s3, L); float w3 = clamp(1.0 - abs(y3 - y) / thr, 0.0, 1.0); acc += s3 * w3; wsum += w3;
+            vec3 s4 = sample(src, samplerTransform(src, p + vec2( 1.0,  0.0) * r)).rgb;
+            float y4 = dot(s4, L); float w4 = clamp(1.0 - abs(y4 - y) / thr, 0.0, 1.0); acc += s4 * w4; wsum += w4;
+            vec3 s5 = sample(src, samplerTransform(src, p + vec2(-1.0,  1.0) * r)).rgb;
+            float y5 = dot(s5, L); float w5 = clamp(1.0 - abs(y5 - y) / thr, 0.0, 1.0); acc += s5 * w5; wsum += w5;
+            vec3 s6 = sample(src, samplerTransform(src, p + vec2( 0.0,  1.0) * r)).rgb;
+            float y6 = dot(s6, L); float w6 = clamp(1.0 - abs(y6 - y) / thr, 0.0, 1.0); acc += s6 * w6; wsum += w6;
+            vec3 s7 = sample(src, samplerTransform(src, p + vec2( 1.0,  1.0) * r)).rgb;
+            float y7 = dot(s7, L); float w7 = clamp(1.0 - abs(y7 - y) / thr, 0.0, 1.0); acc += s7 * w7; wsum += w7;
+            vec3 avg = acc / max(wsum, 1e-5);
+            return vec4(clamp(mix(c.rgb, avg, clamp(amt, 0.0, 1.0)), vec3(0.0), vec3(1.0)), c.a);
+        }
+        """
+        lumaDNKernel = CIKernel(source: src)
+        if lumaDNKernel == nil { os_log(.error, log: videoViewLog, "[px] lumaDN kernel compile failed") }
+        return lumaDNKernel
+    }
+
     private var chromaDNKernel: CIKernel?
     private var chromaDNTried = false
 
@@ -2512,6 +2555,16 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                                  arguments: [image, NSNumber(value: 3.0), NSNumber(value: 0.012), NSNumber(value: aG)]) {
                 image = out
             }
+        }
+
+        // ---- Helligkeits-Entrauschung (eigener Durchgang) ------------------
+        let lumaDN = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0) * 2.0, 0.0), 1.0))
+        if !bypassNow, lumaDN > 0.05, let lk = lumaDNKernelInstance(),
+           let out = lk.apply(extent: image.extent,
+                              roiCallback: { _, rect in rect.insetBy(dx: -4, dy: -4) },
+                              arguments: [image, NSNumber(value: lumaDN),
+                                          NSNumber(value: 0.055), NSNumber(value: 2.4)]) {
+            image = out
         }
 
         // ---- Farb-Entrauschung (eigener Durchgang) -------------------------
