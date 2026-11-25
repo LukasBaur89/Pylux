@@ -4858,7 +4858,7 @@ struct PXSettingsClean: View {
                      "Mauerwerk, Fels, Bodenwellen. Zu hoch = fleckig.")
             pxSlider("Clear Image (Vor-Schärfung 1080p)", $clearImage, 0...1, pct(clearImage),
                      "Gibt dem Hochskalieren echte Kanten. 20–30 % ist der gute Bereich.")
-            pxSlider("Halo-Grenze", $halo, 0.05...0.55, pct(halo),
+            pxSlider("Halo-Grenze", $halo, 0.05...0.90, pct(halo),
                      "Wie viel Überschwinger erlaubt ist. Niedriger = sauberer, höher = knackiger.")
 
             pxHead("2 · Farbe und Realismus", "Für natürliche Farben: alles hier auf neutral lassen.")
