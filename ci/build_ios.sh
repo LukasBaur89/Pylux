@@ -2195,7 +2195,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             thermalCheckAt = now
             cachedThermal = ProcessInfo.processInfo.thermalState
         }
-        return cachedThermal == .nominal || cachedThermal == .fair
+        // Das iPad schafft das Netz auch bei Waerme -- nur im Notfall aus.
+        return cachedThermal != .critical
     }
 
     /// Zaehlt gerenderte Bilder und schreibt die Rate nach /state.
