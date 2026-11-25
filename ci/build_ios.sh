@@ -109,7 +109,23 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var latestBuffer: CVPixelBuffer?
     private var currentMode: DisplayMode = .fit
     private var loggedFrame = false
+    static func pxFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        return Double(info.phys_footprint) / 1048576.0
+    }
+
     private var hdrActive = false
+    private var hdrFlips = 0
+    private var hdrLocked = false
+    private var memGuardFrame = 0
+    private var memGuardRuns = 0
     private var displayLink: CADisplayLink?
     private var needsPresent = false
     private var hdrStreak = 0
@@ -370,7 +386,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         latestBuffer = frameToUse
         bufferLock.unlock()
         let hdr = pixelBufferIsHDR(pixelBuffer)
-        if hdr != hdrActive {            // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
+        if !hdrLocked, hdr != hdrActive {            // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
             // das Bild bei einzelnen Ausreißern (hell/dunkel).
             hdrStreak += 1
             if hdrStreak >= 8 {
@@ -552,6 +568,15 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     private func applyHDR(_ on: Bool) {
         guard on != hdrActive else { return }
+        // Die Zeichenflaeche umzubauen leert sie kurz -> schwarzer Blitz.
+        // Beim Start ist EIN Wechsel richtig (SDR -> HDR). Springt die
+        // Erkennung aber hin und her, wird nach zwei Wechseln eingefroren.
+        hdrFlips += 1
+        if hdrFlips > 2 {
+            hdrLocked = true
+            pxNote("HDR-Wechsel eingefroren nach \(hdrFlips) Umbruechen")
+            return
+        }
         hdrActive = on
         guard let mv = metalView, let caml = mv.layer as? CAMetalLayer else { return }
         if on {
@@ -3149,6 +3174,21 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
         // Renderrate messen: /state liefert pxSharpFPS.
         noteFrameRendered()
+
+        // Speicher-Bremse: Core Image und Metal halten Puffer, die iOS erst
+        // unter Druck freigibt. Gemessen wuchs der Speicher 300-400 MB/min bis
+        // zum Absturz. Ab 900 MB wird hier aktiv aufgeraeumt statt gewartet.
+        memGuardFrame += 1
+        if memGuardFrame >= 30 {
+            memGuardFrame = 0
+            let mb = Self.pxFootprintMB()
+            if mb > 900 {
+                ciContext?.clearCaches()
+                hdrContext?.clearCaches()
+                memGuardRuns += 1
+                UserDefaults.standard.set(Int(mb), forKey: "pxMemGuardLast")
+            }
+        }
     }
 }
 
