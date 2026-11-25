@@ -6133,6 +6133,8 @@ xcodebuild -project Pylux.xcodeproj -scheme Pylux \
 cd ..
 
 echo "--- Neuronales Netz (Core ML) ---"
+APP="${APP:-ios/build-derived/Build/Products/Release-iphoneos/Pylux.app}"
+
 python3 -m pip install --quiet --upgrade pip || true
 python3 -m pip install --quiet numpy || true
 python3 -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu || python3 -m pip install --quiet torch || true
