@@ -4218,7 +4218,10 @@ final class PXAiUpscale {
         winSum += ms
         guard winCount >= 20 else { return false }
         let avg = winSum / Double(winCount)
-        guard avg > 34.0 else { return false }
+        // Grenze einstellbar: 45 ms sind bei 30-fps-Spielen noch brauchbar,
+        // 34 ms war zu streng (der Schalter sprang sofort zurueck).
+        let limit = (UserDefaults.standard.object(forKey: "pxSharpAiBrakeMs") as? Double) ?? 45.0
+        guard avg > limit else { return false }
         winStart = now
         winCount = 0
         winSum = 0
