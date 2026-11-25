@@ -2423,15 +2423,24 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         guard target.width > 0, target.height > 0 else { return }
 
         var image: CIImage
+        // KI-Upscaler (Option): 1080p -> 2160p, danach nur noch der kleine
+        // Schritt auf die Panelbreite. Standard: aus. Wenn das Netz nicht
+        // laedt oder zu langsam ist, bleibt der normale Weg.
+        var sourceBuffer = pixelBuffer
+        if !hdrActive,
+           UserDefaults.standard.bool(forKey: "pxSharpAiUpscale"),
+           let up = PXAiUpscale.shared.upscale(pixelBuffer) {
+            sourceBuffer = up
+        }
         if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
             // 10-Bit-Buffer sind PQ-kodiert — explizit taggen, sonst nimmt CoreImage sRGB an
             // und die PQ-Ausgabe wirkt weiß/ausgewaschen.
-            image = CIImage(cvPixelBuffer: pixelBuffer, options: [.colorSpace: pq])
+            image = CIImage(cvPixelBuffer: sourceBuffer, options: [.colorSpace: pq])
         } else {
             // WICHTIG: SDR NICHT selbst taggen. VideoToolbox legt Matrix, Primaries und
             // Range (16-235 vs 0-255) als Attachments an den Buffer. Ein hartes BT.709-Tag
             // überschreibt die Range und drückt das Bild zusammen -> Schatten laufen zu.
-            image = CIImage(cvPixelBuffer: pixelBuffer)
+            image = CIImage(cvPixelBuffer: sourceBuffer)
         }
         let src = image.extent.size
         guard src.width > 0, src.height > 0 else { return }
@@ -3794,6 +3803,9 @@ final class PXTuner {
         o["pxSharpAvSkip"] = UserDefaults.standard.bool(forKey: "pxSharpAvSkip") ? "1" : "0"
         o["pxSharpAvSkipped"] = String(UserDefaults.standard.integer(forKey: "pxSharpAvSkipped"))
         o["pxSharpAvFlushEvery"] = String(UserDefaults.standard.integer(forKey: "pxSharpAvFlushEvery"))
+        o["pxAiUpRun"] = String(PXAiUpscale.shared.ranCount)
+        o["pxAiUpMs"] = String(format: "%.2f", PXAiUpscale.shared.avgMs)
+        o["pxAiUpMsg"] = PXAiUpscale.shared.msg
         o["pxNeuralPause"] = String(format: "%.1f", PXNeuralDenoise.shared.pauseLeft())
             let prefs = StreamPreferences.load()
             o["pxBitratePref"] = String(prefs.bitrate)
@@ -4066,6 +4078,94 @@ final class PXNeuralDenoise {
     }
 }
 
+// MARK: - KI-Upscaler (Option, Standard: aus)
+/// Rechnet 1920x1080 auf 3840x2160 hoch. Kleines Netz (8.796 Gewichte),
+/// auf den eigenen Aufnahmen trainiert. Danach skaliert der normale Weg
+/// von 2160p auf die Panelbreite -- das ist nur noch ein kleiner Schritt,
+/// deshalb bleiben die Kanten scharf.
+final class PXAiUpscale {
+
+    static let shared = PXAiUpscale()
+
+    private var model: MLModel?
+    private var tried = false
+    private var convContext: CIContext?
+    private var convBuffer: CVPixelBuffer?
+    private let lock = NSLock()
+
+    private(set) var avgMs: Double = 0
+    private(set) var ranCount: Int = 0
+    private(set) var msg: String = ""
+
+    func ensureLoaded() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if tried { return model != nil }
+        tried = true
+        guard let url = Bundle.main.url(forResource: "pxup", withExtension: "mlmodelc") else {
+            msg = "pxup fehlt im Bundle"
+            return false
+        }
+        do {
+            let cfg = MLModelConfiguration()
+            cfg.computeUnits = .all
+            model = try MLModel(contentsOf: url, configuration: cfg)
+            msg = "geladen"
+            return true
+        } catch {
+            msg = "Laden fehlgeschlagen"
+            os_log(.error, log: videoViewLog, "[PXUp] Laden fehlgeschlagen: %{public}s", "\(error)")
+            return false
+        }
+    }
+
+    /// YUV -> 32BGRA (das einzige Format, das Core ML als Bild nimmt).
+    private func bgra(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        if convContext == nil {
+            convContext = CIContext(options: [.cacheIntermediates: false])
+        }
+        if convBuffer == nil || CVPixelBufferGetWidth(convBuffer!) != w || CVPixelBufferGetHeight(convBuffer!) != h {
+            var out: CVPixelBuffer?
+            let attrs: [String: Any] = [
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
+            ]
+            CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA,
+                                attrs as CFDictionary, &out)
+            convBuffer = out
+        }
+        guard let dst = convBuffer, let ctx = convContext else { return nil }
+        ctx.render(CIImage(cvPixelBuffer: pb), to: dst)
+        return dst
+    }
+
+    /// Gibt das hochgerechnete Bild zurueck, oder nil (dann bleibt der alte Weg).
+    func upscale(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
+        guard ensureLoaded(), let model = model else { return nil }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        guard w == 1920, h == 1080 else { return nil }
+        let t0 = CACurrentMediaTime()
+        let fmt = CVPixelBufferGetPixelFormatType(pb)
+        let src = (fmt == kCVPixelFormatType_32BGRA) ? pb : (bgra(pb) ?? pb)
+        guard let provider = try? MLDictionaryFeatureProvider(dictionary: [
+                  "input": MLFeatureValue(pixelBuffer: src)
+              ]),
+              let result = try? model.prediction(from: provider),
+              let out = result.featureValue(for: "output")?.imageBufferValue else {
+            msg = "kein Ergebnis"
+            return nil
+        }
+        let ow = CVPixelBufferGetWidth(out), oh = CVPixelBufferGetHeight(out)
+        guard ow >= 3000, oh >= 1700 else {
+            msg = "falsche Groesse \(ow)x\(oh)"
+            return nil
+        }
+        let ms = (CACurrentMediaTime() - t0) * 1000.0
+        avgMs = avgMs == 0 ? ms : (avgMs * 0.9 + ms * 0.1)
+        ranCount += 1
+        msg = "ok"
+        return out
+    }
+}
 SWIFT_SOURCE_EOF
 
 # --- Icon -----------------------------------------------------------------
@@ -6323,7 +6423,9 @@ python3 -m pip install --quiet numpy || true
 python3 -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu || python3 -m pip install --quiet torch || true
 python3 -m pip install --quiet coremltools || true
 cat > /tmp/pxmake.py <<'PXMODEL'
-import base64, io, numpy as np, torch, torch.nn as nn, coremltools as ct
+import base64, io, numpy as np, torch, torch.nn as nn, torch.nn.functional as F, coremltools as ct
+
+# ---- 1. Entrauscher (1:1, 1080p -> 1080p) ----
 b64 = open("ci/pxnet_b64.txt").read().strip()
 d = np.load(io.BytesIO(base64.b64decode(b64)))
 class Net(nn.Module):
@@ -6344,14 +6446,42 @@ dummy = torch.rand(1,3,1080,1920)
 traced = torch.jit.trace(net, dummy)
 m = ct.convert(traced,
     inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
-    outputs=[ct.ImageType(name="output", color_layout=ct.colorlayout.RGB)],
+    outputs=[ct.ImageType(name="output", scale=255.0, color_layout=ct.colorlayout.RGB)],
     convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17)
 m.save("/tmp/pxdenoise.mlpackage")
-print("MLPackage gespeichert")
+print("Entrauscher gespeichert")
+
+# ---- 2. KI-Upscaler (2x, 1080p -> 2160p) ----
+b64 = open("ci/pxsr_b64.txt").read().strip()
+d = np.load(io.BytesIO(base64.b64decode(b64)))
+class Up(nn.Module):
+    def __init__(s):
+        super().__init__()
+        s.body = nn.Sequential(
+            nn.Conv2d(3,32,5,padding=2), nn.ReLU(inplace=True),
+            nn.Conv2d(32,16,3,padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(16,12,3,padding=1),
+            nn.PixelShuffle(2))
+    def forward(s, x):
+        return torch.clamp(F.interpolate(x, scale_factor=2, mode="nearest") + s.body(x), 0, 1)
+up = Up(); sd2 = {}
+for i in range(3):
+    sd2["body.%d.weight" % (2*i)] = torch.from_numpy(np.ascontiguousarray(d["w%d" % i]))
+    sd2["body.%d.bias" % (2*i)]   = torch.from_numpy(np.ascontiguousarray(d["b%d" % i]))
+up.load_state_dict(sd2); up.eval()
+traced2 = torch.jit.trace(up, dummy)
+m2 = ct.convert(traced2,
+    inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
+    outputs=[ct.ImageType(name="output", scale=255.0, color_layout=ct.colorlayout.RGB)],
+    convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17)
+m2.save("/tmp/pxup.mlpackage")
+print("Upscaler gespeichert")
 PXMODEL
 python3 /tmp/pxmake.py || echo "PXMODEL FEHLER"
 xcrun coremlcompiler compile /tmp/pxdenoise.mlpackage /tmp/pxout 2>&1 | tail -3 || true
 ls -d /tmp/pxout/pxdenoise.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout/pxdenoise.mlmodelc "$APP/" && echo "MLMODEL im Bundle" || echo "MLMODEL FEHLT"
+xcrun coremlcompiler compile /tmp/pxup.mlpackage /tmp/pxout2 2>&1 | tail -3 || true
+ls -d /tmp/pxout2/pxup.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout2/pxup.mlmodelc "$APP/" && echo "UPMODEL im Bundle" || echo "UPMODEL FEHLT"
 
 echo "--- Packe IPA ---"
 APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
