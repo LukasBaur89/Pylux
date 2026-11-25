@@ -1785,6 +1785,31 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     private var cas2Kernel: CIKernel?
     private var cas2Tried = false
+    // Zeitliches Entrauschen: Kernel + letztes Quellbild.
+    private var temporalKernel: CIKernel?
+    private var temporalTried = false
+    private var prevTemporalBuffer: CVPixelBuffer?
+
+    /// Mischt das aktuelle Bild mit dem vorherigen -- nur in Flaechen, die sich
+    /// nicht veraendert haben. Genau dort flackern die Kompressionsbloecke.
+    private func temporalKernelInstance() -> CIKernel? {
+        if temporalTried { return temporalKernel }
+        temporalTried = true
+        let src = """
+        kernel vec4 pxTemporal(sampler cur, sampler prev, float amt, float thr) {
+            vec2 p = destCoord();
+            vec4 c = sample(cur, samplerTransform(cur, p));
+            vec4 q = sample(prev, samplerTransform(prev, p));
+            vec3 d = abs(c.rgb - q.rgb);
+            float diff = max(max(d.r, d.g), d.b);
+            float w = amt * (1.0 - clamp(diff / max(thr, 0.001), 0.0, 1.0));
+            w = w * w;
+            return vec4(mix(c.rgb, q.rgb, w), c.a);
+        }
+        """
+        temporalKernel = CIKernel(source: src)
+        return temporalKernel
+    }
 
     /// Wie pxCAS, aber nur zwei Radien (1,35 px und 2,7 px). Die Panel-Stufe
     /// braucht den dritten Radius nicht — ein eigener Kernel garantiert, dass
@@ -2441,6 +2466,31 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             // Range (16-235 vs 0-255) als Attachments an den Buffer. Ein hartes BT.709-Tag
             // überschreibt die Range und drückt das Bild zusammen -> Schatten laufen zu.
             image = CIImage(cvPixelBuffer: sourceBuffer)
+        }
+
+        // ---- Zeitliches Entrauschen (Nacht / niedrige Bitrate) --------------
+        // Bei 5-10 Mbit wirft der Encoder Bloecke weg und holt sie im naechsten
+        // Bild neu. Raeumlich sieht man das nicht -- es flackert zeitlich.
+        // Deshalb: aktuelles Bild mit dem vorherigen mischen, aber NUR dort,
+        // wo sich nichts bewegt hat (kleine Differenz). Bewegung bleibt scharf.
+        let tempAmt = (UserDefaults.standard.object(forKey: "pxSharpTemporal") as? Double) ?? 0.0
+        if tempAmt > 0.02, !hdrActive,
+           let tk = temporalKernelInstance(),
+           let prev = prevTemporalBuffer,
+           CVPixelBufferGetWidth(prev) == CVPixelBufferGetWidth(sourceBuffer),
+           CVPixelBufferGetHeight(prev) == CVPixelBufferGetHeight(sourceBuffer) {
+            let thr = CGFloat((UserDefaults.standard.object(forKey: "pxSharpTemporalThr") as? Double) ?? 0.10)
+            if let out = tk.apply(extent: image.extent,
+                                  roiCallback: { _, rect in rect },
+                                  arguments: [image, CIImage(cvPixelBuffer: prev),
+                                              NSNumber(value: tempAmt), NSNumber(value: thr)]) {
+                image = out
+            }
+        }
+        if tempAmt > 0.02, !hdrActive {
+            prevTemporalBuffer = PXProbe.copyBuffer(sourceBuffer)
+        } else if prevTemporalBuffer != nil {
+            prevTemporalBuffer = nil
         }
         let src = image.extent.size
         guard src.width > 0, src.height > 0 else { return }
@@ -5603,6 +5653,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
     @AppStorage("pxSharpDirSharp") private var dirSharp: Bool = true
     @AppStorage("pxSharpDiffuse") private var diffuse: Bool = true
+    @AppStorage("pxSharpTemporal") private var temporal: Double = 0.0
     @AppStorage("pxSharpNeural") private var neural: Bool = true
     @AppStorage("pxSharpAiUpscale") private var aiUpscale: Bool = false
     @AppStorage("pxSharpBypass") private var bypass: Bool = false
@@ -5762,6 +5813,8 @@ struct PXSettingsClean: View {
             Text("Glättet nur dort, wo keine Kante ist — das Prinzip aus NVIDIAs Denoisern. Gemessen: Korn −12 %, Detail −6 %.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            pxSlider("Zeitliches Entrauschen (Nacht)", $temporal, 0...0.9, pct(temporal),
+                     "Mittelt das Bild über die Zeit — aber nur, wo sich nichts bewegt. Das ist das einzige Mittel gegen flackernde Kompressionsblöcke bei niedriger Bitrate (nachts, 5–10 Mbit). Bei Bewegung bleibt alles scharf.")
             pxSlider("Rauschfilter", $denoise, 0...0.5, pct(denoise),
                      "Zu hoch = Textur verschwindet.")
             pxSlider("MPEG-Blöcke glätten", $deblock, 0...0.5, pct(deblock),
