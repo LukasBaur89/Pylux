@@ -6091,8 +6091,8 @@ class Net(nn.Module):
 net = Net(); convs = [m for m in net.body if isinstance(m, nn.Conv2d)]
 sd = {}
 for i, c in enumerate(convs):
-    sd[f"body.{2*i}.weight"] = torch.from_numpy(np.ascontiguousarray(d[f"w{i}"]))
-    sd[f"body.{2*i}.bias"]   = torch.from_numpy(np.ascontiguousarray(d[f"b{i}"]))
+    sd["body.%d.weight" % (2*i)] = torch.from_numpy(np.ascontiguousarray(d["w%d" % i]))
+    sd["body.%d.bias" % (2*i)]   = torch.from_numpy(np.ascontiguousarray(d["b%d" % i]))
 net.load_state_dict(sd); net.eval()
 dummy = torch.rand(1,3,1080,1920)
 traced = torch.jit.trace(net, dummy)
@@ -6105,7 +6105,7 @@ print("MLPackage gespeichert")
 PXMODEL
 python3 /tmp/pxmake.py || echo "PXMODEL FEHLER"
 xcrun coremlcompiler compile /tmp/pxdenoise.mlpackage /tmp/pxout 2>&1 | tail -3 || true
-ls -d /tmp/pxout/pxdenoise.mlmodelc 2>/dev/null && cp -R /tmp/pxout/pxdenoise.mlmodelc "$APP/" && echo "MLMODEL im Bundle" || echo "MLMODEL FEHLT"
+ls -d /tmp/pxout/pxdenoise.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout/pxdenoise.mlmodelc "$APP/" && echo "MLMODEL im Bundle" || echo "MLMODEL FEHLT"
 
 echo "--- Packe IPA ---"
 APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
