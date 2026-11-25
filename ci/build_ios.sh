@@ -1725,28 +1725,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             vec3 h = sample(src, samplerTransform(src, p + vec2(-d.x,  d.y))).rgb;
             vec3 i = sample(src, samplerTransform(src, p + vec2( 0.0,  d.y))).rgb;
             vec3 j = sample(src, samplerTransform(src, p + vec2( d.x,  d.y))).rgb;
+            vec3 avg = (a + b + e + f + g + h + i + j) * 0.125;
             vec3 L = vec3(0.2126, 0.7152, 0.0722);
             float y  = dot(c.rgb, L);
-            // Entrauschen der FARBE, kantenbewahrt, im SELBEN Durchgang:
-            // die acht Nachbarn werden nach Helligkeitsaehnlichkeit gewichtet
-            // (bilateral). Dadurch wird Farbkorn geglaettet, echte Farbkanten
-            // bleiben stehen.
-            float ya0 = dot(a, L), yb0 = dot(b, L), ye0 = dot(e, L), yf0 = dot(f, L);
-            float yg0 = dot(g, L), yh0 = dot(h, L), yi0 = dot(i, L), yj0 = dot(j, L);
-            float sg = 0.035;
-            float w0 = exp(-(y-ya0)*(y-ya0)/(2.0*sg*sg));
-            float w1 = exp(-(y-yb0)*(y-yb0)/(2.0*sg*sg));
-            float w2 = exp(-(y-ye0)*(y-ye0)/(2.0*sg*sg));
-            float w3 = exp(-(y-yf0)*(y-yf0)/(2.0*sg*sg));
-            float w4 = exp(-(y-yg0)*(y-yg0)/(2.0*sg*sg));
-            float w5 = exp(-(y-yh0)*(y-yh0)/(2.0*sg*sg));
-            float w6 = exp(-(y-yi0)*(y-yi0)/(2.0*sg*sg));
-            float w7 = exp(-(y-yj0)*(y-yj0)/(2.0*sg*sg));
-            float ws = w0+w1+w2+w3+w4+w5+w6+w7 + 1e-5;
-            vec3 sm = ((a-vec3(ya0))*w0 + (b-vec3(yb0))*w1 + (e-vec3(ye0))*w2 + (f-vec3(yf0))*w3
-                     + (g-vec3(yg0))*w4 + (h-vec3(yh0))*w5 + (i-vec3(yi0))*w6 + (j-vec3(yj0))*w7) / ws;
+            float ya = dot(avg, L);
             vec3 cc = c.rgb - vec3(y);
-            vec3 ca = sm;
+            vec3 ca = avg  - vec3(ya);
             vec3 delta = cc - ca;
             float m = length(delta);
             float k = max(0.0, m - coring) / max(m, 1e-5);
@@ -2017,7 +2001,11 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Schärfe-Dämpfung bei niedriger Bitrate: vorher wurden bei 8 Mbit nur
         // 58 % der eingestellten Schärfe angewendet — das Bild war dadurch weich,
         // obwohl der Regler auf 0,95 stand. Jetzt bleiben mindestens 75 %.
-        let sharpDamp = (1.0 - min(autoNoise * 0.30, 0.25)) * (0.75 + 0.25 * bfD)
+        // Schaerfe haengt an der Bitrate: ab 12 Mbit volle Staerke (vorher erst
+        // ab 22 Mbit), darunter linear weniger. Nur unter 8 Mbit wird deutlich
+        // gedaempft -- dort besteht die Quelle aus Kompressionsbloecken.
+        let bfD2 = Float(min(max((mbpsD - 3.0) / 9.0, 0.0), 1.0))
+        let sharpDamp = (1.0 - min(autoNoise * 0.30, 0.25)) * (0.55 + 0.45 * bfD2)
         // Coring-Schwelle: Regler + gemessenes Rauschen der Szene.
         // Coring-Schwelle: fast ausschliesslich vom GEMESSENEN Rauschen
         // bestimmt. In einer sauberen Szene bleibt Textur voll erhalten, in
