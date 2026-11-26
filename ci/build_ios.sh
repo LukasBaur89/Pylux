@@ -218,6 +218,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var toneTried = false
     private let diagLabel = UILabel()
     private var frameCount = 0
+    /// Startzeit der Sitzung + Merker: sobald 8 s stabil gerendert wurde, ist
+    /// der Start "gesund" und der Absturz-Zaehler wird zurueckgesetzt.
+    private var sessionStart: CFTimeInterval = 0
+    private var markedHealthy = false
     private var fpsWindowStart = CACurrentMediaTime()
 
     override init(frame: CGRect) {
@@ -251,10 +255,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
         let launches = UserDefaults.standard.integer(forKey: "pxLaunchCount") + 1
         UserDefaults.standard.set(launches, forKey: "pxLaunchCount")
+        sessionStart = CACurrentMediaTime()
+        // GEMESSEN/BEHOBEN: Der Safe-Mode feuerte bei JEDEM dritten Start und
+        // loeschte alle Bildeinstellungen -- das war der Grund, warum das Bild
+        // nach manchen Starts ploetzlich flau und unscharf war. Er greift jetzt
+        // nur noch, wenn drei Starts hintereinander keine 8 Sekunden ueberleben
+        // (also wirklich eine Absturz-Schleife). noteFrameRendered() setzt den
+        // Zaehler zurueck, sobald die Sitzung laeuft.
         if launches >= 3 {
             SharpnessRow.applyCalibratedPreset()
             UserDefaults.standard.set(1, forKey: "pxLaunchCount")
-            os_log(.error, log: videoViewLog, "[px] Safe-Mode: Einstellungen zurueckgesetzt")
+            os_log(.error, log: videoViewLog, "[px] Safe-Mode (Absturz-Schleife): Einstellungen zurueckgesetzt")
         }
         diagLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         diagLabel.textColor = .white
@@ -2314,6 +2325,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private func noteFrameRendered() {
         frameCount += 1
         let now = CACurrentMediaTime()
+        // Sitzung laeuft stabil -> kein Absturz, Zaehler loeschen. Nur so
+        // greift der Safe-Mode ausschliesslich bei echten Absturz-Schleifen.
+        if !markedHealthy, sessionStart > 0, now - sessionStart > 8.0 {
+            markedHealthy = true
+            UserDefaults.standard.set(0, forKey: "pxLaunchCount")
+        }
         if now - fpsWindowStart >= 1.0 {
             let fps = Double(frameCount) / (now - fpsWindowStart)
             UserDefaults.standard.set(String(format: "%.0f", fps), forKey: "pxSharpFPS")
