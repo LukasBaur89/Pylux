@@ -3447,7 +3447,7 @@ jobs:
                               // Probe asynchron im Completed-Handler: kein waitUntilCompleted()
                               // mehr, damit die CPU nicht nach jedem Frame auf die GPU wartet.
                               // /shot bekommt das Bild, sobald die GPU fertig ist.
-                              guard UserDefaults.standard.bool(forKey: "pxProbeLive"),
+                              guard (UserDefaults.standard.object(forKey: "pxSharpProbeLive") as? NSNumber)?.boolValue ?? false,
                                     let c = self?.ciContext,
                                     var outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) else { return }
                               let r = CGRect(x: 0, y: 0, width: CGFloat(outW), height: CGFloat(outH))
@@ -3506,7 +3506,7 @@ jobs:
                       UserDefaults.standard.set("0", forKey: "pxSharpMfxActive")
                   }
                   let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
-                  if let c = ctx, UserDefaults.standard.bool(forKey: "pxProbeLive") {
+                  if let c = ctx, ((UserDefaults.standard.object(forKey: "pxSharpProbeLive") as? NSNumber)?.boolValue ?? false) {
                       PXProbe.shared.set(composited, context: c, space: outSpace,
                                          width: Int(target.width), height: Int(target.height))
                   }
