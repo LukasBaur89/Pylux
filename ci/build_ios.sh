@@ -2481,10 +2481,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Bitraten-Steuerung: das Netz hilft nur, wo die Quelle wirklich weich
         // ist (unter ~18 Mbit). Darueber ist die Quelle besser als alles, was
         // das Netz im Training gesehen hat -- gemessen: Textur -8 % bei 36 Mbit.
-        let mbps = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
+        let mbpsGate = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
         let autoGate = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
         let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
-        let netAllowed = !autoGate || mbps <= 0.1 || mbps < gateLimit
+        let netAllowed = !autoGate || mbpsGate <= 0.1 || mbpsGate < gateLimit
         if !hdrActive, UserDefaults.standard.bool(forKey: "pxSharpAiUpscale"), netAllowed {
             if UserDefaults.standard.integer(forKey: "pxSharpAiMode") == 3 {
                 // Luma-Netz: arbeitet direkt auf der Helligkeitsebene, ohne
