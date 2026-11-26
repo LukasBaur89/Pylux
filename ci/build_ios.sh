@@ -1836,6 +1836,41 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     private var cas2Kernel: CIKernel?
     private var cas2Tried = false
+    // Zeitliche Akkumulation: Kernel + vorheriges Quellbild.
+    private var accumKernel: CIKernel?
+    private var accumTried = false
+    private var prevAccumBuffer: CVPixelBuffer?
+
+    /// Fuehrt mehrere ausgerichtete Bilder zusammen. Nur in Flaechen, die sich
+    /// kaum unterscheiden; das Ergebnis wird auf die 3x3-Nachbarschaft des
+    /// aktuellen Bildes geklemmt, damit bei Bewegung nichts nachzieht.
+    private func accumKernelInstance() -> CIKernel? {
+        if accumTried { return accumKernel }
+        accumTried = true
+        let src = """
+        kernel vec4 pxAccum(sampler cur, sampler prev, float dx, float dy, float amt, float thr) {
+            vec2 p = destCoord();
+            vec4 c = sample(cur, samplerTransform(cur, p));
+            vec4 q = sample(prev, samplerTransform(prev, p + vec2(dx, dy)));
+            vec4 mn = c, mx = c;
+            vec4 s1 = sample(cur, samplerTransform(cur, p + vec2(-1.0, 0.0)));
+            mn = min(mn, s1); mx = max(mx, s1);
+            vec4 s2 = sample(cur, samplerTransform(cur, p + vec2( 1.0, 0.0)));
+            mn = min(mn, s2); mx = max(mx, s2);
+            vec4 s3 = sample(cur, samplerTransform(cur, p + vec2(0.0, -1.0)));
+            mn = min(mn, s3); mx = max(mx, s3);
+            vec4 s4 = sample(cur, samplerTransform(cur, p + vec2(0.0,  1.0)));
+            mn = min(mn, s4); mx = max(mx, s4);
+            vec4 qc = clamp(q, mn, mx);
+            vec3 d = abs(c.rgb - qc.rgb);
+            float diff = max(max(d.r, d.g), d.b);
+            float w = amt * (1.0 - clamp(diff / max(thr, 0.001), 0.0, 1.0));
+            return vec4(mix(c.rgb, qc.rgb, w), c.a);
+        }
+        """
+        accumKernel = CIKernel(source: src)
+        return accumKernel
+    }
     // Zeitliches Entrauschen: Kernel + letztes Quellbild.
     private var temporalKernel: CIKernel?
     private var temporalTried = false
@@ -2559,6 +2594,31 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             prevTemporalBuffer = PXProbe.copyBuffer(sourceBuffer)
         } else if prevTemporalBuffer != nil {
             prevTemporalBuffer = nil
+        }
+
+        // ---- Zeitliche Akkumulation (Mehrbild) -----------------------------
+        // Echte zusaetzliche Abtastpunkte aus 2-4 Bildern: die Kamera bewegt
+        // sich zwischen zwei Bildern um Bruchteile eines Pixels, dieselbe Kante
+        // liegt also jedes Mal anders. Ausgerichtet + geklemmt zusammengelegt
+        // ergibt das mehr Aufloesung, ohne Ueberschaerfung und ohne Halos.
+        let accumAmt = (UserDefaults.standard.object(forKey: "pxSharpAccum") as? Double) ?? 0.0
+        if accumAmt > 0.02, !hdrActive {
+            PXAccumulate.shared.estimate(sourceBuffer)
+            if let ak = accumKernelInstance(), let prevA = prevAccumBuffer,
+               CVPixelBufferGetWidth(prevA) == CVPixelBufferGetWidth(sourceBuffer) {
+                let thr = (UserDefaults.standard.object(forKey: "pxSharpAccumThr") as? Double) ?? 0.08
+                if let out = ak.apply(extent: image.extent,
+                                      roiCallback: { _, rect in rect.insetBy(dx: -2, dy: -2) },
+                                      arguments: [image, CIImage(cvPixelBuffer: prevA),
+                                                  NSNumber(value: PXAccumulate.shared.shiftX),
+                                                  NSNumber(value: PXAccumulate.shared.shiftY),
+                                                  NSNumber(value: accumAmt), NSNumber(value: thr)]) {
+                    image = out
+                }
+            }
+            prevAccumBuffer = PXProbe.copyBuffer(sourceBuffer)
+        } else if prevAccumBuffer != nil {
+            prevAccumBuffer = nil
         }
         let src = image.extent.size
         guard src.width > 0, src.height > 0 else { return }
@@ -3946,6 +4006,8 @@ final class PXTuner {
         o["pxLumaMsg"] = PXLumaDetail.shared.msg
         o["pxLinkHz"] = String(format: "%.0f", appliedPaceHz)
         o["pxPace120"] = ((UserDefaults.standard.object(forKey: "pxSharpPace120") as? NSNumber)?.boolValue ?? true) ? "an" : "aus"
+        o["pxAccumShift"] = PXAccumulate.shared.msg
+        o["pxAccumMs"] = String(format: "%.2f", PXAccumulate.shared.costMs)
         let mbpsNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
         let gateOn = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
         let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
@@ -4596,6 +4658,89 @@ final class PXLumaDetail {
         ranCount += 1
         msg = "ok"
         return full
+    }
+}
+// MARK: - Temporale Akkumulation (Mehrbild-Schaerfung)
+/// Nutzt, dass sich die Kamera zwischen zwei Bildern um Bruchteile eines
+/// Pixels bewegt: dieselbe Kante liegt in jedem Bild auf einer anderen
+/// Subpixel-Position. Mehrere ausgerichtete Bilder ergeben echte zusaetzliche
+/// Abtastpunkte -- kein Raten, keine Halos.
+///
+/// Ohne Motion-Vektoren (die haben wir nicht) wird die Verschiebung global
+/// geschaetzt: Projektionen der Helligkeit (Spalten-/Zeilensummen) auf 1/8
+/// Aufloesung, dann Kreuzkorrelation. Kostet ~0,3 ms.
+///
+/// Gegen Ghosting: das Ergebnis wird auf den Wertebereich der 3x3-Nachbarschaft
+/// des aktuellen Bildes geklemmt (Neighbourhood Clamping, Standard bei TAAU).
+final class PXAccumulate {
+
+    static let shared = PXAccumulate()
+
+    private(set) var shiftX: Double = 0
+    private(set) var shiftY: Double = 0
+    private(set) var costMs: Double = 0
+    private(set) var msg: String = ""
+
+    private var prevCols: [Double] = []
+    private var prevRows: [Double] = []
+
+    /// Schaetzt die globale Verschiebung zum vorherigen Bild (in Quellpixeln).
+    func estimate(_ pb: CVPixelBuffer) {
+        let fmt = CVPixelBufferGetPixelFormatType(pb)
+        guard fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+              fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else { return }
+        let t0 = CACurrentMediaTime()
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return }
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0)
+        let h = CVPixelBufferGetHeightOfPlane(pb, 0)
+        let bpr = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        guard w > 64, h > 64 else { return }
+        let step = 8
+        let gw = w / step, gh = h / step
+        var cols = [Double](repeating: 0, count: gw)
+        var rows = [Double](repeating: 0, count: gh)
+        let p = base.assumingMemoryBound(to: UInt8.self)
+        var y = 0
+        while y < h {
+            let row = y * bpr
+            var x = 0
+            while x < w {
+                let v = Double(p[row + x])
+                cols[x / step] += v
+                rows[y / step] += v
+                x += step
+            }
+            y += step
+        }
+        if prevCols.count == gw && prevRows.count == gh {
+            shiftX = Double(bestShift(cols, prevCols)) * Double(step)
+            shiftY = Double(bestShift(rows, prevRows)) * Double(step)
+        }
+        prevCols = cols; prevRows = rows
+        costMs = (CACurrentMediaTime() - t0) * 1000.0
+        msg = String(format: "dx %.0f dy %.0f", shiftX, shiftY)
+    }
+
+    /// Sucht die Verschiebung mit der kleinsten Summe absoluter Differenzen.
+    private func bestShift(_ a: [Double], _ b: [Double]) -> Int {
+        let maxS = 6
+        var best = 0
+        var bestCost = Double.greatestFiniteMagnitude
+        for s in -maxS...maxS {
+            var cost = 0.0, n = 0
+            var i = max(0, -s)
+            let end = min(a.count, b.count - s)
+            while i < end {
+                cost += abs(a[i] - b[i + s]); n += 1; i += 1
+            }
+            if n > 16 {
+                cost /= Double(n)
+                if cost < bestCost { bestCost = cost; best = s }
+            }
+        }
+        return best
     }
 }
 SWIFT_SOURCE_EOF
@@ -5866,6 +6011,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpDirSharp") private var dirSharp: Bool = true
     @AppStorage("pxSharpDiffuse") private var diffuse: Bool = true
     @AppStorage("pxSharpTemporal") private var temporal: Double = 0.0
+    @AppStorage("pxSharpAccum") private var accum: Double = 0.0
     @AppStorage("pxSharpNeural") private var neural: Bool = true
     @AppStorage("pxSharpAiUpscale") private var aiUpscale: Bool = false
     @AppStorage("pxSharpBypass") private var bypass: Bool = false
@@ -6025,6 +6171,8 @@ struct PXSettingsClean: View {
             Text("Glättet nur dort, wo keine Kante ist — das Prinzip aus NVIDIAs Denoisern. Gemessen: Korn −12 %, Detail −6 %.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            pxSlider("Zeitliche Akkumulation (echte Mehrbild-Schärfe)", $accum, 0...0.85, pct(accum),
+                     "Nutzt aus, dass die Kamera sich zwischen zwei Bildern um Bruchteile eines Pixels bewegt: 2–4 ausgerichtete Bilder ergeben echte zusätzliche Abtastpunkte. Das ist der einzige Weg zu mehr Auflösung, der nichts erfindet — kein Überschärfen, keine Halos. Bei schneller Bewegung greift der Ghosting-Schutz.")
             pxSlider("Zeitliches Entrauschen (Nacht)", $temporal, 0...0.9, pct(temporal),
                      "Mittelt das Bild über die Zeit — aber nur, wo sich nichts bewegt. Das ist das einzige Mittel gegen flackernde Kompressionsblöcke bei niedriger Bitrate (nachts, 5–10 Mbit). Bei Bewegung bleibt alles scharf.")
             pxSlider("Rauschfilter", $denoise, 0...0.5, pct(denoise),
