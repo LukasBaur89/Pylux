@@ -3024,7 +3024,13 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Schaerfung auf PANEL-Aufloesung: beim Hineinzoomen bleiben die
         // Kanten crisper als bei Quellaufloesung. Die Renderzeit liegt bei
         // 13 ms (Budget 16,7) -- die App ist nicht der Bremsklotz, der Stream ist es.
-        image = applyDetailStage(image)
+        // ACHTUNG: Bei MetalFX wird hier NICHT geschaerft. Der Scaler bringt
+        // seine eigene Kantenrekonstruktion mit; vorher lief das Detailwerk
+        // davor und MetalFX danach — gemessen: Kanten 39,8 statt 20,9 und
+        // Schwarzpunkt 29 statt 0 (weil die harten Saeume ins Schwarze bluteten).
+        if !useMFX {
+            image = applyDetailStage(image)
+        }
 
         // ---- Chroma-Nachschaerfung auf PANEL-Aufloesung --------------------
         // Die Farbe kommt im Stream nur mit halber Aufloesung (4:2:0) und wird
