@@ -516,47 +516,35 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     }
 
     @objc private func displayTick() {
-        // Frame Pacing live uebernehmen. Vorher wurde der Wert nur beim
-        // Anlegen des Display-Links gelesen -- der Regler hatte deshalb
-        // null Wirkung, solange die Sitzung lief.
+        // ---- Bildtakt: das System gibt den Rhythmus vor --------------------
+        // Vorher habe ich Bilder selbst gedrosselt ("ist genug Zeit vergangen?")
+        // -- durch Jitter verliert das jeden Zyklus 2-3 ms, und die Rate landete
+        // bei 36 statt 40. Richtig ist, dem Display-Link die Zielrate zu setzen:
+        // bei 120 Hz ist 40 ein glatter Teiler (jeder 3. Takt), das System haelt
+        // ihn exakt. Ohne Netz passt 60 in einen Takt -- dann 60.
         if let link = displayLink {
-            let hzPref = UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60
-            // Nie mehr anfordern, als das Panel kann -- sonst taktet der
-    // Display-Link unregelmaessig (Eingaben wirken verspaetet).
-    let deviceHz = Float(UIScreen.main.maximumFramesPerSecond)
-    let hz = Float(min(hzPref == 0 ? 60 : hzPref, Int(deviceHz)))
-            if abs(appliedPaceHz - hz) > 0.5 {
-                appliedPaceHz = hz
-                link.preferredFrameRateRange = CAFrameRateRange(minimum: 60,
-                                                                maximum: max(60, hz),
-                                                                preferred: hz)
-                os_log(.default, log: videoViewLog, "[px] pacing -> %.0f Hz", hz)
+            let deviceHz = Float(max(1, UIScreen.main.maximumFramesPerSecond))
+            let hzPref = Float(UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60)
+            let capHz = min(hzPref <= 0 ? 60 : hzPref, deviceHz)
+            let lockPref = UserDefaults.standard.object(forKey: "pxSharpLockFps") as? Int ?? 0
+            let gpuMs = max(1.0, PXScene.shared.renderMs)
+            var want: Float
+            if lockPref > 0 {
+                want = min(Float(lockPref), deviceHz)
+            } else {
+                var d: Float = 1
+                while (d / deviceHz) < Float(gpuMs / 1000.0 * 1.06) && d < 8 { d += 1 }
+                want = min(deviceHz / d, capHz)
+            }
+            if abs(appliedPaceHz - want) > 0.5 {
+                appliedPaceHz = want
+                link.preferredFrameRateRange = CAFrameRateRange(minimum: want,
+                                                                maximum: want,
+                                                                preferred: want)
+                os_log(.default, log: videoViewLog, "[px] Takt -> %.0f Hz (GPU %.1f ms)", want, gpuMs)
             }
         }
         guard needsPresent else { return }
-
-        // ---- Feste Einrastung auf einen Teiler der Bildwiederholrate --------
-        // 22 ms Rechenzeit passen nicht in 16,7 ms. Ohne Einrastung verwirft
-        // die Anzeige die Bilder unregelmaessig (mal 1 Takt, mal 2) -- genau
-        // das sieht man als Ruckeln, obwohl die Bildrate "45" anzeigt.
-        // Mit Einrastung haelt JEDES Bild exakt gleich lang (z. B. 120/3 = 40).
-        let lockPref = UserDefaults.standard.object(forKey: "pxSharpLockFps") as? Int ?? 0
-        let refresh = max(1.0, Double(UIScreen.main.maximumFramesPerSecond))
-        let gpuMs = max(1.0, PXScene.shared.renderMs)
-        var target: Double
-        if lockPref > 0 {
-            target = 1.0 / Double(lockPref)
-        } else {
-            var d = 1.0
-            while d / refresh < gpuMs / 1000.0 * 1.06 && d < 8.0 { d += 1 }
-            target = d / refresh
-        }
-        let tickNow = CACurrentMediaTime()
-        if target > 0.001, tickNow - lastPresentTick < target - 0.0015 {
-            // needsPresent bleibt stehen: der naechste Takt zeigt das neueste Bild.
-            return
-        }
-        lastPresentTick = tickNow
         needsPresent = false
         metalView?.draw()
     }
