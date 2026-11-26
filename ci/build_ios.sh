@@ -2478,7 +2478,14 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Schritt auf die Panelbreite. Standard: aus. Wenn das Netz nicht
         // laedt oder zu langsam ist, bleibt der normale Weg.
         var sourceBuffer = pixelBuffer
-        if !hdrActive, UserDefaults.standard.bool(forKey: "pxSharpAiUpscale") {
+        // Bitraten-Steuerung: das Netz hilft nur, wo die Quelle wirklich weich
+        // ist (unter ~18 Mbit). Darueber ist die Quelle besser als alles, was
+        // das Netz im Training gesehen hat -- gemessen: Textur -8 % bei 36 Mbit.
+        let mbps = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
+        let autoGate = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
+        let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
+        let netAllowed = !autoGate || mbps <= 0.1 || mbps < gateLimit
+        if !hdrActive, UserDefaults.standard.bool(forKey: "pxSharpAiUpscale"), netAllowed {
             if UserDefaults.standard.integer(forKey: "pxSharpAiMode") == 3 {
                 // Luma-Netz: arbeitet direkt auf der Helligkeitsebene, ohne
                 // Farbumwandlung. Die Farbe wird unveraendert uebernommen.
@@ -3903,6 +3910,15 @@ final class PXTuner {
         o["pxAiUpConv"] = String(format: "%.2f", PXAiUpscale.shared.convMs)
         o["pxAiUpNet"] = String(format: "%.2f", PXAiUpscale.shared.netMs)
         o["pxAiUpMsg"] = PXAiUpscale.shared.msg
+        o["pxLumaMs"] = String(format: "%.2f", PXLumaDetail.shared.avgMs)
+        o["pxLumaRun"] = String(PXLumaDetail.shared.ranCount)
+        o["pxLumaMsg"] = PXLumaDetail.shared.msg
+        let mbpsNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
+        let gateOn = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
+        let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
+        if !gateOn { o["pxNetGate"] = "aus" }
+        else if mbpsNow <= 0.1 { o["pxNetGate"] = "offen (unbekannt)" }
+        else { o["pxNetGate"] = mbpsNow < gateLimit ? "offen" : "zu" }
         // Fuer die Einstellungen: Tempo und Klartext direkt unter dem Schalter.
         UserDefaults.standard.set(PXAiUpscale.shared.msg, forKey: "pxAiUpMsgUI")
         UserDefaults.standard.set(String(format: "%.0f", PXAiUpscale.shared.convMs), forKey: "pxAiUpConvUI")
