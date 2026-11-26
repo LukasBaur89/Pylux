@@ -203,6 +203,20 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var colorLUTKey: String = ""
     private var colorLUTDimension: Int = 33
     private var lutLastBuild: CFTimeInterval = 0
+    /// Wie oft die Farb-LUT neu gebaut wurde (Diagnose: soll selten sein).
+    private var lutBuildCount = 0
+    /// Wiederverwendeter Puffer fuer die 3D-LUT (keine Allokation pro Neubau).
+    private var lutScratch: [Float] = []
+    /// Einmal angelegter Farbwuerfel-Filter (vermeidet Upload pro Bild).
+    private var colorCubeFilter: CIFilter?
+    // ---- Eingebauter Profiler (Ersatz fuer Instruments) --------------
+    // Misst die GPU-Zeit jeder Kette einzeln: 1080p-Stufen, Skalieren,
+    // Panel-Stufen. An: pxSharpProfile=true. Kostet dann ~4x Frame-Zeit.
+    private var profPrefixes: [(String, CIImage)] = []
+    private var profTexture: MTLTexture?
+    private var profW = 0, profH = 0
+    private var profMs: [String: Double] = [:]
+    private var lutDirty = true
     /// Von der Bildautomatik gesetzte Daempfung der Detailstufe (1 = voll).
     private var autoDetailScale: Float = 1.0
     private var lastAutoExpo: Double = 1.0
@@ -589,6 +603,13 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 let every = max(1, Int((deviceHz / max(want, 1)).rounded()))
                 if every > 1 && (tickParity % every) != 0 { return }
             }
+        }
+        // Bild in den Schirm: 16:9 auf einem 4:3-Panel kann nicht ohne
+        // Balken UND ohne Verzerrung passen. "Fuellen" schneidet links/rechts
+        // ab (ca. 25 % der Breite), die Geometrie bleibt sonst unveraendert.
+        let wantFill = UserDefaults.standard.bool(forKey: "pxSharpFill")
+        if wantFill != (currentMode == .zoom) {
+            updateVideoGravity(wantFill ? .zoom : .fit)
         }
         guard needsPresent else { return }
         needsPresent = false
@@ -1236,7 +1257,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // 80 ms neu gebaut (36.000 Stuetzpunkte) -- das war der Ausreisser:
         // 23 % aller Bilder brauchten 38 ms statt 20. Auf 0,02 gerundet bleibt
         // der Schluessel stehen, solange sich die Szene nicht wirklich aendert.
-        func q(_ v: Double) -> Double { (v * 50.0).rounded() / 50.0 }
+        func q(_ v: Double) -> Double { (v * 10.0).rounded() / 10.0 }
         let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.2f/%.2f/%.2f/%.2f/%.2f/%.2f",
                          gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK,
                          q(Double(hlGainR)), q(Double(hlGainB)), q(Double(lvlBlack)), q(Double(lvlWhite)),
@@ -1252,12 +1273,16 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             let now = CACurrentMediaTime()
             if colorLUTData == nil || now - lutLastBuild > 0.08 {
                 lutLastBuild = now
+                lutBuildCount += 1
+                UserDefaults.standard.set(lutBuildCount, forKey: "pxLutBuildsTotal")
                 // Farbtiefe der 3D-LUT: 33^3 ist schnell, 65^3 ist die
                 // "10-Bit-Stufe" -- feinere Abstufungen, weniger Banding,
                 // aber rund dreimal so teuer beim Aufbau.
                 let lutPref = (UserDefaults.standard.object(forKey: "pxSharpLutSize") as? Int) ?? 33
                 let n = lutPref >= 65 ? 65 : 33
-                var data = [Float](repeating: 0, count: n * n * n * 4)
+                // Puffer EINMAL anlegen und wiederverwenden (vorher 575 KB pro Neubau).
+            let need = n * n * n * 4
+            if lutScratch.count != need { lutScratch = [Float](repeating: 0, count: need) }
                 var idx = 0
                 for bi in 0..<n {
                     for gi in 0..<n {
@@ -1486,24 +1511,34 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                             oR *= (1.0 + castK * 0.04 * w)
                         }
 
-                        data[idx + 0] = Float(min(max(oR, 0), 1))
-                        data[idx + 1] = Float(min(max(oG, 0), 1))
-                        data[idx + 2] = Float(min(max(oB, 0), 1))
-                        data[idx + 3] = 1
+                        lutScratch[idx + 0] = Float(min(max(oR, 0), 1))
+                        lutScratch[idx + 1] = Float(min(max(oG, 0), 1))
+                        lutScratch[idx + 2] = Float(min(max(oB, 0), 1))
+                        lutScratch[idx + 3] = 1
                         idx += 4
                     }
                 }
             }
-            colorLUTData = data.withUnsafeBufferPointer { Data(buffer: $0) }
+            colorLUTData = lutScratch.withUnsafeBufferPointer { Data(buffer: $0) }
+            lutDirty = true
             colorLUTKey = key
             colorLUTDimension = n
             }
         }
         guard let lut = colorLUTData else { return input }
-        return input.applyingFilter("CIColorCube", parameters: [
-            "inputCubeDimension": colorLUTDimension,
-            "inputCubeData": lut
-        ])
+        // GEMESSEN: vorher wurde hier pro Bild ein neuer Filter gebaut und die
+        // 575 KB Cube-Daten neu in die GPU geladen (60x/s = 34 MB/s). Jetzt
+        // wird der Filter einmal angelegt und die Daten nur bei echter
+        // Aenderung gesetzt.
+        if colorCubeFilter == nil { colorCubeFilter = CIFilter(name: "CIColorCube") }
+        guard let cf = colorCubeFilter else { return input }
+        if lutDirty {
+            cf.setValue(colorLUTDimension, forKey: "inputCubeDimension")
+            cf.setValue(lut, forKey: "inputCubeData")
+            lutDirty = false
+        }
+        cf.setValue(input, forKey: kCIInputImageKey)
+        return cf.outputImage ?? input
     }
 
     private var shadowKernel: CIColorKernel?
@@ -2409,6 +2444,37 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
     }
 
+    /// Rendert jede gespeicherte Kette einzeln und misst die GPU-Zeit.
+    /// Das ist der Ersatz fuer Instruments: dieselben Zahlen, von innen.
+    private func measureProfile(space: CGColorSpace) {
+        guard let ctx = ciContext, let q = commandQueue, let device = metalView?.device else { return }
+        var ergebnis: [String: Double] = [:]
+        var vorher = 0.0
+        for (name, img) in profPrefixes {
+            let w = Int(img.extent.width), h = Int(img.extent.height)
+            guard w > 8, h > 8 else { continue }
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                             width: w, height: h, mipmapped: false)
+            d.usage = [.renderTarget, .shaderRead]
+            d.storageMode = .private
+            guard let tex = device.makeTexture(descriptor: d),
+                  let cb = q.makeCommandBuffer() else { continue }
+            let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
+            ctx.render(img.cropped(to: rect), to: tex, commandBuffer: cb,
+                       bounds: rect, colorSpace: space)
+            cb.commit()
+            cb.waitUntilCompleted()
+            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+            ergebnis[name] = ms
+            ergebnis["+" + name] = ms - vorher
+            vorher = ms
+        }
+        profPrefixes.removeAll()
+        let txt = ergebnis.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(String(format: "%.1f", $0.value))" }.joined(separator: " ")
+        UserDefaults.standard.set(txt, forKey: "pxProfileText")
+    }
+
     private func applyDetailStage(_ input: CIImage, radiusScale: Float = 1.0) -> CIImage {
         if UserDefaults.standard.bool(forKey: "pxSharpBypass") { return input }
         var image = input
@@ -3078,6 +3144,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             lastClipShare *= 0.90
         }
 
+        let profiling = UserDefaults.standard.bool(forKey: "pxSharpProfile")
+        if profiling { profPrefixes = [("1080p", image)] }
         let sx = target.width / src.width
         let sy = target.height / src.height
         let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
@@ -3151,6 +3219,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let dx = (target.width - placed.width) / 2 - placed.origin.x
         let dy = (target.height - placed.height) / 2 - placed.origin.y
         image = image.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+        if UserDefaults.standard.bool(forKey: "pxSharpProfile") { profPrefixes.append(("skaliert", image)) }
 
 
         // Kantengerichtete Schärfung (Option): 1:1 nach der Skalierung.
@@ -3404,6 +3473,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let canvasRect = CGRect(origin: .zero, size: target)
         let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
         let composited = image.composited(over: canvas)
+        if UserDefaults.standard.bool(forKey: "pxSharpProfile") {
+            profPrefixes.append(("fertig", composited))
+            measureProfile(space: outSpace)
+        }
 
         if mfxStateFlag != false {
             mfxStateFlag = false
@@ -4036,6 +4109,9 @@ final class PXTuner {
         o["pxPace120"] = ((UserDefaults.standard.object(forKey: "pxSharpPace120") as? NSNumber)?.boolValue ?? true) ? "an" : "aus"
         o["pxAccumShift"] = PXAccumulate.shared.msg
         o["pxAccumMs"] = String(format: "%.2f", PXAccumulate.shared.costMs)
+        o["pxLutBuilds"] = String(UserDefaults.standard.integer(forKey: "pxLutBuildsTotal"))
+        o["pxFill"] = UserDefaults.standard.bool(forKey: "pxSharpFill") ? "an" : "aus"
+        o["pxProfile"] = UserDefaults.standard.string(forKey: "pxProfileText") ?? "-"
         let mbpsNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
         let gateOn = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
         let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
