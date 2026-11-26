@@ -213,6 +213,7 @@ jobs:
               /// Zaehlt die Display-Takte fuer den 2:2-Rhythmus (Panel bleibt auf 120 Hz,
               /// gezeichnet wird auf jedem zweiten Takt).
               private var tickParity: Int = 0
+              private var lastPacedDraw: CFTimeInterval = 0
               private var lutData: Data?
               private var lutKey: String = ""
               private var colorLUTData: Data?
@@ -612,12 +613,19 @@ jobs:
                               : CAFrameRateRange(minimum: want, maximum: want, preferred: want)
                           os_log(.default, log: videoViewLog, "[px] Takt -> %.0f Hz (Ziel %.0f, GPU %.1f ms)", linkHz, want, gpuMs)
                       }
-                      if stay120 {
-                          // Nur jeden zweiten Takt zeichnen, solange das Ziel unter der
-                          // Panelrate liegt. Bei 120-Ziel wird jeder Takt genutzt.
-                          tickParity &+= 1
-                          let every = max(1, Int((deviceHz / max(want, 1)).rounded()))
-                          if every > 1 && (tickParity % every) != 0 { return }
+                      if stay120, needsPresent {
+                          // Zeitbasiert statt Paritaet: ein verspaeteter Takt darf nicht
+                          // dazu fuehren, dass der naechste ebenfalls uebersprungen wird
+                          // (das war die Ursache der 30-fps-Dips). Gezeichnet wird, sobald
+                          // seit dem letzten Bild fast ein Frame-Intervall vergangen ist;
+                          // ein spaeter Takt zeichnet sofort.
+                          let interval = 1.0 / Double(max(want, 1))
+                          let panel = 1.0 / Double(max(deviceHz, 1))
+                          if interval > panel * 1.5 {
+                              let now = CACurrentMediaTime()
+                              if now - lastPacedDraw < interval * 0.80 { return }
+                              lastPacedDraw = now
+                          }
                       }
                   }
                   // Bild in den Schirm: 16:9 auf einem 4:3-Panel kann nicht ohne
@@ -7156,7 +7164,7 @@ jobs:
             -sdk iphoneos -configuration Release \
             -derivedDataPath build-derived \
             MARKETING_VERSION=1.0.0 \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CURRENT_PROJECT_VERSION=${{ github.run_number + 1000 }} \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -7184,8 +7192,8 @@ jobs:
       - name: Release mit IPA
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: PXSharp ${{ github.run_number }}
+          tag_name: build-${{ github.run_number + 1000 }}
+          name: PXSharp ${{ github.run_number + 1000 }}
           body: |
             IPA unten unter "Assets" laden und über SideStore installieren.
           files: out/PXSharp-unsigned.ipa
