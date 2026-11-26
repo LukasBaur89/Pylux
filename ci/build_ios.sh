@@ -174,6 +174,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var appliedPeak: Double = 0
     private var appliedPanelFactor: CGFloat = 1.0
     private var appliedPaceHz: Float = 60
+    /// Zaehlt die Display-Takte fuer den 2:2-Rhythmus (Panel bleibt auf 120 Hz,
+    /// gezeichnet wird auf jedem zweiten Takt).
+    private var tickParity: Int = 0
     private var lutData: Data?
     private var lutKey: String = ""
     private var colorLUTData: Data?
@@ -527,16 +530,19 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     }
 
     @objc private func displayTick() {
-        // ---- Bildtakt: das System gibt den Rhythmus vor --------------------
-        // Vorher habe ich Bilder selbst gedrosselt ("ist genug Zeit vergangen?")
-        // -- durch Jitter verliert das jeden Zyklus 2-3 ms, und die Rate landete
-        // bei 36 statt 40. Richtig ist, dem Display-Link die Zielrate zu setzen:
-        // bei 120 Hz ist 40 ein glatter Teiler (jeder 3. Takt), das System haelt
-        // ihn exakt. Ohne Netz passt 60 in einen Takt -- dann 60.
+        // ---- Ausgabe-Takt -------------------------------------------------
+        // Zwei Betriebsarten:
+        //  A) Panel auf 60 Hz zwingen (alt): das iPad schaltet ProMotion auf
+        //     60 Hz um; auf OLED zittert 60-fps-Inhalt dann um den Takt,
+        //     weil das Panel staendig zwischen 60/120 nachregelt.
+        //  B) Panel bleibt auf 120 Hz, gezeichnet wird auf jedem zweiten Takt.
+        //     Ergebnis: jedes Bild haelt exakt 2 Takte = 16,67 ms, kein
+        //     Nachregeln. Das ist der stabile 2:2-Rhythmus, den auch der
+        //     Monitor hat (nur dass der fest mit 60 Hz laeuft).
         if let link = displayLink {
             let deviceHz = Float(max(1, UIScreen.main.maximumFramesPerSecond))
+            let stay120 = (UserDefaults.standard.object(forKey: "pxSharpPace120") as? NSNumber)?.boolValue ?? true
             let hzPref = Float(UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60)
-            let capHz = min(hzPref <= 0 ? 60 : hzPref, deviceHz)
             let lockPref = UserDefaults.standard.object(forKey: "pxSharpLockFps") as? Int ?? 0
             let gpuMs = max(1.0, PXScene.shared.renderMs)
             var want: Float
@@ -545,14 +551,22 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             } else {
                 var d: Float = 1
                 while (d / deviceHz) < Float(gpuMs / 1000.0 * 1.06) && d < 8 { d += 1 }
-                want = min(deviceHz / d, capHz)
+                want = min(deviceHz / d, min(hzPref <= 0 ? 60 : hzPref, deviceHz))
             }
-            if abs(appliedPaceHz - want) > 0.5 {
-                appliedPaceHz = want
-                link.preferredFrameRateRange = CAFrameRateRange(minimum: want,
-                                                                maximum: want,
-                                                                preferred: want)
-                os_log(.default, log: videoViewLog, "[px] Takt -> %.0f Hz (GPU %.1f ms)", want, gpuMs)
+            let linkHz: Float = stay120 ? deviceHz : want
+            if abs(appliedPaceHz - linkHz) > 0.5 {
+                appliedPaceHz = linkHz
+                link.preferredFrameRateRange = stay120
+                    ? CAFrameRateRange(minimum: 60, maximum: deviceHz, preferred: deviceHz)
+                    : CAFrameRateRange(minimum: want, maximum: want, preferred: want)
+                os_log(.default, log: videoViewLog, "[px] Takt -> %.0f Hz (Ziel %.0f, GPU %.1f ms)", linkHz, want, gpuMs)
+            }
+            if stay120 {
+                // Nur jeden zweiten Takt zeichnen, solange das Ziel unter der
+                // Panelrate liegt. Bei 120-Ziel wird jeder Takt genutzt.
+                tickParity &+= 1
+                let every = max(1, Int((deviceHz / max(want, 1)).rounded()))
+                if every > 1 && (tickParity % every) != 0 { return }
             }
         }
         guard needsPresent else { return }
@@ -3930,6 +3944,8 @@ final class PXTuner {
         o["pxLumaMs"] = String(format: "%.2f", PXLumaDetail.shared.avgMs)
         o["pxLumaRun"] = String(PXLumaDetail.shared.ranCount)
         o["pxLumaMsg"] = PXLumaDetail.shared.msg
+        o["pxLinkHz"] = String(format: "%.0f", appliedPaceHz)
+        o["pxPace120"] = ((UserDefaults.standard.object(forKey: "pxSharpPace120") as? NSNumber)?.boolValue ?? true) ? "an" : "aus"
         let mbpsNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
         let gateOn = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
         let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
