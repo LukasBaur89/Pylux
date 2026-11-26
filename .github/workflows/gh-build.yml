@@ -1,0 +1,41 @@
+﻿name: PXSharp-GH
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Werkzeuge
+        run: |
+          brew install cmake ninja protobuf@29 python-setuptools libplacebo || true
+
+      - name: Build (ci/build_ios.sh)
+        run: |
+          chmod +x ci/build_ios.sh
+          BUILD_NUM=${GITHUB_RUN_NUMBER} bash ci/build_ios.sh
+
+      - name: IPA als Artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: PXSharp-ipa
+          path: out/PXSharp-unsigned.ipa
+          retention-days: 14
+
+      - name: Release mit IPA
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: gh-${{ github.run_number }}
+          name: PXSharp GH ${{ github.run_number }}
+          body: |
+            Automatischer Build aus ci/build_ios.sh.
+            IPA unter "Assets" laden.
+          files: out/PXSharp-unsigned.ipa
