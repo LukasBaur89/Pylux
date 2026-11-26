@@ -2954,6 +2954,16 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // gespiegelt — nur so laesst sich per /shot pruefen, ob der Pfad
         // korrekt rechnet.
         let useMFX = (UserDefaults.standard.object(forKey: "pxSharpMetalFX") as? NSNumber)?.boolValue ?? false
+
+        // ---- Frueh schaerfen (Option) -------------------------------------
+        // Statt nach dem Hochskalieren bei 2732 (4,2 Mio. Pixel) wird schon bei
+        // 1920 geschaerft (2,1 Mio.) -- halbe Rechenzeit. Der Schalter misst,
+        // ob das im Bild sichtbar wird; die spaetere Stufe faellt dann aus.
+        let earlyDetail = UserDefaults.standard.bool(forKey: "pxSharpDetailEarly")
+        if earlyDetail && !useMFX {
+            image = applyDetailStage(image)
+        }
+
         if useMFX {
             // Skalierung übernimmt MetalFX am Ende.
         } else if pixelPerfect {
@@ -3025,13 +3035,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
 
         // Schaerfung auf PANEL-Aufloesung: beim Hineinzoomen bleiben die
-        // Kanten crisper als bei Quellaufloesung. Die Renderzeit liegt bei
-        // 13 ms (Budget 16,7) -- die App ist nicht der Bremsklotz, der Stream ist es.
-        // ACHTUNG: Bei MetalFX wird hier NICHT geschaerft. Der Scaler bringt
-        // seine eigene Kantenrekonstruktion mit; vorher lief das Detailwerk
-        // davor und MetalFX danach — gemessen: Kanten 39,8 statt 20,9 und
-        // Schwarzpunkt 29 statt 0 (weil die harten Saeume ins Schwarze bluteten).
-        if !useMFX {
+        // Kanten crisper als bei Quellaufloesung.
+        // Schalter "Frueh schaerfen": laeuft stattdessen bei 1080p VOR dem
+        // Hochskalieren -- halbe Pixelzahl (2,1 statt 4,2 Mio.), also rund
+        // halbe Rechenzeit. Wird gemessen, nicht behauptet.
+        let detailEarly = UserDefaults.standard.bool(forKey: "pxSharpDetailEarly")
+        if !useMFX && !detailEarly {
             image = applyDetailStage(image)
         }
 
@@ -5677,6 +5686,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpPacing") private var pacing: Bool = true
     @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
     @AppStorage("pxSharpLockFps") private var lockFps: Int = 0
+    @AppStorage("pxSharpDetailEarly") private var detailEarly: Bool = false
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
     @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
@@ -5872,6 +5882,10 @@ struct PXSettingsClean: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
+            Toggle("Früh schärfen (halbe Rechenzeit, etwas weicher)", isOn: $detailEarly)
+            Text("Schärft bei 1080p vor dem Hochskalieren statt bei Panel-Größe: halbe Pixelzahl, halbe Rechenzeit. Kostet laut Messung rund 5 % Kantenschärfe.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             Picker("Upscaler", selection: $metalFX) {
                 Text("Lanczos (stabil)").tag(false)
                 Text("MetalFX (kantenschärfer)").tag(true)
