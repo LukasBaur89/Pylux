@@ -155,6 +155,26 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var hdrFlips = 0
     private var hdrLocked = false
     private var memGuardFrame = 0
+    private var lastContextReset: CFTimeInterval = 0
+
+    /// Baut den Core-Image-Kontext neu auf. GEMESSEN: der Speicher wuchs bis
+    /// 3,2 GB, obwohl clearCaches() jedes Bild aufgerufen wurde -- CI haelt
+    /// interne Caches (Thread-Speicher, Textur-Pools), die nur ein neuer
+    /// Kontext freigibt. Kostet ein Bild, kein Trennen der Verbindung.
+    private func rebuildCIContext() {
+        guard let device = metalView?.device else { return }
+        ciContext = CIContext(mtlDevice: device, options: [
+            .cacheIntermediates: false,
+            .workingColorSpace: CGColorSpaceCreateDeviceRGB()
+        ])
+        if let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
+            hdrContext = CIContext(mtlDevice: device, options: [
+                .cacheIntermediates: false,
+                .workingColorSpace: pq
+            ])
+        }
+        lastContextReset = CACurrentMediaTime()
+    }
     private var memGuardRuns = 0
     private var displayLink: CADisplayLink?
     private var needsPresent = false
@@ -3425,6 +3445,13 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 hdrContext?.clearCaches()
                 memGuardRuns += 1
                 UserDefaults.standard.set(Int(mb), forKey: "pxMemGuardLast")
+                // Ab 1,2 GB reicht clearCaches() nicht: den Kontext neu bauen.
+                // Das gibt die internen Pools frei, ohne die Verbindung zu
+                // unterbrechen (kostet ein Bild).
+                if mb > 1200, CACurrentMediaTime() - lastContextReset > 30.0 {
+                    rebuildCIContext()
+                    UserDefaults.standard.set(Int(Self.pxFootprintMB()), forKey: "pxMemAfterReset")
+                }
             }
         }
     }
