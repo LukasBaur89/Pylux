@@ -1184,8 +1184,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             && hueSat < 0.001 && castK < 0.001
         if isNeutral { return input }
 
-        let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.4f/%.4f/%.4f/%.4f/%.4f/%.4f",
-                         gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK, hlGainR, hlGainB, lvlBlack, lvlWhite, midGainR, midGainB)
+        // GEMESSEN: die szenenabhaengigen Werte (Lichter, Schwarz, Mittentoene)
+        // aendern sich in jedem Bild um 0,0001. Mit voller Genauigkeit im
+        // Schluessel galt die LUT dadurch JEDES Bild als "neu" und wurde alle
+        // 80 ms neu gebaut (36.000 Stuetzpunkte) -- das war der Ausreisser:
+        // 23 % aller Bilder brauchten 38 ms statt 20. Auf 0,02 gerundet bleibt
+        // der Schluessel stehen, solange sich die Szene nicht wirklich aendert.
+        func q(_ v: Double) -> Double { (v * 50.0).rounded() / 50.0 }
+        let key = String(format: "%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.4f/%.4f/%d/%.4f/%.3f/%.3f/%.2f/%.2f/%.2f/%.2f/%.2f/%.2f",
+                         gr, gg, gb, g, kSat, kVib, gainR, gainG, gainB, black, brightGain, gamutNative ? 1 : 0, contrastK, hueSat, castK,
+                         q(Double(hlGainR)), q(Double(hlGainB)), q(Double(lvlBlack)), q(Double(lvlWhite)),
+                         q(Double(midGainR)), q(Double(midGainB)))
         if key != colorLUTKey || colorLUTData == nil {
             // Die LUT hat 33^3 = 35.937 Stützpunkte (statt 65^3 = 274.625).
             // 33er-Würfel sind der Standard für 3D-LUTs, der Unterschied ist
