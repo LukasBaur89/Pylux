@@ -305,10 +305,11 @@ jobs:
                   // damit eine falsche Einstellung die App nicht dauerhaft blockiert.
                   // HDR-Codec beim Start abschalten -- 10-Bit-Decode stuerzt ab.
                   var prefsNow = StreamPreferences.load()
-                  if prefsNow.codec == 2 {
+                  let hdrAllow = (UserDefaults.standard.object(forKey: "pxSharpHdrEnable") as? NSNumber)?.boolValue ?? false
+                  if prefsNow.codec == 2 && !hdrAllow {
                       prefsNow.codec = 1
                       prefsNow.save()
-                      os_log(.error, log: videoViewLog, "[px] Codec 2 (HDR) auf H.265 zurueckgesetzt")
+                      os_log(.error, log: videoViewLog, "[px] Codec 2 (HDR) auf H.265 zurueckgesetzt (HDR-Schalter aus)")
                   }
                   let launches = UserDefaults.standard.integer(forKey: "pxLaunchCount") + 1
                   UserDefaults.standard.set(launches, forKey: "pxLaunchCount")
@@ -321,8 +322,14 @@ jobs:
                   // Zaehler zurueck, sobald die Sitzung laeuft.
                   if launches >= 3 {
                       SharpnessRow.applyCalibratedPreset()
+                      // HDR kann den 10-Bit-Decode zum Absturz bringen. Nach drei
+                      // Fehlstarts wird HDR automatisch abgeschaltet, damit die App
+                      // wieder startet -- der Nutzer muss nichts tun.
+                      UserDefaults.standard.set(false, forKey: "pxSharpHdrEnable")
+                      var safePrefs = StreamPreferences.load()
+                      if safePrefs.codec == 2 { safePrefs.codec = 1; safePrefs.save() }
                       UserDefaults.standard.set(1, forKey: "pxLaunchCount")
-                      os_log(.error, log: videoViewLog, "[px] Safe-Mode (Absturz-Schleife): Einstellungen zurueckgesetzt")
+                      os_log(.error, log: videoViewLog, "[px] Safe-Mode (Absturz-Schleife): Einstellungen + HDR zurueckgesetzt")
                   }
                   diagLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
                   diagLabel.textColor = .white
@@ -6538,6 +6545,7 @@ jobs:
               @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
               @AppStorage("pxSharpLockFps") private var lockFps: Int = 0
               @AppStorage("pxSharpDetailEarly") private var detailEarly: Bool = false
+              @AppStorage("pxSharpHdrEnable") private var hdrEnable: Bool = false
               @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
               @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
               @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
@@ -6792,6 +6800,16 @@ jobs:
                           p.codec = v
                           p.save()
                       }
+                      Toggle("HDR erlauben (10 Bit, experimentell)", isOn: $hdrEnable)
+                          .onChange(of: hdrEnable) { on in
+                              var p = StreamPreferences.load()
+                              p.codec = on ? 2 : 1
+                              p.save()
+                              codecIdx = p.codec
+                          }
+                      Text("Nur mit PS5-HDR und einem HDR-Spiel. Wirkt beim nächsten Verbinden. Bei einer Absturz-Schleife schaltet die App HDR nach 3 Fehlstarts selbst ab.")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
                       Picker("Auflösung", selection: $resIdx) {
                           Text("4K (3840×2160, experimentell)").tag(4)
                           Text("1080p").tag(3)
@@ -6815,7 +6833,7 @@ jobs:
                   }
                   .onAppear {
                       var p = StreamPreferences.load()
-                      if p.codec == 2 { p.codec = 1; p.save() }
+                      if p.codec == 2 && !hdrEnable { p.codec = 1; p.save() }
                       codecIdx = p.codec
                       bitrateVal = p.bitrate == 0 ? 30000 : p.bitrate
                       resIdx = p.resolutionIndex
