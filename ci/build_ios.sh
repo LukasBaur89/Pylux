@@ -4168,13 +4168,18 @@ final class PXAiUpscale {
         }
     }
 
-    /// 0 = 2x-Netz (1080p -> 2160p), 1 = Detail-Netz 1:1 (1080p -> 1080p).
-    /// Das 1:1-Netz holt 85 % des Gewinns bei einem Drittel der Rechnung,
-    /// weil das 2160p-Bild komplett entfaellt.
+    /// 0 = 2x-Netz (1080p -> 2160p), 1 = Detail-Netz 1:1 (1080p -> 1080p),
+    /// 2 = Detail-Netz 1:1 schlank (Tiefenfaltung, 2,7x weniger Rechnung).
     private var mode: Int { UserDefaults.standard.integer(forKey: "pxSharpAiMode") }
-    private var modelName: String { mode == 1 ? "pxup1x" : "pxup" }
-    private var outW: Int { mode == 1 ? 1920 : 3840 }
-    private var outH: Int { mode == 1 ? 1080 : 2160 }
+    private var modelName: String {
+        switch mode {
+        case 1: return "pxup1x"
+        case 2: return "pxup1xdw"
+        default: return "pxup"
+        }
+    }
+    private var outW: Int { mode == 0 ? 3840 : 1920 }
+    private var outH: Int { mode == 0 ? 2160 : 1080 }
 
     func ensureLoaded() -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -6762,6 +6767,33 @@ m3 = ct.convert(traced3,
     compute_precision=ct.precision.FLOAT16)
 m3.save("/tmp/pxup1x.mlpackage")
 print("Detail-Netz 1:1 gespeichert")
+
+# ---- 4. Detail-Netz 1:1 schlank (Tiefenfaltung + Punktfaltung) ----
+b64 = open("ci/pxsr1xdw_b64.txt").read().strip()
+d = np.load(io.BytesIO(base64.b64decode(b64)))
+class DW(nn.Module):
+    def __init__(s):
+        super().__init__()
+        s.body = nn.Sequential(
+            nn.Conv2d(3,24,3,padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(24,24,3,padding=1,groups=24), nn.ReLU(inplace=True),
+            nn.Conv2d(24,16,1), nn.ReLU(inplace=True),
+            nn.Conv2d(16,3,3,padding=1))
+    def forward(s, x):
+        return torch.clamp((x + s.body(x)) * 255.0, 0.0, 255.0)
+dw = DW(); sd4 = {}
+for i in range(4):
+    sd4["body.%d.weight" % (2*i)] = torch.from_numpy(np.ascontiguousarray(d["w%d" % i]))
+    sd4["body.%d.bias" % (2*i)]   = torch.from_numpy(np.ascontiguousarray(d["b%d" % i]))
+dw.load_state_dict(sd4); dw.eval()
+traced4 = torch.jit.trace(dw, dummy)
+m4 = ct.convert(traced4,
+    inputs=[ct.ImageType(name="input", shape=(1,3,1080,1920), scale=1/255.0, color_layout=ct.colorlayout.RGB)],
+    outputs=[ct.ImageType(name="output", color_layout=ct.colorlayout.RGB)],
+    convert_to="mlprogram", minimum_deployment_target=ct.target.iOS17,
+    compute_precision=ct.precision.FLOAT16)
+m4.save("/tmp/pxup1xdw.mlpackage")
+print("Detail-Netz schlank gespeichert")
 PXMODEL
 python3 /tmp/pxmake.py || echo "PXMODEL FEHLER"
 xcrun coremlcompiler compile /tmp/pxdenoise.mlpackage /tmp/pxout 2>&1 | tail -3 || true
@@ -6770,6 +6802,8 @@ xcrun coremlcompiler compile /tmp/pxup.mlpackage /tmp/pxout2 2>&1 | tail -3 || t
 ls -d /tmp/pxout2/pxup.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout2/pxup.mlmodelc "$APP/" && echo "UPMODEL im Bundle" || echo "UPMODEL FEHLT"
 xcrun coremlcompiler compile /tmp/pxup1x.mlpackage /tmp/pxout3 2>&1 | tail -3 || true
 ls -d /tmp/pxout3/pxup1x.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout3/pxup1x.mlmodelc "$APP/" && echo "UP1XMODEL im Bundle" || echo "UP1XMODEL FEHLT"
+xcrun coremlcompiler compile /tmp/pxup1xdw.mlpackage /tmp/pxout4 2>&1 | tail -3 || true
+ls -d /tmp/pxout4/pxup1xdw.mlmodelc >/dev/null 2>&1 && cp -R /tmp/pxout4/pxup1xdw.mlmodelc "$APP/" && echo "DWMODEL im Bundle" || echo "DWMODEL FEHLT"
 
 echo "--- Packe IPA ---"
 APP="ios/build-derived/Build/Products/Release-iphoneos/Pylux.app"
