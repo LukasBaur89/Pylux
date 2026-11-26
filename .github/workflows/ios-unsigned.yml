@@ -4074,7 +4074,7 @@ jobs:
                   let d = UserDefaults.standard
 
                   if path.hasPrefix("/set"), let k = val("key"), let v = val("value"),
-                     k.hasPrefix("pxSharp") || k == "bitrate" {
+                     k.hasPrefix("pxSharp") || k.hasPrefix("pxAudio") || k == "bitrate" {
                       if k == "bitrate" {
                           // Stream-Bitrate in kbit/s (0 = automatisch). Wirkt beim naechsten
                           // Verbinden. Wichtig: 1080p H.265 laeuft "automatisch" nur mit
@@ -4143,6 +4143,11 @@ jobs:
                       o["pxNeuralRun"] = String(PXNeuralDenoise.shared.ranCount)
                       o["pxNeuralMs"] = String(format: "%.2f", PXNeuralDenoise.shared.avgMs)
                   o["pxNeuralMsg"] = UserDefaults.standard.string(forKey: "pxNeuralMsg") ?? ""
+                  for i in 0..<5 {
+                      o["pxAudioEQ\(i)"] = UserDefaults.standard.double(forKey: "pxAudioEQ\(i)")
+                  }
+                  o["pxAudio3D"] = UserDefaults.standard.double(forKey: "pxAudio3D")
+                  o["pxSharpHdrEnable"] = (UserDefaults.standard.object(forKey: "pxSharpHdrEnable") as? NSNumber)?.boolValue ?? false
                   o["pxAvSent"] = String(UserDefaults.standard.integer(forKey: "pxAvSent"))
                   o["pxAvDrop"] = String(UserDefaults.standard.integer(forKey: "pxAvDrop"))
                   o["pxSharpAvSkip"] = UserDefaults.standard.bool(forKey: "pxSharpAvSkip") ? "1" : "0"
@@ -5314,6 +5319,8 @@ jobs:
           typedef struct {
               float b0[EQ_BANDS], b1[EQ_BANDS], b2[EQ_BANDS], a1[EQ_BANDS], a2[EQ_BANDS];
               float width;
+              float preGain;      // Headroom gegen Clipping bei Bass-Boost
+              float bassAlpha;    // Low-Pass fuer Bass-Mono (200 Hz)
               uint32_t channels;
           } PyluxEqCfg;
 
@@ -5334,6 +5341,7 @@ jobs:
               // Filterzustand (nur audio thread)
               float z1[EQ_MAX_CH][EQ_BANDS];
               float z2[EQ_MAX_CH][EQ_BANDS];
+              float lpL, lpR; // Bass-Mono-Tiefpass (nur audio thread)
           } PyluxChiakiAudioOutput;
 
           static size_t ring_space(PyluxChiakiAudioOutput *a) {
@@ -5364,6 +5372,14 @@ jobs:
                   a->cfg.a1[i] = (float)(a1 / a0);
                   a->cfg.a2[i] = (float)(a2 / a0);
               }
+              // Headroom: so viel absenken, wie der groesste Boost anhebt -> kein Clipping.
+              double maxPos = 0.0;
+              for (int i = 0; i < EQ_BANDS; i++) {
+                  if (a->cfgDb[i] > maxPos) maxPos = a->cfgDb[i];
+              }
+              a->cfg.preGain = (float)pow(10.0, -maxPos / 20.0);
+              // Bass-Mono: Low-Pass bei 200 Hz (One-Pole).
+              a->cfg.bassAlpha = (float)(1.0 - exp(-2.0 * M_PI * 200.0 / fs));
               a->cfg.channels = a->channels;
           }
 
@@ -5431,6 +5447,8 @@ jobs:
               pthread_mutex_unlock(&a->mtx);
               memset(a->z1, 0, sizeof(a->z1));
               memset(a->z2, 0, sizeof(a->z2));
+              a->lpL = 0.0f;
+              a->lpR = 0.0f;
           }
 
           // Chiaki calls settings from a worker thread; AVAudioSession and AudioQueue setup must run on the main thread.
@@ -5480,25 +5498,35 @@ jobs:
               if (ch < 1 || ch > EQ_MAX_CH) return;
               float widthGain = 1.0f + cfg->width * 1.5f; // 1.0 .. 2.5
 
+              float pre = cfg->preGain > 0.01f ? cfg->preGain : 1.0f;
+              float alpha = cfg->bassAlpha;
+              if (alpha <= 0.0f || alpha > 1.0f) alpha = 0.02f;
+
               for (size_t n = 0; n < frames; n++) {
                   if (ch >= 2) {
-                      float L = (float)s[n * ch] / 32768.0f;
-                      float R = (float)s[n * ch + 1] / 32768.0f;
+                      float L = ((float)s[n * ch] / 32768.0f) * pre;
+                      float R = ((float)s[n * ch + 1] / 32768.0f) * pre;
                       for (int b = 0; b < EQ_BANDS; b++) {
                           L = biquad(L, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
                                      &a->z1[0][b], &a->z2[0][b]);
                           R = biquad(R, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
                                      &a->z1[1][b], &a->z2[1][b]);
                       }
-                      float M = (L + R) * 0.5f;
-                      float S = (L - R) * 0.5f;
-                      L = M + S * widthGain;
-                      R = M - S * widthGain;
+                      // Bass (<200 Hz) bleibt mono -- sonst wird er hohl/phasig ("roehrend").
+                      a->lpL += alpha * (L - a->lpL);
+                      a->lpR += alpha * (R - a->lpR);
+                      float lowM = (a->lpL + a->lpR) * 0.5f;
+                      float highL = L - a->lpL;
+                      float highR = R - a->lpR;
+                      float Mh = (highL + highR) * 0.5f;
+                      float Sh = (highL - highR) * 0.5f;
+                      L = lowM + Mh + Sh * widthGain;
+                      R = lowM + Mh - Sh * widthGain;
                       s[n * ch] = clamp16(L);
                       s[n * ch + 1] = clamp16(R);
                       // Restliche Kanaele nur EQ (kein Width), falls je >2 geliefert wird.
                       for (uint32_t c = 2; c < ch; c++) {
-                          float v = (float)s[n * ch + c] / 32768.0f;
+                          float v = ((float)s[n * ch + c] / 32768.0f) * pre;
                           for (int b = 0; b < EQ_BANDS; b++) {
                               v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
                                          &a->z1[c][b], &a->z2[c][b]);
@@ -5506,7 +5534,7 @@ jobs:
                           s[n * ch + c] = clamp16(v);
                       }
                   } else {
-                      float v = (float)s[n * ch] / 32768.0f;
+                      float v = ((float)s[n * ch] / 32768.0f) * pre;
                       for (int b = 0; b < EQ_BANDS; b++) {
                           v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
                                      &a->z1[0][b], &a->z2[0][b]);
@@ -5997,15 +6025,15 @@ jobs:
                   case 4: // Nacht
                       eq0 = 6.0; eq1 = 2.5; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
                   case 5: // Sony Bass Boost
-                      eq0 = 9.0; eq1 = 5.0; eq2 = 0; eq3 = 2.0; eq4 = 1.0; audio3D = 0.20
+                      eq0 = 6.0; eq1 = 3.0; eq2 = 0; eq3 = 1.5; eq4 = 1.0; audio3D = 0.15
                   case 6: // Dolby Atmos (weite Bühne)
                       eq0 = 3.0; eq1 = 1.0; eq2 = 0; eq3 = 4.0; eq4 = 2.0; audio3D = 0.70
                   case 7: // Bose (warm, bassbetont)
-                      eq0 = 6.5; eq1 = 5.5; eq2 = -1.0; eq3 = 1.0; eq4 = 2.5; audio3D = 0.35
+                      eq0 = 5.0; eq1 = 3.5; eq2 = -1.0; eq3 = 1.0; eq4 = 1.5; audio3D = 0.20
                   case 8: // Sony WH-1000XM4 (starker Bass, weite Buehne)
-                      eq0 = 15.0; eq1 = 11.0; eq2 = 1.0; eq3 = 2.0; eq4 = 3.5; audio3D = 0.55
+                      eq0 = 6.0; eq1 = 3.0; eq2 = 0; eq3 = 2.0; eq4 = 2.0; audio3D = 0.25
                   case 9: // Sony WH-1000XM4 maximal (mit Subbass)
-                      eq0 = 18.0; eq1 = 14.0; eq2 = 2.0; eq3 = 2.5; eq4 = 4.0; audio3D = 0.70
+                      eq0 = 8.0; eq1 = 4.0; eq2 = 0; eq3 = 2.5; eq4 = 2.0; audio3D = 0.35
                   default: break
                   }
               }
