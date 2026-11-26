@@ -158,6 +158,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var memGuardRuns = 0
     private var displayLink: CADisplayLink?
     private var needsPresent = false
+    /// Zeitpunkt der letzten Anzeige -- fuer die Einrastung auf einen Teiler
+    /// der Bildwiederholrate (gegen unregelmaessiges Verwerfen).
+    private var lastPresentTick: CFTimeInterval = 0
     private var hdrStreak = 0
     private var mfxScaler: MTLFXSpatialScaler?
     private var mfxStateFlag: Bool? = nil
@@ -531,6 +534,29 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             }
         }
         guard needsPresent else { return }
+
+        // ---- Feste Einrastung auf einen Teiler der Bildwiederholrate --------
+        // 22 ms Rechenzeit passen nicht in 16,7 ms. Ohne Einrastung verwirft
+        // die Anzeige die Bilder unregelmaessig (mal 1 Takt, mal 2) -- genau
+        // das sieht man als Ruckeln, obwohl die Bildrate "45" anzeigt.
+        // Mit Einrastung haelt JEDES Bild exakt gleich lang (z. B. 120/3 = 40).
+        let lockPref = UserDefaults.standard.object(forKey: "pxSharpLockFps") as? Int ?? 0
+        let refresh = max(1.0, Double(UIScreen.main.maximumFramesPerSecond))
+        let gpuMs = max(1.0, PXScene.shared.renderMs)
+        var target: Double
+        if lockPref > 0 {
+            target = 1.0 / Double(lockPref)
+        } else {
+            var d = 1.0
+            while d / refresh < gpuMs / 1000.0 * 1.06 && d < 8.0 { d += 1 }
+            target = d / refresh
+        }
+        let tickNow = CACurrentMediaTime()
+        if target > 0.001, tickNow - lastPresentTick < target - 0.0015 {
+            // needsPresent bleibt stehen: der naechste Takt zeigt das neueste Bild.
+            return
+        }
+        lastPresentTick = tickNow
         needsPresent = false
         metalView?.draw()
     }
@@ -5653,6 +5679,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
     @AppStorage("pxSharpPacing") private var pacing: Bool = true
     @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
+    @AppStorage("pxSharpLockFps") private var lockFps: Int = 0
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
     @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
@@ -5838,6 +5865,15 @@ struct PXSettingsClean: View {
                 Text("60 Hz").tag(60)
                 Text("120 Hz").tag(120)
             }
+            Picker("Bildtakt einrasten", selection: $lockFps) {
+                Text("automatisch").tag(0)
+                Text("60 fps").tag(60)
+                Text("40 fps").tag(40)
+                Text("30 fps").tag(30)
+            }
+            Text("Rastet die Anzeige auf ein festes Vielfaches des Bildschirmtakts ein. Bei 120 Hz sind 40 fps (120 ÷ 3) völlig gleichmäßig — das wirkt deutlich flüssiger als unregelmäßige 45. Bei ausgeschaltetem KI-Upscaler schafft „automatisch“ wieder 60.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
             Picker("Upscaler", selection: $metalFX) {
                 Text("Lanczos (stabil)").tag(false)
