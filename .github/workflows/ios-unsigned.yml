@@ -7164,7 +7164,7 @@ jobs:
             -sdk iphoneos -configuration Release \
             -derivedDataPath build-derived \
             MARKETING_VERSION=1.0.0 \
-            CURRENT_PROJECT_VERSION=$1{{ github.run_number }} \
+            CURRENT_PROJECT_VERSION=1${{ github.run_number }} \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -7192,8 +7192,8 @@ jobs:
       - name: Release mit IPA
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-$1{{ github.run_number }}
-          name: PXSharp $1{{ github.run_number }}
+          tag_name: build-1${{ github.run_number }}
+          name: PXSharp 1${{ github.run_number }}
           body: |
             IPA unten unter "Assets" laden und über SideStore installieren.
           files: out/PXSharp-unsigned.ipa
