@@ -1144,7 +1144,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // aus +7,5 % Saettigung +14 %, und die Schatten kippten ins Orange
         // (gemessen B/G 0,73 roh -> 0,54). Wer Schaerfe hochdreht, will nicht
         // gleichzeitig mehr Farbe.
-        let contrastK = 0.8 + Double(min(max(contrastRawL, 0), 1)) * 0.4
+        // Kontrast: vorher war der Bereich nur 0,80-1,20 (+-20 %). Bei Regler
+        // 0,60 kam +4 % heraus -- praktisch unsichtbar, das Bild wirkte flau.
+        // Jetzt 0,55-1,45, bei 0,5 weiterhin exakt 1,0 (neutral).
+        let contrastK = 0.55 + Double(min(max(contrastRawL, 0), 1)) * 0.9
         // Backlight-Emulation: 0.5 = neutral, 0 = -0.8 Blenden, 1 = +0.8 Blenden.
         let brightGain = pow(2.0, Double(brightRaw - 0.5) * 1.6)
 
