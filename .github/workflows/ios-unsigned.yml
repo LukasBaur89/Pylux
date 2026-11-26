@@ -5372,12 +5372,10 @@ jobs:
                   a->cfg.a1[i] = (float)(a1 / a0);
                   a->cfg.a2[i] = (float)(a2 / a0);
               }
-              // Headroom: so viel absenken, wie der groesste Boost anhebt -> kein Clipping.
-              double maxPos = 0.0;
-              for (int i = 0; i < EQ_BANDS; i++) {
-                  if (a->cfgDb[i] > maxPos) maxPos = a->cfgDb[i];
-              }
-              a->cfg.preGain = (float)pow(10.0, -maxPos / 20.0);
+              // KEIN Vorab-Absenken mehr: das hat den Bass um genau den Boost leiser
+              // gemacht (+6 dB Bass, -6 dB Pre-Gain = netto 0). Stattdessen begrenzt
+              // unten ein Soft-Limiter die Spitzen, damit nichts hart clippt.
+              a->cfg.preGain = 1.0f;
               // Bass-Mono: Low-Pass bei 200 Hz (One-Pole).
               a->cfg.bassAlpha = (float)(1.0 - exp(-2.0 * M_PI * 200.0 / fs));
               a->cfg.channels = a->channels;
@@ -5484,6 +5482,14 @@ jobs:
               return y;
           }
 
+          // Sanfter Limiter: unter 0.85 linear, darueber weich abgerundet (kein hartes Clipping).
+          static inline float softclip(float x) {
+              const float t = 0.85f;
+              if (x > t) return t + (1.0f - t) * tanhf((x - t) / (1.0f - t));
+              if (x < -t) return -t - (1.0f - t) * tanhf((-x - t) / (1.0f - t));
+              return x;
+          }
+
           static inline int16_t clamp16(float v) {
               if (v > 1.0f) v = 1.0f;
               if (v < -1.0f) v = -1.0f;
@@ -5522,6 +5528,8 @@ jobs:
                       float Sh = (highL - highR) * 0.5f;
                       L = lowM + Mh + Sh * widthGain;
                       R = lowM + Mh - Sh * widthGain;
+                      L = softclip(L);
+                      R = softclip(R);
                       s[n * ch] = clamp16(L);
                       s[n * ch + 1] = clamp16(R);
                       // Restliche Kanaele nur EQ (kein Width), falls je >2 geliefert wird.
@@ -5531,7 +5539,7 @@ jobs:
                               v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
                                          &a->z1[c][b], &a->z2[c][b]);
                           }
-                          s[n * ch + c] = clamp16(v);
+                          s[n * ch + c] = clamp16(softclip(v));
                       }
                   } else {
                       float v = ((float)s[n * ch] / 32768.0f) * pre;
@@ -5539,7 +5547,7 @@ jobs:
                           v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
                                      &a->z1[0][b], &a->z2[0][b]);
                       }
-                      s[n * ch] = clamp16(v);
+                      s[n * ch] = clamp16(softclip(v));
                   }
               }
           }
@@ -5672,546 +5680,6 @@ jobs:
               ios_chiaki_audio_output_frame(buf, samples_per_channel * ao->channels, user);
           }
           AUDIO_OUT_EOF
-
-          # --- Stream-Overlay: PlayStation-Optik + direkter Disconnect --------------
-          cat > ios/Pylux/Views/StreamView.swift <<'STREAMVIEW_EOF'
-          // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
-          // Stream screen matching Android's StreamActivity
-
-          import SwiftUI
-          import UIKit
-          import os.log
-
-          private let streamViewLog = OSLog(subsystem: "com.pylux.stream", category: "StreamView")
-
-          private func chiakiQuitReasonDescription(_ reason: Int32) -> String {
-              switch reason {
-              case 0: return "Stream stopped normally."
-              case 1: return "Stopped."
-              case 0x01000001: return "Session request failed (unknown reason)."
-              case 0x01000002: return "Connection refused by console. It may be in use or not ready."
-              case 0x01000003: return "Streaming is already in use on the console."
-              case 0x01000004: return "The console ended streaming unexpectedly. Please wait and try again."
-              case 0x02000001: return "Control connection failed (unknown)."
-              case 0x02000002: return "Control connection refused. Check network settings."
-              case 0x04000001: return "Stream connection timed out."
-              default:
-                  return String(format: "Stream ended (code: 0x%08x).", UInt32(bitPattern: reason))
-              }
-          }
-
-          enum DisplayMode: String, CaseIterable {
-              case fit = "Fit"
-              case zoom = "Zoom"
-              case stretch = "Stretch"
-          }
-
-          struct StreamView: View {
-              let connectInfo: StreamConnectInfo
-              @Environment(\.dismiss) private var dismiss
-              @StateObject private var session: StreamSession
-              @State private var showOverlay = true
-              @State private var displayMode: DisplayMode = .fit
-              @State private var onScreenControls: Bool
-              @State private var touchpadOnly: Bool
-              @State private var showStats: Bool
-              @State private var statsText: String = ""
-              /// Previous cumulative dropped-frame total so the overlay can show drops *this tick*
-              /// (per second) instead of a lifetime total. -1 = uninitialized.
-              @State private var lastDroppedFrames: Int64 = -1
-              @State private var showQuitAlert = false
-              @State private var showErrorAlert = false
-              @State private var errorMessage = ""
-              @State private var showPinAlert = false
-              @State private var pinIncorrect = false
-              @State private var pinEntry = ""
-              @State private var videoHostView: StreamVideoUIView?
-              @State private var hideOverlayTask: Task<Void, Never>?
-              @State private var pipClosedByUser = false
-              @State private var pipIsPossible = false
-              @StateObject private var donationCoordinator = DonationPromptCoordinator.shared
-
-              init(connectInfo: StreamConnectInfo) {
-                  self.connectInfo = connectInfo
-                  let prefs = StreamPreferences.load()
-                  let tpOnly = prefs.touchpadOnlyEnabled
-                  let fullOn = prefs.onScreenControlsEnabled
-                  _onScreenControls = State(initialValue: tpOnly ? false : fullOn)
-                  _touchpadOnly = State(initialValue: tpOnly)
-                  _showStats = State(initialValue: prefs.streamStatsOverlayEnabled)
-                  _session = StateObject(wrappedValue: StreamSession(connectInfo: connectInfo, input: StreamInput()))
-              }
-
-              private func persistStreamOverlayPreferences() {
-                  var p = StreamPreferences.load()
-                  p.onScreenControlsEnabled = onScreenControls
-                  p.touchpadOnlyEnabled = touchpadOnly
-                  p.streamStatsOverlayEnabled = showStats
-                  p.save()
-              }
-
-              private var isConnected: Bool {
-                  if case .connected = session.state { return true }
-                  return false
-              }
-
-              /// Single compact top row with short labels, e.g.
-              /// "4.7 Mbps • PL 1.1% • DF/s 0 • 60 FPS • 90 ms • 1280×720".
-              private func updateStats() {
-                  // No native read unless the overlay is actually showing — zero cost when off.
-                  guard showStats, isConnected, let m = session.metrics() else { return }
-                  let drops: Int64 = lastDroppedFrames < 0 ? 0 : max(0, Int64(m.droppedFrames) - lastDroppedFrames)
-                  lastDroppedFrames = Int64(m.droppedFrames)
-                  var parts: [String] = []
-                  parts.append(String(format: "%.1f Mbps", m.bitrateMbps))
-                  parts.append(String(format: "PL %.1f%%", m.packetLoss * 100.0))
-                  parts.append("DF/s \(drops)")
-                  parts.append(String(format: "%.0f FPS", m.fps))
-                  if m.rttMs > 0 { parts.append(String(format: "%.0f ms", m.rttMs)) }
-                  parts.append("\(m.width)×\(m.height)")
-                  statsText = parts.joined(separator: "   •   ")
-              }
-
-              var body: some View {
-                  ZStack {
-                      Color.black.ignoresSafeArea()
-
-                      // Full-screen video bounds; fit/zoom/stretch come only from AVLayerVideoGravity (matches Android
-                      // SurfaceView in a full-screen AspectRatioFrameLayout — a fixed 16:9 SwiftUI box made fit≈zoom for 16:9 streams).
-                      StreamVideoView(
-                          aspectRatio: CGFloat(connectInfo.videoWidth) / CGFloat(max(connectInfo.videoHeight, 1)),
-                          displayMode: displayMode
-                      ) { view in
-                          videoHostView = view
-                          session.attachToView(view)
-                      }
-                      .frame(maxWidth: .infinity, maxHeight: .infinity)
-                      .ignoresSafeArea()
-                      .clipped()
-
-                      // Always show at least PS when full/touchpad controls are off (no tap-to-show overlay anymore).
-                      StreamTouchControlsOverlayRepresentable(
-                          mode: touchpadOnly ? .touchpadOnly : (onScreenControls ? .full : .psOnly),
-                          streamInput: session.input,
-                          onPSButtonPressed: {
-                              showOverlay = true
-                              scheduleHideOverlay()
-                          }
-                      )
-                      .frame(maxWidth: .infinity, maxHeight: .infinity)
-                      .ignoresSafeArea()
-                      .allowsHitTesting(true)
-
-                      // Performance stats overlay: single top-centered row. Stays visible while
-                      // toggled on and connected, independent of the auto-hiding control bar.
-                      if showStats, isConnected {
-                          VStack {
-                              Text(statsText)
-                                  .font(.system(size: 12, weight: .regular, design: .monospaced))
-                                  .foregroundColor(.white)
-                                  .lineLimit(1)
-                                  .fixedSize()
-                                  .padding(.horizontal, 12)
-                                  .padding(.vertical, 5)
-                                  .background(Color.black.opacity(0.4))
-                                  .cornerRadius(6)
-                                  .padding(.top, 1)
-                                  .allowsHitTesting(false)
-                              Spacer()
-                          }
-                          .transition(.opacity)
-                      }
-
-                      // PXSharp: direkter Disconnect -- ein Tippen, immer sichtbar.
-                      if isConnected, !showOverlay {
-                          VStack {
-                              HStack {
-                                  Spacer()
-                                  Button {
-                                      session.pause()
-                                      dismiss()
-                                  } label: {
-                                      Image(systemName: "power")
-                                          .font(.system(size: 17, weight: .semibold))
-                                          .foregroundColor(.white)
-                                          .frame(width: 46, height: 46)
-                                          .background(
-                                              Circle()
-                                                  .fill(Color(red: 0.05, green: 0.07, blue: 0.11).opacity(0.85))
-                                                  .overlay(Circle().strokeBorder(Color(red: 0.0, green: 0.44, blue: 0.82).opacity(0.55), lineWidth: 1))
-                                                  .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-                                          )
-                                  }
-                                  .padding(.top, 14)
-                                  .padding(.trailing, 18)
-                              }
-                              Spacer()
-                          }
-                          .transition(.opacity)
-                      }
-
-                      // Bottom overlay bar (matches Android's stream overlay)
-                      if showOverlay {
-                          VStack {
-                              Spacer()
-                              overlayBar
-                          }
-                          .transition(.move(edge: .bottom))
-                      }
-
-                      // Full-screen connecting overlay (above touch controls so STUN/holepunch is always visible)
-                      if case .connecting = session.state {
-                          ZStack {
-                              Color.black.opacity(0.62)
-                                  .ignoresSafeArea()
-                              VStack(spacing: 18) {
-                                  ProgressView()
-                                      .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                      .scaleEffect(1.35)
-                                  Text(session.connectionPhase.isEmpty ? "Connecting…" : session.connectionPhase)
-                                      .font(.headline)
-                                      .foregroundColor(.white)
-                                      .multilineTextAlignment(.center)
-                                      .padding(.horizontal, 28)
-                                  Text("This can take a while on some networks.")
-                                      .font(.subheadline)
-                                      .foregroundColor(.white.opacity(0.72))
-                                      .multilineTextAlignment(.center)
-                                      .padding(.horizontal, 36)
-                              }
-                          }
-                          .allowsHitTesting(true)
-                      }
-
-                      // PIN entry in-stream (not .alert TextField, not fullScreenCover): those paths use separate UIKit
-                      // controllers that can force portrait and fight AppOrientationLock, then crash when rotating back.
-                      if showPinAlert {
-                          LoginPinEntryView(
-                              pinIncorrect: pinIncorrect,
-                              pinEntry: $pinEntry,
-                              onSubmit: {
-                                  let pin = pinEntry
-                                  pinEntry = ""
-                                  showPinAlert = false
-                                  session.sendLoginPin(pin)
-                              },
-                              onCancel: {
-                                  pinEntry = ""
-                                  showPinAlert = false
-                                  session.pause()
-                                  dismiss()
-                              }
-                          )
-                          .zIndex(20_000)
-                          .allowsHitTesting(true)
-                      }
-                  }
-                  // NavigationStack / fullScreenCover still propose safe-area-inset size to children; expand to physical edges
-                  // so zoom (resizeAspectFill) can use full width (Android SurfaceView is match_parent).
-                  .ignoresSafeArea()
-                  .statusBar(hidden: true)
-                  .onAppear {
-                      // Match Android StreamActivity userLandscape (async so presentation from parent is committed).
-                      DispatchQueue.main.async { AppOrientationLock.lockLandscapeForStream() }
-                      session.pipManager.pipClosedByUser = { [weak session] in
-                          session?.pause()
-                          pipClosedByUser = true
-                      }
-                      session.resume()
-                      scheduleHideOverlay()
-                  }
-                  .onChange(of: onScreenControls) { on in
-                      if on { touchpadOnly = false }
-                      if !on && !touchpadOnly { session.input.clearTouchOverlayState() }
-                      persistStreamOverlayPreferences()
-                  }
-                  .onChange(of: touchpadOnly) { on in
-                      if on { onScreenControls = false }
-                      if !on && !onScreenControls { session.input.clearTouchOverlayState() }
-                      persistStreamOverlayPreferences()
-                  }
-                  .onChange(of: showStats) { on in
-                      if on { lastDroppedFrames = -1 } // first tick reads 0, not the lifetime total
-                      persistStreamOverlayPreferences()
-                  }
-                  // Refresh the overlay once per second to match libchiaki's CONNECTIONQUALITY
-                  // cadence. The closure no-ops (no native read) unless the overlay is showing.
-                  .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-                      updateStats()
-                  }
-                  .onDisappear {
-                      session.input.clearTouchOverlayState()
-                      AppOrientationLock.unlockAfterStream()
-                      donationCoordinator.cancelScheduledOffer()
-                      donationCoordinator.flushStreamTime()
-                      if !session.pipManager.isActive {
-                          session.pause()
-                      }
-                  }
-                  .sheet(isPresented: $donationCoordinator.showPaywall) {
-                      DonationPaywallView()
-                  }
-                  .onChange(of: session.menuRequestToken) { _ in
-                      // OPTIONS+SHARE chord fired -> surface the in-stream menu (auto-hides), same as a tap.
-                      showOverlay = true
-                      scheduleHideOverlay()
-                  }
-                  .onChange(of: session.state) { newState in
-                      switch newState {
-                      case .connected:
-                          if let view = videoHostView {
-                              session.attachToView(view)
-                          }
-                          lastDroppedFrames = -1 // reset stats baseline for the new session
-                          donationCoordinator.markConnected()
-                          donationCoordinator.scheduleOfferIfEligible()
-                      case .quit(_, _):
-                          donationCoordinator.cancelScheduledOffer()
-                          donationCoordinator.flushStreamTime()
-                          showQuitAlert = true
-                      case .createError(let code, let message):
-                          donationCoordinator.cancelScheduledOffer()
-                          donationCoordinator.flushStreamTime()
-                          if let m = message, !m.isEmpty {
-                              errorMessage = "\(m) (code \(code))"
-                          } else {
-                              errorMessage = "Connection failed (code \(code))"
-                          }
-                          showErrorAlert = true
-                      case .loginPinRequest(let incorrect):
-                          donationCoordinator.cancelScheduledOffer()
-                          donationCoordinator.flushStreamTime()
-                          pinIncorrect = incorrect
-                          pinEntry = ""
-                          showPinAlert = true
-                      case .connecting:
-                          donationCoordinator.cancelScheduledOffer()
-                      default:
-                          break
-                      }
-                  }
-                  .alert("Stream Ended", isPresented: $showQuitAlert) {
-                      Button("OK") { dismiss() }
-                  } message: {
-                      if case .quit(let reason, let reasonStr) = session.state {
-                          let msg = reasonStr ?? chiakiQuitReasonDescription(reason)
-                          Text(msg)
-                      } else {
-                          Text("The stream has ended.")
-                      }
-                  }
-                  .alert("Connection Error", isPresented: $showErrorAlert) {
-                      Button("OK") { dismiss() }
-                  } message: {
-                      Text(errorMessage)
-                  }
-                  .onChange(of: showPinAlert) { show in
-                      if show {
-                          AppOrientationLock.lockLandscapeForStream()
-                      }
-                  }
-                  .onChange(of: pipClosedByUser) { closed in
-                      if closed { dismiss() }
-                  }
-                  .onReceive(session.pipManager.$isPossible) { possible in
-                      pipIsPossible = possible
-                  }
-              }
-
-              // MARK: - Overlay bar (matches Android's stream overlay: controls, display mode, disconnect)
-
-              private var overlayBar: some View {
-                  HStack(spacing: 12) {
-                      // On-Screen Controls toggle (matches Android's onScreenControlsSwitch)
-                      Toggle("On-Screen Controls", isOn: $onScreenControls)
-                          .toggleStyle(.switch)
-                          .font(.system(size: 13))
-                          .foregroundColor(.white)
-                          .fixedSize()
-
-                      // Touchpad Only toggle (matches Android's touchpadOnlySwitch)
-                      Toggle("Touchpad only", isOn: $touchpadOnly)
-                          .toggleStyle(.switch)
-                          .font(.system(size: 13))
-                          .foregroundColor(.white)
-                          .fixedSize()
-
-                      // Performance stats overlay toggle (matches Android's statsSwitch)
-                      Toggle("Stats", isOn: $showStats)
-                          .toggleStyle(.switch)
-                          .font(.system(size: 13))
-                          .foregroundColor(.white)
-                          .fixedSize()
-
-                      Spacer()
-
-                      // Display mode toggle group (matches Android's displayModeToggle)
-                      HStack(spacing: 0) {
-                          displayModeButton(.fit, icon: "rectangle.arrowtriangle.2.inward")
-                          displayModeButton(.zoom, icon: "arrow.up.left.and.arrow.down.right")
-                          displayModeButton(.stretch, icon: "arrow.left.and.right")
-                      }
-                      .background(
-                          RoundedRectangle(cornerRadius: 8)
-                              .stroke(Color.white.opacity(0.5), lineWidth: 1)
-                      )
-
-                      // Picture in Picture button
-                      if pipIsPossible {
-                          Button {
-                              session.pipManager.startIfPossible()
-                          } label: {
-                              Image(systemName: "pip.enter")
-                                  .font(.system(size: 14))
-                                  .foregroundColor(.white.opacity(0.9))
-                                  .frame(width: 48, height: 36)
-                          }
-                          .overlay(
-                              RoundedRectangle(cornerRadius: 8)
-                                  .stroke(Color.white.opacity(0.5), lineWidth: 1)
-                          )
-                      }
-
-                      // Disconnect button (matches Android's disconnectButton). The bar is
-                      // crowded (toggles + display modes + PiP), so keep the label on one
-                      // line and let it scale down instead of wrapping ("Disconn/ect").
-                      Button {
-                          session.pause()
-                          dismiss()
-                      } label: {
-                          Text("Disconnect")
-                              .lineLimit(1)
-                              .minimumScaleFactor(0.7)
-                      }
-                      .font(.system(size: 13, weight: .semibold))
-                      .foregroundColor(.white)
-                      .padding(.horizontal, 16)
-                      .padding(.vertical, 9)
-                      .background(
-                          Capsule().fill(Color(red: 0.0, green: 0.44, blue: 0.82))
-                      )
-                  }
-                  .padding(.horizontal, 18)
-                  .padding(.vertical, 12)
-                  .background(
-                      RoundedRectangle(cornerRadius: 20, style: .continuous)
-                          .fill(Color(red: 0.05, green: 0.07, blue: 0.11).opacity(0.93))
-                          .overlay(
-                              RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                  .strokeBorder(Color(red: 0.0, green: 0.44, blue: 0.82).opacity(0.35), lineWidth: 1)
-                          )
-                          .shadow(color: .black.opacity(0.45), radius: 14, y: 8)
-                  )
-                  .padding(.horizontal, 16)
-                  .padding(.bottom, 18)
-              }
-
-              private func displayModeButton(_ mode: DisplayMode, icon: String) -> some View {
-                  Button {
-                      displayMode = mode
-                  } label: {
-                      Image(systemName: icon)
-                          .font(.system(size: 14))
-                          .foregroundColor(displayMode == mode ? .accentColor : .white.opacity(0.7))
-                          .frame(width: 48, height: 36)
-                  }
-              }
-
-              private func scheduleHideOverlay() {
-                  hideOverlayTask?.cancel()
-                  hideOverlayTask = Task {
-                      try? await Task.sleep(nanoseconds: 4_000_000_000) // 4 seconds, matches Android
-                      if !Task.isCancelled {
-                          withAnimation { showOverlay = false }
-                      }
-                  }
-              }
-          }
-
-          // MARK: - Login PIN entry (in-stream overlay; avoids UIAlertController and fullScreenCover)
-
-          private struct LoginPinEntryView: View {
-              let pinIncorrect: Bool
-              @Binding var pinEntry: String
-              let onSubmit: () -> Void
-              let onCancel: () -> Void
-              @State private var keyboardBottomInset: CGFloat = 0
-
-              var body: some View {
-                  ZStack {
-                      Color.black.opacity(0.92)
-                          .ignoresSafeArea()
-                      VStack(spacing: 18) {
-                          Text(pinIncorrect ? "Incorrect PIN" : "Login PIN required")
-                              .font(.title2.bold())
-                              .foregroundStyle(.white)
-                              .multilineTextAlignment(.center)
-                          Text(
-                              pinIncorrect
-                                  ? "The PIN was incorrect. Enter the PIN shown on your console."
-                                  : "Enter the PIN displayed on your console."
-                          )
-                          .font(.body)
-                          .foregroundStyle(.white.opacity(0.88))
-                          .multilineTextAlignment(.center)
-                          TextField("PIN", text: $pinEntry)
-                              .keyboardType(.numberPad)
-                              .textContentType(.oneTimeCode)
-                              .multilineTextAlignment(.center)
-                              .font(.system(size: 26, weight: .medium, design: .monospaced))
-                              .padding(.vertical, 12)
-                              .padding(.horizontal, 16)
-                              .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.15)))
-                              .foregroundStyle(.white)
-                              .frame(maxWidth: 280)
-                              .onChange(of: pinEntry) { newValue in
-                                  let digits = String(newValue.filter(\.isNumber).prefix(4))
-                                  if digits != newValue {
-                                      pinEntry = digits
-                                  }
-                              }
-                          HStack(spacing: 24) {
-                              Button("Cancel", role: .cancel, action: onCancel)
-                                  .foregroundStyle(.white)
-                              Button("Submit", action: onSubmit)
-                                  .buttonStyle(.borderedProminent)
-                                  .disabled(pinEntry.count != 4)
-                          }
-                      }
-                      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                      .padding(.horizontal, 28)
-                      .padding(.top, 52)
-                      .padding(.bottom, 20 + keyboardBottomInset)
-                  }
-                  .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
-                      guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-                      let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-                      let inset = keyboardBottomOverlap(keyboardFrameScreen: frame)
-                      withAnimation(.easeOut(duration: duration)) {
-                          keyboardBottomInset = inset
-                      }
-                  }
-                  .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
-                      let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-                      withAnimation(.easeOut(duration: duration)) {
-                          keyboardBottomInset = 0
-                      }
-                  }
-              }
-
-              private func keyboardBottomOverlap(keyboardFrameScreen: CGRect) -> CGFloat {
-                  guard let window = UIApplication.shared.connectedScenes
-                      .compactMap({ $0 as? UIWindowScene })
-                      .flatMap({ $0.windows })
-                      .first(where: { $0.isKeyWindow })
-                  else {
-                      return max(0, UIScreen.main.bounds.height - keyboardFrameScreen.minY)
-                  }
-                  let kbInWindow = window.convert(keyboardFrameScreen, from: nil)
-                  return max(0, window.bounds.maxY - kbInWindow.minY)
-              }
-          }
-          STREAMVIEW_EOF
 
           # --- Icon -----------------------------------------------------------------
           python3 - <<'ICON_EOF'
@@ -6565,15 +6033,15 @@ jobs:
                   case 4: // Nacht
                       eq0 = 6.0; eq1 = 2.5; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
                   case 5: // Sony Bass Boost
-                      eq0 = 6.0; eq1 = 3.0; eq2 = 0; eq3 = 1.5; eq4 = 1.0; audio3D = 0.15
+                      eq0 = 7.0; eq1 = 4.0; eq2 = 0; eq3 = 1.5; eq4 = 1.0; audio3D = 0.10
                   case 6: // Dolby Atmos (weite Bühne)
                       eq0 = 3.0; eq1 = 1.0; eq2 = 0; eq3 = 4.0; eq4 = 2.0; audio3D = 0.70
                   case 7: // Bose (warm, bassbetont)
                       eq0 = 5.0; eq1 = 3.5; eq2 = -1.0; eq3 = 1.0; eq4 = 1.5; audio3D = 0.20
                   case 8: // Sony WH-1000XM4 (starker Bass, weite Buehne)
-                      eq0 = 6.0; eq1 = 3.0; eq2 = 0; eq3 = 2.0; eq4 = 2.0; audio3D = 0.25
+                      eq0 = 7.0; eq1 = 4.0; eq2 = 0; eq3 = 2.0; eq4 = 2.0; audio3D = 0.15
                   case 9: // Sony WH-1000XM4 maximal (mit Subbass)
-                      eq0 = 8.0; eq1 = 4.0; eq2 = 0; eq3 = 2.5; eq4 = 2.0; audio3D = 0.35
+                      eq0 = 9.0; eq1 = 5.0; eq2 = 0; eq3 = 2.5; eq4 = 2.0; audio3D = 0.20
                   default: break
                   }
               }
@@ -8476,6 +7944,548 @@ jobs:
 
           git --no-pager diff --stat | tail -8
 
+
+      - name: Stream-UI (PlayStation-Overlay)
+        run: |
+          set -e
+          cat > ios/Pylux/Views/StreamView.swift <<'STREAMVIEW_EOF'
+          // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+          // Stream screen matching Android's StreamActivity
+
+          import SwiftUI
+          import UIKit
+          import os.log
+
+          private let streamViewLog = OSLog(subsystem: "com.pylux.stream", category: "StreamView")
+
+          private func chiakiQuitReasonDescription(_ reason: Int32) -> String {
+              switch reason {
+              case 0: return "Stream stopped normally."
+              case 1: return "Stopped."
+              case 0x01000001: return "Session request failed (unknown reason)."
+              case 0x01000002: return "Connection refused by console. It may be in use or not ready."
+              case 0x01000003: return "Streaming is already in use on the console."
+              case 0x01000004: return "The console ended streaming unexpectedly. Please wait and try again."
+              case 0x02000001: return "Control connection failed (unknown)."
+              case 0x02000002: return "Control connection refused. Check network settings."
+              case 0x04000001: return "Stream connection timed out."
+              default:
+                  return String(format: "Stream ended (code: 0x%08x).", UInt32(bitPattern: reason))
+              }
+          }
+
+          enum DisplayMode: String, CaseIterable {
+              case fit = "Fit"
+              case zoom = "Zoom"
+              case stretch = "Stretch"
+          }
+
+          struct StreamView: View {
+              let connectInfo: StreamConnectInfo
+              @Environment(\.dismiss) private var dismiss
+              @StateObject private var session: StreamSession
+              @State private var showOverlay = true
+              @State private var displayMode: DisplayMode = .fit
+              @State private var onScreenControls: Bool
+              @State private var touchpadOnly: Bool
+              @State private var showStats: Bool
+              @State private var statsText: String = ""
+              /// Previous cumulative dropped-frame total so the overlay can show drops *this tick*
+              /// (per second) instead of a lifetime total. -1 = uninitialized.
+              @State private var lastDroppedFrames: Int64 = -1
+              @State private var showQuitAlert = false
+              @State private var showErrorAlert = false
+              @State private var errorMessage = ""
+              @State private var showPinAlert = false
+              @State private var pinIncorrect = false
+              @State private var pinEntry = ""
+              @State private var videoHostView: StreamVideoUIView?
+              @State private var hideOverlayTask: Task<Void, Never>?
+              @State private var pipClosedByUser = false
+              @State private var pipIsPossible = false
+              @StateObject private var donationCoordinator = DonationPromptCoordinator.shared
+
+              init(connectInfo: StreamConnectInfo) {
+                  self.connectInfo = connectInfo
+                  let prefs = StreamPreferences.load()
+                  let tpOnly = prefs.touchpadOnlyEnabled
+                  let fullOn = prefs.onScreenControlsEnabled
+                  _onScreenControls = State(initialValue: tpOnly ? false : fullOn)
+                  _touchpadOnly = State(initialValue: tpOnly)
+                  _showStats = State(initialValue: prefs.streamStatsOverlayEnabled)
+                  _session = StateObject(wrappedValue: StreamSession(connectInfo: connectInfo, input: StreamInput()))
+              }
+
+              private func persistStreamOverlayPreferences() {
+                  var p = StreamPreferences.load()
+                  p.onScreenControlsEnabled = onScreenControls
+                  p.touchpadOnlyEnabled = touchpadOnly
+                  p.streamStatsOverlayEnabled = showStats
+                  p.save()
+              }
+
+              private var isConnected: Bool {
+                  if case .connected = session.state { return true }
+                  return false
+              }
+
+              /// Single compact top row with short labels, e.g.
+              /// "4.7 Mbps • PL 1.1% • DF/s 0 • 60 FPS • 90 ms • 1280×720".
+              private func updateStats() {
+                  // No native read unless the overlay is actually showing — zero cost when off.
+                  guard showStats, isConnected, let m = session.metrics() else { return }
+                  let drops: Int64 = lastDroppedFrames < 0 ? 0 : max(0, Int64(m.droppedFrames) - lastDroppedFrames)
+                  lastDroppedFrames = Int64(m.droppedFrames)
+                  var parts: [String] = []
+                  parts.append(String(format: "%.1f Mbps", m.bitrateMbps))
+                  parts.append(String(format: "PL %.1f%%", m.packetLoss * 100.0))
+                  parts.append("DF/s \(drops)")
+                  parts.append(String(format: "%.0f FPS", m.fps))
+                  if m.rttMs > 0 { parts.append(String(format: "%.0f ms", m.rttMs)) }
+                  parts.append("\(m.width)×\(m.height)")
+                  statsText = parts.joined(separator: "   •   ")
+              }
+
+              var body: some View {
+                  ZStack {
+                      Color.black.ignoresSafeArea()
+
+                      // Full-screen video bounds; fit/zoom/stretch come only from AVLayerVideoGravity (matches Android
+                      // SurfaceView in a full-screen AspectRatioFrameLayout — a fixed 16:9 SwiftUI box made fit≈zoom for 16:9 streams).
+                      StreamVideoView(
+                          aspectRatio: CGFloat(connectInfo.videoWidth) / CGFloat(max(connectInfo.videoHeight, 1)),
+                          displayMode: displayMode
+                      ) { view in
+                          videoHostView = view
+                          session.attachToView(view)
+                      }
+                      .frame(maxWidth: .infinity, maxHeight: .infinity)
+                      .ignoresSafeArea()
+                      .clipped()
+
+                      // Always show at least PS when full/touchpad controls are off (no tap-to-show overlay anymore).
+                      StreamTouchControlsOverlayRepresentable(
+                          mode: touchpadOnly ? .touchpadOnly : (onScreenControls ? .full : .psOnly),
+                          streamInput: session.input,
+                          onPSButtonPressed: {
+                              showOverlay = true
+                              scheduleHideOverlay()
+                          }
+                      )
+                      .frame(maxWidth: .infinity, maxHeight: .infinity)
+                      .ignoresSafeArea()
+                      .allowsHitTesting(true)
+
+                      // Performance stats overlay: single top-centered row. Stays visible while
+                      // toggled on and connected, independent of the auto-hiding control bar.
+                      if showStats, isConnected {
+                          VStack {
+                              Text(statsText)
+                                  .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                  .foregroundColor(.white)
+                                  .lineLimit(1)
+                                  .fixedSize()
+                                  .padding(.horizontal, 12)
+                                  .padding(.vertical, 5)
+                                  .background(Color.black.opacity(0.4))
+                                  .cornerRadius(6)
+                                  .padding(.top, 1)
+                                  .allowsHitTesting(false)
+                              Spacer()
+                          }
+                          .transition(.opacity)
+                      }
+
+                      // PXSharp: direkter Disconnect -- ein Tippen, immer sichtbar.
+                      if isConnected, !showOverlay {
+                          VStack {
+                              HStack {
+                                  Spacer()
+                                  Button {
+                                      session.pause()
+                                      dismiss()
+                                  } label: {
+                                      Image(systemName: "power")
+                                          .font(.system(size: 17, weight: .semibold))
+                                          .foregroundColor(.white)
+                                          .frame(width: 46, height: 46)
+                                          .background(
+                                              Circle()
+                                                  .fill(Color(red: 0.05, green: 0.07, blue: 0.11).opacity(0.85))
+                                                  .overlay(Circle().strokeBorder(Color(red: 0.0, green: 0.44, blue: 0.82).opacity(0.55), lineWidth: 1))
+                                                  .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                                          )
+                                  }
+                                  .padding(.top, 14)
+                                  .padding(.trailing, 18)
+                              }
+                              Spacer()
+                          }
+                          .transition(.opacity)
+                      }
+
+                      // Bottom overlay bar (matches Android's stream overlay)
+                      if showOverlay {
+                          VStack {
+                              Spacer()
+                              overlayBar
+                          }
+                          .transition(.move(edge: .bottom))
+                      }
+
+                      // Full-screen connecting overlay (above touch controls so STUN/holepunch is always visible)
+                      if case .connecting = session.state {
+                          ZStack {
+                              Color.black.opacity(0.62)
+                                  .ignoresSafeArea()
+                              VStack(spacing: 18) {
+                                  ProgressView()
+                                      .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                      .scaleEffect(1.35)
+                                  Text(session.connectionPhase.isEmpty ? "Connecting…" : session.connectionPhase)
+                                      .font(.headline)
+                                      .foregroundColor(.white)
+                                      .multilineTextAlignment(.center)
+                                      .padding(.horizontal, 28)
+                                  Text("This can take a while on some networks.")
+                                      .font(.subheadline)
+                                      .foregroundColor(.white.opacity(0.72))
+                                      .multilineTextAlignment(.center)
+                                      .padding(.horizontal, 36)
+                              }
+                          }
+                          .allowsHitTesting(true)
+                      }
+
+                      // PIN entry in-stream (not .alert TextField, not fullScreenCover): those paths use separate UIKit
+                      // controllers that can force portrait and fight AppOrientationLock, then crash when rotating back.
+                      if showPinAlert {
+                          LoginPinEntryView(
+                              pinIncorrect: pinIncorrect,
+                              pinEntry: $pinEntry,
+                              onSubmit: {
+                                  let pin = pinEntry
+                                  pinEntry = ""
+                                  showPinAlert = false
+                                  session.sendLoginPin(pin)
+                              },
+                              onCancel: {
+                                  pinEntry = ""
+                                  showPinAlert = false
+                                  session.pause()
+                                  dismiss()
+                              }
+                          )
+                          .zIndex(20_000)
+                          .allowsHitTesting(true)
+                      }
+                  }
+                  // NavigationStack / fullScreenCover still propose safe-area-inset size to children; expand to physical edges
+                  // so zoom (resizeAspectFill) can use full width (Android SurfaceView is match_parent).
+                  .ignoresSafeArea()
+                  .statusBar(hidden: true)
+                  .onAppear {
+                      // Match Android StreamActivity userLandscape (async so presentation from parent is committed).
+                      DispatchQueue.main.async { AppOrientationLock.lockLandscapeForStream() }
+                      session.pipManager.pipClosedByUser = { [weak session] in
+                          session?.pause()
+                          pipClosedByUser = true
+                      }
+                      session.resume()
+                      scheduleHideOverlay()
+                  }
+                  .onChange(of: onScreenControls) { on in
+                      if on { touchpadOnly = false }
+                      if !on && !touchpadOnly { session.input.clearTouchOverlayState() }
+                      persistStreamOverlayPreferences()
+                  }
+                  .onChange(of: touchpadOnly) { on in
+                      if on { onScreenControls = false }
+                      if !on && !onScreenControls { session.input.clearTouchOverlayState() }
+                      persistStreamOverlayPreferences()
+                  }
+                  .onChange(of: showStats) { on in
+                      if on { lastDroppedFrames = -1 } // first tick reads 0, not the lifetime total
+                      persistStreamOverlayPreferences()
+                  }
+                  // Refresh the overlay once per second to match libchiaki's CONNECTIONQUALITY
+                  // cadence. The closure no-ops (no native read) unless the overlay is showing.
+                  .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                      updateStats()
+                  }
+                  .onDisappear {
+                      session.input.clearTouchOverlayState()
+                      AppOrientationLock.unlockAfterStream()
+                      donationCoordinator.cancelScheduledOffer()
+                      donationCoordinator.flushStreamTime()
+                      if !session.pipManager.isActive {
+                          session.pause()
+                      }
+                  }
+                  .sheet(isPresented: $donationCoordinator.showPaywall) {
+                      DonationPaywallView()
+                  }
+                  .onChange(of: session.menuRequestToken) { _ in
+                      // OPTIONS+SHARE chord fired -> surface the in-stream menu (auto-hides), same as a tap.
+                      showOverlay = true
+                      scheduleHideOverlay()
+                  }
+                  .onChange(of: session.state) { newState in
+                      switch newState {
+                      case .connected:
+                          if let view = videoHostView {
+                              session.attachToView(view)
+                          }
+                          lastDroppedFrames = -1 // reset stats baseline for the new session
+                          donationCoordinator.markConnected()
+                          donationCoordinator.scheduleOfferIfEligible()
+                      case .quit(_, _):
+                          donationCoordinator.cancelScheduledOffer()
+                          donationCoordinator.flushStreamTime()
+                          showQuitAlert = true
+                      case .createError(let code, let message):
+                          donationCoordinator.cancelScheduledOffer()
+                          donationCoordinator.flushStreamTime()
+                          if let m = message, !m.isEmpty {
+                              errorMessage = "\(m) (code \(code))"
+                          } else {
+                              errorMessage = "Connection failed (code \(code))"
+                          }
+                          showErrorAlert = true
+                      case .loginPinRequest(let incorrect):
+                          donationCoordinator.cancelScheduledOffer()
+                          donationCoordinator.flushStreamTime()
+                          pinIncorrect = incorrect
+                          pinEntry = ""
+                          showPinAlert = true
+                      case .connecting:
+                          donationCoordinator.cancelScheduledOffer()
+                      default:
+                          break
+                      }
+                  }
+                  .alert("Stream Ended", isPresented: $showQuitAlert) {
+                      Button("OK") { dismiss() }
+                  } message: {
+                      if case .quit(let reason, let reasonStr) = session.state {
+                          let msg = reasonStr ?? chiakiQuitReasonDescription(reason)
+                          Text(msg)
+                      } else {
+                          Text("The stream has ended.")
+                      }
+                  }
+                  .alert("Connection Error", isPresented: $showErrorAlert) {
+                      Button("OK") { dismiss() }
+                  } message: {
+                      Text(errorMessage)
+                  }
+                  .onChange(of: showPinAlert) { show in
+                      if show {
+                          AppOrientationLock.lockLandscapeForStream()
+                      }
+                  }
+                  .onChange(of: pipClosedByUser) { closed in
+                      if closed { dismiss() }
+                  }
+                  .onReceive(session.pipManager.$isPossible) { possible in
+                      pipIsPossible = possible
+                  }
+              }
+
+              // MARK: - Overlay bar (matches Android's stream overlay: controls, display mode, disconnect)
+
+              private var overlayBar: some View {
+                  HStack(spacing: 12) {
+                      // On-Screen Controls toggle (matches Android's onScreenControlsSwitch)
+                      Toggle("On-Screen Controls", isOn: $onScreenControls)
+                          .toggleStyle(.switch)
+                          .font(.system(size: 13))
+                          .foregroundColor(.white)
+                          .fixedSize()
+
+                      // Touchpad Only toggle (matches Android's touchpadOnlySwitch)
+                      Toggle("Touchpad only", isOn: $touchpadOnly)
+                          .toggleStyle(.switch)
+                          .font(.system(size: 13))
+                          .foregroundColor(.white)
+                          .fixedSize()
+
+                      // Performance stats overlay toggle (matches Android's statsSwitch)
+                      Toggle("Stats", isOn: $showStats)
+                          .toggleStyle(.switch)
+                          .font(.system(size: 13))
+                          .foregroundColor(.white)
+                          .fixedSize()
+
+                      Spacer()
+
+                      // Display mode toggle group (matches Android's displayModeToggle)
+                      HStack(spacing: 0) {
+                          displayModeButton(.fit, icon: "rectangle.arrowtriangle.2.inward")
+                          displayModeButton(.zoom, icon: "arrow.up.left.and.arrow.down.right")
+                          displayModeButton(.stretch, icon: "arrow.left.and.right")
+                      }
+                      .background(
+                          RoundedRectangle(cornerRadius: 8)
+                              .stroke(Color.white.opacity(0.5), lineWidth: 1)
+                      )
+
+                      // Picture in Picture button
+                      if pipIsPossible {
+                          Button {
+                              session.pipManager.startIfPossible()
+                          } label: {
+                              Image(systemName: "pip.enter")
+                                  .font(.system(size: 14))
+                                  .foregroundColor(.white.opacity(0.9))
+                                  .frame(width: 48, height: 36)
+                          }
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 8)
+                                  .stroke(Color.white.opacity(0.5), lineWidth: 1)
+                          )
+                      }
+
+                      // Disconnect button (matches Android's disconnectButton). The bar is
+                      // crowded (toggles + display modes + PiP), so keep the label on one
+                      // line and let it scale down instead of wrapping ("Disconn/ect").
+                      Button {
+                          session.pause()
+                          dismiss()
+                      } label: {
+                          Text("Disconnect")
+                              .lineLimit(1)
+                              .minimumScaleFactor(0.7)
+                      }
+                      .font(.system(size: 13, weight: .semibold))
+                      .foregroundColor(.white)
+                      .padding(.horizontal, 16)
+                      .padding(.vertical, 9)
+                      .background(
+                          Capsule().fill(Color(red: 0.0, green: 0.44, blue: 0.82))
+                      )
+                  }
+                  .padding(.horizontal, 18)
+                  .padding(.vertical, 12)
+                  .background(
+                      RoundedRectangle(cornerRadius: 20, style: .continuous)
+                          .fill(Color(red: 0.05, green: 0.07, blue: 0.11).opacity(0.93))
+                          .overlay(
+                              RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                  .strokeBorder(Color(red: 0.0, green: 0.44, blue: 0.82).opacity(0.35), lineWidth: 1)
+                          )
+                          .shadow(color: .black.opacity(0.45), radius: 14, y: 8)
+                  )
+                  .padding(.horizontal, 16)
+                  .padding(.bottom, 18)
+              }
+
+              private func displayModeButton(_ mode: DisplayMode, icon: String) -> some View {
+                  Button {
+                      displayMode = mode
+                  } label: {
+                      Image(systemName: icon)
+                          .font(.system(size: 14))
+                          .foregroundColor(displayMode == mode ? .accentColor : .white.opacity(0.7))
+                          .frame(width: 48, height: 36)
+                  }
+              }
+
+              private func scheduleHideOverlay() {
+                  hideOverlayTask?.cancel()
+                  hideOverlayTask = Task {
+                      try? await Task.sleep(nanoseconds: 4_000_000_000) // 4 seconds, matches Android
+                      if !Task.isCancelled {
+                          withAnimation { showOverlay = false }
+                      }
+                  }
+              }
+          }
+
+          // MARK: - Login PIN entry (in-stream overlay; avoids UIAlertController and fullScreenCover)
+
+          private struct LoginPinEntryView: View {
+              let pinIncorrect: Bool
+              @Binding var pinEntry: String
+              let onSubmit: () -> Void
+              let onCancel: () -> Void
+              @State private var keyboardBottomInset: CGFloat = 0
+
+              var body: some View {
+                  ZStack {
+                      Color.black.opacity(0.92)
+                          .ignoresSafeArea()
+                      VStack(spacing: 18) {
+                          Text(pinIncorrect ? "Incorrect PIN" : "Login PIN required")
+                              .font(.title2.bold())
+                              .foregroundStyle(.white)
+                              .multilineTextAlignment(.center)
+                          Text(
+                              pinIncorrect
+                                  ? "The PIN was incorrect. Enter the PIN shown on your console."
+                                  : "Enter the PIN displayed on your console."
+                          )
+                          .font(.body)
+                          .foregroundStyle(.white.opacity(0.88))
+                          .multilineTextAlignment(.center)
+                          TextField("PIN", text: $pinEntry)
+                              .keyboardType(.numberPad)
+                              .textContentType(.oneTimeCode)
+                              .multilineTextAlignment(.center)
+                              .font(.system(size: 26, weight: .medium, design: .monospaced))
+                              .padding(.vertical, 12)
+                              .padding(.horizontal, 16)
+                              .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.15)))
+                              .foregroundStyle(.white)
+                              .frame(maxWidth: 280)
+                              .onChange(of: pinEntry) { newValue in
+                                  let digits = String(newValue.filter(\.isNumber).prefix(4))
+                                  if digits != newValue {
+                                      pinEntry = digits
+                                  }
+                              }
+                          HStack(spacing: 24) {
+                              Button("Cancel", role: .cancel, action: onCancel)
+                                  .foregroundStyle(.white)
+                              Button("Submit", action: onSubmit)
+                                  .buttonStyle(.borderedProminent)
+                                  .disabled(pinEntry.count != 4)
+                          }
+                      }
+                      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                      .padding(.horizontal, 28)
+                      .padding(.top, 52)
+                      .padding(.bottom, 20 + keyboardBottomInset)
+                  }
+                  .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+                      guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+                      let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+                      let inset = keyboardBottomOverlap(keyboardFrameScreen: frame)
+                      withAnimation(.easeOut(duration: duration)) {
+                          keyboardBottomInset = inset
+                      }
+                  }
+                  .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
+                      let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+                      withAnimation(.easeOut(duration: duration)) {
+                          keyboardBottomInset = 0
+                      }
+                  }
+              }
+
+              private func keyboardBottomOverlap(keyboardFrameScreen: CGRect) -> CGFloat {
+                  guard let window = UIApplication.shared.connectedScenes
+                      .compactMap({ $0 as? UIWindowScene })
+                      .flatMap({ $0.windows })
+                      .first(where: { $0.isKeyWindow })
+                  else {
+                      return max(0, UIScreen.main.bounds.height - keyboardFrameScreen.minY)
+                  }
+                  let kbInWindow = window.convert(keyboardFrameScreen, from: nil)
+                  return max(0, window.bounds.maxY - kbInWindow.minY)
+              }
+          }
+          STREAMVIEW_EOF
 
       - name: Abhängigkeiten
         run: |
