@@ -556,6 +556,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             let linkHz: Float = stay120 ? deviceHz : want
             if abs(appliedPaceHz - linkHz) > 0.5 {
                 appliedPaceHz = linkHz
+                UserDefaults.standard.set(String(format: "%.0f", linkHz), forKey: "pxLinkHzValue")
                 link.preferredFrameRateRange = stay120
                     ? CAFrameRateRange(minimum: 60, maximum: deviceHz, preferred: deviceHz)
                     : CAFrameRateRange(minimum: want, maximum: want, preferred: want)
@@ -4004,7 +4005,7 @@ final class PXTuner {
         o["pxLumaMs"] = String(format: "%.2f", PXLumaDetail.shared.avgMs)
         o["pxLumaRun"] = String(PXLumaDetail.shared.ranCount)
         o["pxLumaMsg"] = PXLumaDetail.shared.msg
-        o["pxLinkHz"] = String(format: "%.0f", appliedPaceHz)
+        o["pxLinkHz"] = UserDefaults.standard.string(forKey: "pxLinkHzValue") ?? "-"
         o["pxPace120"] = ((UserDefaults.standard.object(forKey: "pxSharpPace120") as? NSNumber)?.boolValue ?? true) ? "an" : "aus"
         o["pxAccumShift"] = PXAccumulate.shared.msg
         o["pxAccumMs"] = String(format: "%.2f", PXAccumulate.shared.costMs)
