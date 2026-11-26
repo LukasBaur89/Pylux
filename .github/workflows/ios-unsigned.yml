@@ -321,15 +321,16 @@ jobs:
                   // (also wirklich eine Absturz-Schleife). noteFrameRendered() setzt den
                   // Zaehler zurueck, sobald die Sitzung laeuft.
                   if launches >= 3 {
-                      SharpnessRow.applyCalibratedPreset()
-                      // HDR kann den 10-Bit-Decode zum Absturz bringen. Nach drei
-                      // Fehlstarts wird HDR automatisch abgeschaltet, damit die App
-                      // wieder startet -- der Nutzer muss nichts tun.
+                      // WICHTIG: Hier werden NUR noch HDR/Codec zurueckgesetzt.
+                      // Frueher wurde applyCalibratedPreset() gerufen -- dadurch hat ein
+                      // normaler Neustart (ohne Stream) die getunte Schaerfe/Helligkeit
+                      // geloescht und das Bild wurde ploetzlich flau. Bildeinstellungen
+                      // bleiben jetzt unangetastet.
                       UserDefaults.standard.set(false, forKey: "pxSharpHdrEnable")
                       var safePrefs = StreamPreferences.load()
                       if safePrefs.codec == 2 { safePrefs.codec = 1; safePrefs.save() }
                       UserDefaults.standard.set(1, forKey: "pxLaunchCount")
-                      os_log(.error, log: videoViewLog, "[px] Safe-Mode (Absturz-Schleife): Einstellungen + HDR zurueckgesetzt")
+                      os_log(.error, log: videoViewLog, "[px] Safe-Mode: nur HDR/Codec zurueckgesetzt (Bild bleibt)")
                   }
                   diagLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
                   diagLabel.textColor = .white
@@ -5284,6 +5285,365 @@ jobs:
               }
           }
           VDEC_SOURCE_EOF
+
+          # --- Audio: echter 5-Band-EQ + 3D-Weite -----------------------------------
+          cat > ios/Pylux/Bridge/ChiakiAudioOutputIOS.m <<'AUDIO_OUT_EOF'
+          // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+          // PCM playback: Chiaki decodes Opus to int16; we buffer and feed AudioQueue (pull callback, ring buffer).
+          // PXSharp: echter 5-Band-Peaking-EQ + Stereo-3D-Weite im Audio-Callback.
+          // Die Werte kommen aus den Menue-Reglern (pxAudioEQ0..4 in dB, pxAudio3D 0..1).
+
+          #import "ChiakiAudioOutputIOS.h"
+          #import <AVFoundation/AVFoundation.h>
+          #import <AudioToolbox/AudioToolbox.h>
+          #import <dispatch/dispatch.h>
+          #import <pthread.h>
+          #import <stdlib.h>
+          #import <string.h>
+          #import <math.h>
+          #import <os/log.h>
+
+          #define RING_BYTES (512 * 1024)
+          #define NUM_AQ_BUFS 4
+          #define AQ_BUF_BYTES 4096
+          #define EQ_BANDS 5
+          #define EQ_MAX_CH 8
+
+          static os_log_t g_audio_log;
+
+          typedef struct {
+              float b0[EQ_BANDS], b1[EQ_BANDS], b2[EQ_BANDS], a1[EQ_BANDS], a2[EQ_BANDS];
+              float width;
+              uint32_t channels;
+          } PyluxEqCfg;
+
+          typedef struct PyluxChiakiAudioOutput {
+              AudioQueueRef aq;
+              AudioQueueBufferRef bufs[NUM_AQ_BUFS];
+              int n_bufs;
+              uint32_t channels;
+              uint32_t rate;
+              uint8_t *ring;
+              size_t ring_cap;
+              size_t read_pos;
+              size_t byte_count;
+              pthread_mutex_t mtx;
+              // EQ-Konfiguration (decode thread schreibt, audio thread liest)
+              PyluxEqCfg cfg;
+              float cfgDb[EQ_BANDS];
+              // Filterzustand (nur audio thread)
+              float z1[EQ_MAX_CH][EQ_BANDS];
+              float z2[EQ_MAX_CH][EQ_BANDS];
+          } PyluxChiakiAudioOutput;
+
+          static size_t ring_space(PyluxChiakiAudioOutput *a) {
+              return a->ring_cap - a->byte_count;
+          }
+
+          // Biquad-Koeffizienten (RBJ Cookbook, Peaking EQ). Wird unter a->mtx gerufen.
+          static void eq_rebuild_locked(PyluxChiakiAudioOutput *a) {
+              static const double freqs[EQ_BANDS] = {45.0, 150.0, 600.0, 2400.0, 9000.0};
+              double fs = a->rate > 0 ? (double)a->rate : 48000.0;
+              const double Q = 1.0;
+              for (int i = 0; i < EQ_BANDS; i++) {
+                  double db = a->cfgDb[i];
+                  if (db > 18.0) db = 18.0;
+                  if (db < -18.0) db = -18.0;
+                  double A = pow(10.0, db / 40.0);
+                  double w0 = 2.0 * M_PI * freqs[i] / fs;
+                  double alpha = sin(w0) / (2.0 * Q);
+                  double b0 = 1.0 + alpha * A;
+                  double b1 = -2.0 * cos(w0);
+                  double b2 = 1.0 - alpha * A;
+                  double a0 = 1.0 + alpha / A;
+                  double a1 = -2.0 * cos(w0);
+                  double a2 = 1.0 - alpha / A;
+                  a->cfg.b0[i] = (float)(b0 / a0);
+                  a->cfg.b1[i] = (float)(b1 / a0);
+                  a->cfg.b2[i] = (float)(b2 / a0);
+                  a->cfg.a1[i] = (float)(a1 / a0);
+                  a->cfg.a2[i] = (float)(a2 / a0);
+              }
+              a->cfg.channels = a->channels;
+          }
+
+          // Liest die Regler (decode thread, nicht Echtzeit) und aktualisiert nur bei Aenderung.
+          static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
+              NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+              static const char *keys[EQ_BANDS] = {"pxAudioEQ0", "pxAudioEQ1", "pxAudioEQ2", "pxAudioEQ3", "pxAudioEQ4"};
+              float db[EQ_BANDS];
+              BOOL changed = NO;
+              for (int i = 0; i < EQ_BANDS; i++) {
+                  db[i] = (float)[d doubleForKey:[NSString stringWithUTF8String:keys[i]]];
+                  if (fabsf(db[i] - a->cfgDb[i]) > 0.01f) changed = YES;
+              }
+              float w = (float)[d doubleForKey:@"pxAudio3D"];
+              if (w < 0.0f) w = 0.0f;
+              if (w > 1.0f) w = 1.0f;
+              if (fabsf(w - a->cfg.width) > 0.005f) changed = YES;
+              if (!changed) return;
+
+              pthread_mutex_lock(&a->mtx);
+              for (int i = 0; i < EQ_BANDS; i++) a->cfgDb[i] = db[i];
+              a->cfg.width = w;
+              eq_rebuild_locked(a);
+              pthread_mutex_unlock(&a->mtx);
+          }
+
+          static void ring_push(PyluxChiakiAudioOutput *a, const void *data, size_t len) {
+              eq_update_from_defaults(a);
+              pthread_mutex_lock(&a->mtx);
+              if (len > ring_space(a)) {
+                  os_log_with_type(g_audio_log, OS_LOG_TYPE_DEFAULT, "[ChiakiAudio] ring overflow, dropping %zu bytes", len);
+                  pthread_mutex_unlock(&a->mtx);
+                  return;
+              }
+              size_t w = (a->read_pos + a->byte_count) % a->ring_cap;
+              size_t first = len;
+              if (w + first > a->ring_cap)
+                  first = a->ring_cap - w;
+              memcpy(a->ring + w, data, first);
+              memcpy(a->ring, (const uint8_t *)data + first, len - first);
+              a->byte_count += len;
+              pthread_mutex_unlock(&a->mtx);
+          }
+
+          // Pop + Kopie der EQ-Konfiguration unter einem kurzen Lock (keine langen Blocks im Audio-Thread).
+          static size_t ring_pop_cfg(PyluxChiakiAudioOutput *a, void *dst, size_t max, PyluxEqCfg *cfg) {
+              pthread_mutex_lock(&a->mtx);
+              size_t n = max < a->byte_count ? max : a->byte_count;
+              size_t first = n;
+              if (a->read_pos + first > a->ring_cap)
+                  first = a->ring_cap - a->read_pos;
+              memcpy(dst, a->ring + a->read_pos, first);
+              memcpy((uint8_t *)dst + first, a->ring, n - first);
+              a->read_pos = (a->read_pos + n) % a->ring_cap;
+              a->byte_count -= n;
+              *cfg = a->cfg;
+              pthread_mutex_unlock(&a->mtx);
+              return n;
+          }
+
+          static void ring_reset(PyluxChiakiAudioOutput *a) {
+              pthread_mutex_lock(&a->mtx);
+              a->read_pos = 0;
+              a->byte_count = 0;
+              pthread_mutex_unlock(&a->mtx);
+              memset(a->z1, 0, sizeof(a->z1));
+              memset(a->z2, 0, sizeof(a->z2));
+          }
+
+          // Chiaki calls settings from a worker thread; AVAudioSession and AudioQueue setup must run on the main thread.
+          static void run_on_main(void (^block)(void)) {
+              if ([NSThread isMainThread]) {
+                  block();
+              } else {
+                  dispatch_sync(dispatch_get_main_queue(), block);
+              }
+          }
+
+          static void audio_teardown(PyluxChiakiAudioOutput *ao) {
+              if (!ao->aq)
+                  return;
+              AudioQueueStop(ao->aq, true);
+              for (int i = 0; i < ao->n_bufs; i++) {
+                  if (ao->bufs[i]) {
+                      AudioQueueFreeBuffer(ao->aq, ao->bufs[i]);
+                      ao->bufs[i] = NULL;
+                  }
+              }
+              ao->n_bufs = 0;
+              AudioQueueDispose(ao->aq, true);
+              ao->aq = NULL;
+              ring_reset(ao);
+          }
+
+          static inline float biquad(float x, float b0, float b1, float b2, float a1, float a2,
+                                     float *z1, float *z2) {
+              float y = b0 * x + *z1;
+              *z1 = b1 * x - a1 * y + *z2;
+              *z2 = b2 * x - a2 * y;
+              return y;
+          }
+
+          static inline int16_t clamp16(float v) {
+              if (v > 1.0f) v = 1.0f;
+              if (v < -1.0f) v = -1.0f;
+              long r = lrintf(v * 32767.0f);
+              if (r > 32767) r = 32767;
+              if (r < -32768) r = -32768;
+              return (int16_t)r;
+          }
+
+          static void audio_process(PyluxChiakiAudioOutput *a, int16_t *s, size_t frames, const PyluxEqCfg *cfg) {
+              uint32_t ch = cfg->channels;
+              if (ch < 1 || ch > EQ_MAX_CH) return;
+              float widthGain = 1.0f + cfg->width * 1.5f; // 1.0 .. 2.5
+
+              for (size_t n = 0; n < frames; n++) {
+                  if (ch >= 2) {
+                      float L = (float)s[n * ch] / 32768.0f;
+                      float R = (float)s[n * ch + 1] / 32768.0f;
+                      for (int b = 0; b < EQ_BANDS; b++) {
+                          L = biquad(L, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                                     &a->z1[0][b], &a->z2[0][b]);
+                          R = biquad(R, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                                     &a->z1[1][b], &a->z2[1][b]);
+                      }
+                      float M = (L + R) * 0.5f;
+                      float S = (L - R) * 0.5f;
+                      L = M + S * widthGain;
+                      R = M - S * widthGain;
+                      s[n * ch] = clamp16(L);
+                      s[n * ch + 1] = clamp16(R);
+                      // Restliche Kanaele nur EQ (kein Width), falls je >2 geliefert wird.
+                      for (uint32_t c = 2; c < ch; c++) {
+                          float v = (float)s[n * ch + c] / 32768.0f;
+                          for (int b = 0; b < EQ_BANDS; b++) {
+                              v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                                         &a->z1[c][b], &a->z2[c][b]);
+                          }
+                          s[n * ch + c] = clamp16(v);
+                      }
+                  } else {
+                      float v = (float)s[n * ch] / 32768.0f;
+                      for (int b = 0; b < EQ_BANDS; b++) {
+                          v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                                     &a->z1[0][b], &a->z2[0][b]);
+                      }
+                      s[n * ch] = clamp16(v);
+                  }
+              }
+          }
+
+          static void aq_output_callback(void *userdata, AudioQueueRef q, AudioQueueBufferRef buf) {
+              (void)q;
+              PyluxChiakiAudioOutput *ao = userdata;
+              UInt32 cap = buf->mAudioDataBytesCapacity;
+              PyluxEqCfg cfg;
+              size_t n = ring_pop_cfg(ao, buf->mAudioData, cap, &cfg);
+              if (n < cap)
+                  memset((uint8_t *)buf->mAudioData + n, 0, cap - n);
+              if (n > 0 && cfg.channels > 0) {
+                  size_t frames = n / (sizeof(int16_t) * cfg.channels);
+                  audio_process(ao, (int16_t *)buf->mAudioData, frames, &cfg);
+              }
+              buf->mAudioDataByteSize = cap;
+              AudioQueueEnqueueBuffer(ao->aq, buf, 0, NULL);
+          }
+
+          void *ios_chiaki_audio_output_create(void) {
+              static dispatch_once_t once;
+              dispatch_once(&once, ^{
+                  g_audio_log = os_log_create("com.pylux.stream", "ChiakiAudio");
+              });
+              PyluxChiakiAudioOutput *ao = calloc(1, sizeof(*ao));
+              if (!ao)
+                  return NULL;
+              ao->ring_cap = RING_BYTES;
+              ao->ring = malloc(ao->ring_cap);
+              if (!ao->ring) {
+                  free(ao);
+                  return NULL;
+              }
+              pthread_mutex_init(&ao->mtx, NULL);
+              // Startwerte: neutral, bis der Decode-Thread die Regler liest.
+              ao->cfg.width = 0.0f;
+              return ao;
+          }
+
+          void ios_chiaki_audio_output_free(void *ptr) {
+              if (!ptr)
+                  return;
+              PyluxChiakiAudioOutput *ao = ptr;
+              run_on_main(^{
+                  audio_teardown(ao);
+              });
+              pthread_mutex_destroy(&ao->mtx);
+              free(ao->ring);
+              free(ao);
+          }
+
+          void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *ptr) {
+              PyluxChiakiAudioOutput *ao = ptr;
+              if (!ao || channels < 1 || channels > 8 || rate < 8000)
+                  return;
+
+              ao->channels = channels;
+              ao->rate = rate;
+
+              run_on_main(^{
+                  audio_teardown(ao);
+
+                  NSError *nserr = nil;
+                  AVAudioSession *session = [AVAudioSession sharedInstance];
+                  // Reset session before reconfiguring; avoids paramErr -50 when category/options change mid-stream.
+                  [session setActive:NO error:nil];
+
+                  // Plain Playback only: AllowBluetoothA2DP + Playback yields AVAudioSessionErrorCodeBadParam (-50) when a
+                  // mediaplaybackd sibling session exists (e.g. Safari in-app browser after Add to Library). DefaultToSpeaker
+                  // is invalid with Playback (PlayAndRecord only). See pylux.log SessionCore.mm:517 / AudioAnalytics Session_Error.
+                  if (![session setCategory:AVAudioSessionCategoryPlayback error:&nserr]) {
+                      os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] setCategory failed: %{public}@", nserr.localizedDescription);
+                  }
+                  [session setMode:AVAudioSessionModeMoviePlayback error:&nserr];
+                  [session setPreferredSampleRate:(double)rate error:&nserr];
+                  [session setPreferredIOBufferDuration:0.02 error:&nserr];
+                  if (![session setActive:YES error:&nserr])
+                      os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] setActive failed: %{public}@", nserr.localizedDescription);
+
+                  AudioStreamBasicDescription fmt;
+                  memset(&fmt, 0, sizeof(fmt));
+                  fmt.mSampleRate = rate;
+                  fmt.mFormatID = kAudioFormatLinearPCM;
+                  fmt.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+                  fmt.mBitsPerChannel = 16;
+                  fmt.mChannelsPerFrame = channels;
+                  fmt.mBytesPerFrame = (fmt.mBitsPerChannel / 8) * channels;
+                  fmt.mFramesPerPacket = 1;
+                  fmt.mBytesPerPacket = fmt.mBytesPerFrame;
+
+                  OSStatus st = AudioQueueNewOutput(&fmt, aq_output_callback, ao, NULL, NULL, 0, &ao->aq);
+                  if (st != noErr) {
+                      os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] AudioQueueNewOutput failed: %d", (int)st);
+                      ao->aq = NULL;
+                      return;
+                  }
+
+                  ao->n_bufs = 0;
+                  for (int i = 0; i < NUM_AQ_BUFS; i++) {
+                      AudioQueueBufferRef b = NULL;
+                      st = AudioQueueAllocateBuffer(ao->aq, AQ_BUF_BYTES, &b);
+                      if (st != noErr || !b)
+                          break;
+                      memset(b->mAudioData, 0, AQ_BUF_BYTES);
+                      b->mAudioDataByteSize = AQ_BUF_BYTES;
+                      AudioQueueEnqueueBuffer(ao->aq, b, 0, NULL);
+                      ao->bufs[ao->n_bufs++] = b;
+                  }
+
+                  st = AudioQueueStart(ao->aq, NULL);
+                  if (st != noErr)
+                      os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] AudioQueueStart failed: %d", (int)st);
+                  else
+                      os_log(g_audio_log, "[ChiakiAudio] stream started ch=%u rate=%u", channels, rate);
+              });
+          }
+
+          void ios_chiaki_audio_output_frame(int16_t *buf, size_t total_interleaved_samples, void *ptr) {
+              PyluxChiakiAudioOutput *ao = ptr;
+              if (!ao || !buf || total_interleaved_samples == 0)
+                  return;
+              ring_push(ao, buf, total_interleaved_samples * sizeof(int16_t));
+          }
+
+          void ios_chiaki_opus_frame_bridge(int16_t *buf, size_t samples_per_channel, void *user) {
+              PyluxChiakiAudioOutput *ao = user;
+              if (!ao || !ao->channels || !buf || samples_per_channel == 0)
+                  return;
+              ios_chiaki_audio_output_frame(buf, samples_per_channel * ao->channels, user);
+          }
+          AUDIO_OUT_EOF
 
           # --- Icon -----------------------------------------------------------------
           python3 - <<'ICON_EOF'
