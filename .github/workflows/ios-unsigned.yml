@@ -179,6 +179,9 @@ jobs:
               /// Kontext freigibt. Kostet ein Bild, kein Trennen der Verbindung.
               private func rebuildCIContext() {
                   guard let device = metalView?.device else { return }
+                  // Der Probe haelt sonst den ALTEN Kontext (und dessen Textur-Pools)
+                  // fest -- dann bringt der Neuaufbau nichts.
+                  PXProbe.shared.clear()
                   ciContext = CIContext(mtlDevice: device, options: [
                       .cacheIntermediates: false,
                       .workingColorSpace: CGColorSpaceCreateDeviceRGB()
@@ -3444,7 +3447,7 @@ jobs:
                               // Probe asynchron im Completed-Handler: kein waitUntilCompleted()
                               // mehr, damit die CPU nicht nach jedem Frame auf die GPU wartet.
                               // /shot bekommt das Bild, sobald die GPU fertig ist.
-                              guard !UserDefaults.standard.bool(forKey: "pxProbeOff"),
+                              guard UserDefaults.standard.bool(forKey: "pxProbeLive"),
                                     let c = self?.ciContext,
                                     var outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) else { return }
                               let r = CGRect(x: 0, y: 0, width: CGFloat(outW), height: CGFloat(outH))
@@ -3462,6 +3465,7 @@ jobs:
                           }
                           cb.commit()
                           noteFrameRendered()
+                          runMemGuard()
                           return
                       }
                   }
@@ -3502,7 +3506,7 @@ jobs:
                       UserDefaults.standard.set("0", forKey: "pxSharpMfxActive")
                   }
                   let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
-                  if let c = ctx, !UserDefaults.standard.bool(forKey: "pxProbeOff") {
+                  if let c = ctx, UserDefaults.standard.bool(forKey: "pxProbeLive") {
                       PXProbe.shared.set(composited, context: c, space: outSpace,
                                          width: Int(target.width), height: Int(target.height))
                   }
@@ -3522,29 +3526,33 @@ jobs:
                   // Renderrate messen: /state liefert pxSharpFPS.
                   noteFrameRendered()
 
-                  // Speicher-Bremse: Core Image und Metal halten Puffer, die iOS erst
-                  // unter Druck freigibt. Gemessen wuchs der Speicher 300-400 MB/min bis
-                  // zum Absturz. Ab 900 MB wird hier aktiv aufgeraeumt statt gewartet.
+                  // Speicher-Bremse (laeuft jetzt in beiden Pfaden: MetalFX und Core Image)
+                  runMemGuard()
+              }
+
+              /// Core Image und Metal halten Puffer, die iOS erst unter Druck freigibt.
+              /// Gemessen wuchs der Speicher 300-500 MB/min bis zum Absturz. Diese Bremse
+              /// lief bisher nur im Nicht-MetalFX-Pfad -- mit MetalFX an stieg der
+              /// Speicher ungebremst. Jetzt laeuft sie nach jedem Frame in beiden Pfaden.
+              private func runMemGuard() {
                   memGuardFrame += 1
                   let guardEvery = max(1, UserDefaults.standard.integer(forKey: "pxSharpMemBrakeEvery") == 0
                                        ? 30 : UserDefaults.standard.integer(forKey: "pxSharpMemBrakeEvery"))
                   let guardAbove = UserDefaults.standard.object(forKey: "pxSharpMemBrakeMB") as? Int ?? 900
-                  if memGuardFrame >= guardEvery {
-                      memGuardFrame = 0
-                      let mb = Self.pxFootprintMB()
-                      if mb > Double(guardAbove) {
-                          ciContext?.clearCaches()
-                          hdrContext?.clearCaches()
-                          memGuardRuns += 1
-                          UserDefaults.standard.set(Int(mb), forKey: "pxMemGuardLast")
-                          // Ab 1,2 GB reicht clearCaches() nicht: den Kontext neu bauen.
-                          // Das gibt die internen Pools frei, ohne die Verbindung zu
-                          // unterbrechen (kostet ein Bild).
-                          if mb > 1200, CACurrentMediaTime() - lastContextReset > 30.0 {
-                              rebuildCIContext()
-                              UserDefaults.standard.set(Int(Self.pxFootprintMB()), forKey: "pxMemAfterReset")
-                          }
-                      }
+                  guard memGuardFrame >= guardEvery else { return }
+                  memGuardFrame = 0
+                  let mb = Self.pxFootprintMB()
+                  guard mb > Double(guardAbove) else { return }
+                  ciContext?.clearCaches()
+                  hdrContext?.clearCaches()
+                  memGuardRuns += 1
+                  UserDefaults.standard.set(Int(mb), forKey: "pxMemGuardLast")
+                  // Ab 1,2 GB reicht clearCaches() nicht: den Kontext neu bauen.
+                  // Das gibt die internen Pools frei, ohne die Verbindung zu
+                  // unterbrechen (kostet ein Bild).
+                  if mb > 900, CACurrentMediaTime() - lastContextReset > 15.0 {
+                      rebuildCIContext()
+                      UserDefaults.standard.set(Int(Self.pxFootprintMB()), forKey: "pxMemAfterReset")
                   }
               }
           }
@@ -3777,6 +3785,22 @@ jobs:
               func note(_ pb: CVPixelBuffer) {
                   lock.lock()
                   lastBuffer = pb
+                  lock.unlock()
+              }
+
+              /// Gibt Bild und Kontext frei. Wird beim Kontext-Neuaufbau gerufen --
+              /// sonst haelt der Probe den alten CIContext samt Textur-Pools am Leben
+              /// und der Speicher sinkt nie.
+              func clear() {
+                  lock.lock()
+                  image = nil
+                  ctx = nil
+                  space = nil
+                  w = 0
+                  h = 0
+                  prevLuma = nil
+                  lastBuffer = nil
+                  frozenBuffer = nil
                   lock.unlock()
               }
 
