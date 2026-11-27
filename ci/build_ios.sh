@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
-# iOS verweigert Downgrades: immer ueber der installierten 1228 bleiben.
-if [ "$BUILD_NUM" -lt 2000 ] 2>/dev/null; then BUILD_NUM=2000; fi
+# iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
+if [ "$BUILD_NUM" -lt 2001 ] 2>/dev/null; then BUILD_NUM=2001; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -7512,6 +7512,10 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
                         NSNumber *opt = note.userInfo[AVAudioSessionInterruptionOptionKey];
                         if (opt.unsignedIntegerValue & AVAudioSessionInterruptionOptionShouldResume) {
                             [[AVAudioSession sharedInstance] setActive:YES error:nil];
+                            // Der Stream lief waehrend der Pause weiter: Ring leeren,
+                            // sonst spielt der Ton danach dauerhaft Sekunden hinterher.
+                            ring_reset(a);
+                            AudioQueueFlush(a->aq);
                             AudioQueueStart(a->aq, NULL);
                         }
                     }
