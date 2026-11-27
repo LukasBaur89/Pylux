@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2016 ] 2>/dev/null; then BUILD_NUM=2016; fi
+if [ "$BUILD_NUM" -lt 2017 ] 2>/dev/null; then BUILD_NUM=2017; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -5025,7 +5025,7 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpGamma") private var gamma: Double = 1.0
     @AppStorage("pxSharpBlack") private var black: Double = 0.0
     @AppStorage("pxSharpRange") private var rangeMode: Int = 0
-    @AppStorage("pxSharpDiag") private var diag: String = "—"
+    @AppStorage("pxSharpDiag") private var diag: String = "â€”"
     @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpHdrPeak") private var hdrPeak: Double = 1600
     @AppStorage("pxSharpPacing") private var pacing: Bool = true
@@ -5077,8 +5077,10 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpScaler") private var scaler: Int = 0
     @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
-    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.55
-    @AppStorage("pxAudioBass") private var audioBass: Double = 0.35
+    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.70
+    @AppStorage("pxAudioBass") private var audioBass: Double = 0.50
+    @AppStorage("pxAudioEQ90") private var audioEQ90: Double = 8.0
+    @AppStorage("pxAudioPunch") private var audioPunch: Double = 0.35
     @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @AppStorage("pxAudioEQ0") private var eq0: Double = 7.5
     @AppStorage("pxAudioEQ1") private var eq1: Double = 5.5
@@ -5086,26 +5088,26 @@ struct SharpnessRow: View {
     @AppStorage("pxAudioEQ3") private var eq3: Double = 4.0
     @AppStorage("pxAudioEQ4") private var eq4: Double = 9.5
     @AppStorage("pxAudioPreset") private var audioPreset: Int = 0
-    @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
-    @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
-    @AppStorage("pxRenderMs") private var liveRender: String = "—"
+    @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "â€”"
+    @AppStorage("pxSharpFPS") private var liveFPS: String = "â€”"
+    @AppStorage("pxRenderMs") private var liveRender: String = "â€”"
     @AppStorage("pxPerfLevel") private var perfLevel: String = "0"
-    @AppStorage("pxSharpDiag") private var liveDiag: String = "—"
+    @AppStorage("pxSharpDiag") private var liveDiag: String = "â€”"
 
     // MARK: - Bildmodi
 
     /// Die Presets sind aus Messreihen abgeleitet (eingefrorenes Bild, 2732x2048).
-    /// Jeder Regler wurde in Stufen gemessen: Kantenschärfe, Rauschen, Clipping,
-    /// zugelaufene Schwärzen, Farbton. Die Werte sind das Optimum aus Schärfe
-    /// pro Artefakt — nicht "Regler auf Anschlag".
+    /// Jeder Regler wurde in Stufen gemessen: KantenschÃ¤rfe, Rauschen, Clipping,
+    /// zugelaufene SchwÃ¤rzen, Farbton. Die Werte sind das Optimum aus SchÃ¤rfe
+    /// pro Artefakt â€” nicht "Regler auf Anschlag".
     private func applyMode(_ m: Int) {
         colorEngine = true
         lumaSharpen = true
         gamut = 0
-        // Neutrale Grundlage. Jeder Modus überschreibt nur, was er wirklich braucht.
+        // Neutrale Grundlage. Jeder Modus Ã¼berschreibt nur, was er wirklich braucht.
         // Vorher standen hier auto = true, shadow = 0.35, tvBrightness = true,
-        // deconv = 0.95, chroma = 0.50 und halo = 0.45 — das war die Ursache für
-        // die künstliche Optik: Schatten angehoben, SDR abgedunkelt, Details
+        // deconv = 0.95, chroma = 0.50 und halo = 0.45 â€” das war die Ursache fÃ¼r
+        // die kÃ¼nstliche Optik: Schatten angehoben, SDR abgedunkelt, Details
         // rekonstruiert, Farbe aufgedreht und Halos zugelassen.
         auto = false
         autoStrength = 0.65
@@ -5164,7 +5166,7 @@ struct SharpnessRow: View {
             deconv = 0.0
             wbR = 1.00; wbG = 1.00; wbB = 1.00
             gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
-        case 9: // Natürlich / kalibriert — Standardmodus
+        case 9: // NatÃ¼rlich / kalibriert â€” Standardmodus
             gamut = 0
             level = 1.0; detail = 0.55; clarity = 0.0
             deblock = 0.14; denoise = 0.06; vibrance = 0.0
@@ -5193,7 +5195,7 @@ struct SharpnessRow: View {
             clearImage = 0.30; toneMap = 0; localDim = 0.0; deband = 0.30
             brightness = 0.50; shadow = 0.14; chroma = 0.60; coring = 0.18
             deconv = 0.40; scaler = 0; easuAmt = 0.6; halo = 0.20; texDepth = 0.55
-        case 10: // TV-Max: alles, was messbar gewinnt — ohne erfundene Details
+        case 10: // TV-Max: alles, was messbar gewinnt â€” ohne erfundene Details
             gamut = 1
             level = 1.0; detail = 0.55; clarity = 0.0
             deblock = 0.14; denoise = 0.06; vibrance = 0.04
@@ -5235,7 +5237,7 @@ struct SharpnessRow: View {
             brightness = 0.47; shadow = 0.50; chroma = 0.62; coring = 0.60
             wbR = 1.00; wbG = 1.00; wbB = 1.00
             gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
-        case 7: // Realistisch / kalibriert (BT.709, D65, +4 % Sättigung)
+        case 7: // Realistisch / kalibriert (BT.709, D65, +4 % SÃ¤ttigung)
             gamut = 0
             level = 0.80; detail = 0.70; clarity = 0.22
             deblock = 0.35; denoise = 0.18; vibrance = 0.15
@@ -5265,11 +5267,11 @@ struct SharpnessRow: View {
         case 1: return "Sony BRAVIA 7 II"
         case 2: return "Sony Vivid"
         case 3: return "LG QNED93"
-        case 8: return "Referenz (unverfälscht)"
+        case 8: return "Referenz (unverfÃ¤lscht)"
         case 4: return "LG Vivid"
         case 6: return "Game"
         case 7: return "Realistisch"
-        case 9: return "Natürlich / kalibriert"
+        case 9: return "NatÃ¼rlich / kalibriert"
         case 10: return "TV-Max"
         case 11: return "OLED Referenz"
         case 12: return "QD-OLED"
@@ -5277,30 +5279,30 @@ struct SharpnessRow: View {
         }
     }
 
-    /// Was der gewählte Modus tut und wann man ihn nimmt. Das ist die einzige
-    /// Erklärung, die man im Alltag braucht.
+    /// Was der gewÃ¤hlte Modus tut und wann man ihn nimmt. Das ist die einzige
+    /// ErklÃ¤rung, die man im Alltag braucht.
     private var modeInfo: String {
         switch mode {
         case 0:
-            return "Referenz: D65-Weißpunkt, kein Tone-Mapping, kleinste Schärfewerte. So sieht der Regisseur den Film. Nimm ihn für Filme und Serien im dunklen Raum."
+            return "Referenz: D65-WeiÃŸpunkt, kein Tone-Mapping, kleinste SchÃ¤rfewerte. So sieht der Regisseur den Film. Nimm ihn fÃ¼r Filme und Serien im dunklen Raum."
         case 1:
-            return "Sony-typisch: moderate Schärfung, XR-Clear-Image-Kurve, kräftige Mitten. Nimm ihn für Spiele und Streaming bei Tageslicht."
+            return "Sony-typisch: moderate SchÃ¤rfung, XR-Clear-Image-Kurve, krÃ¤ftige Mitten. Nimm ihn fÃ¼r Spiele und Streaming bei Tageslicht."
         case 2:
-            return "Sony Live Colour: mehr Sättigung, nativer Farbraum, knackigere Kurve. Nimm ihn, wenn du es bunt magst — Farben bleiben trotzdem im Farbton."
+            return "Sony Live Colour: mehr SÃ¤ttigung, nativer Farbraum, knackigere Kurve. Nimm ihn, wenn du es bunt magst â€” Farben bleiben trotzdem im Farbton."
         case 3:
-            return "Der QNED93: Precision-Dimming-Kurve, QNED-Farbprofil, Clear Image. Nimm ihn als Standard für alles — das ist der Fernseher, den du nachbaust."
+            return "Der QNED93: Precision-Dimming-Kurve, QNED-Farbprofil, Clear Image. Nimm ihn als Standard fÃ¼r alles â€” das ist der Fernseher, den du nachbaust."
         case 4:
-            return "LG Vivid: maximale Schärfe, nativer Farbraum, stärkstes Dimming. Nimm ihn für Sport und helle Räume."
+            return "LG Vivid: maximale SchÃ¤rfe, nativer Farbraum, stÃ¤rkstes Dimming. Nimm ihn fÃ¼r Sport und helle RÃ¤ume."
         case 6:
-            return "Minimal: kaum Schärfung, kein Tone-Mapping, kleinste Latenz. Nimm ihn für Shooter und Online-Spiele."
+            return "Minimal: kaum SchÃ¤rfung, kein Tone-Mapping, kleinste Latenz. Nimm ihn fÃ¼r Shooter und Online-Spiele."
         case 7:
-            return "Kalibriert: BT.709 (kein Nativ-Farbraum), D65, nur +4 % Sättigung, weiches Dimming. So sieht ein abgeglichener Fernseher im Cinema-Modus aus — wenn dir alles andere zu bunt ist, nimm den."
+            return "Kalibriert: BT.709 (kein Nativ-Farbraum), D65, nur +4 % SÃ¤ttigung, weiches Dimming. So sieht ein abgeglichener Fernseher im Cinema-Modus aus â€” wenn dir alles andere zu bunt ist, nimm den."
         case 9:
-            return "Der Referenzpfad: BT.709, D65, Sättigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Eine Luma-Schärfung (CAS 0,65), halo-begrenzt, dazu Debanding 0,30 gegen die niedrige Bitrate. Gemessen: +5 % Schärfe, −13 % Banding gegenüber der reinen Quelle, ohne erfundene Details (Energie über der Quell-Nyquistfrequenz: 0,04 %)."
+            return "Der Referenzpfad: BT.709, D65, SÃ¤ttigung und Kontrast neutral, keine Schattenanhebung, kein Tone-Mapping, keine Detail-Rekonstruktion. Eine Luma-SchÃ¤rfung (CAS 0,65), halo-begrenzt, dazu Debanding 0,30 gegen die niedrige Bitrate. Gemessen: +5 % SchÃ¤rfe, âˆ’13 % Banding gegenÃ¼ber der reinen Quelle, ohne erfundene Details (Energie Ã¼ber der Quell-Nyquistfrequenz: 0,04 %)."
         case 10:
-            return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % Sättigung, kein Clipping), Schattendurchzeichnung 0,14 (greift nur unter 34 % Bildhelligkeit), Debanding 0,30, CAS 0,65. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nächsten kommt — mehr Punch, aber keine erfundenen Details."
+            return "Alles, was messbar gewinnt: P3-Farbumfang (+13 % SÃ¤ttigung, kein Clipping), Schattendurchzeichnung 0,14 (greift nur unter 34 % Bildhelligkeit), Debanding 0,30, CAS 0,65. Das ist der Modus, der einem Fernseher im Standard-/Vivid-Modus am nÃ¤chsten kommt â€” mehr Punch, aber keine erfundenen Details."
         default:
-            return "Maximale Detail-Schärfung (Textur 2,7 px) bei neutraler Farbe. Nimm ihn, wenn du die PS5-Oberfläche oder Text scharf sehen willst."
+            return "Maximale Detail-SchÃ¤rfung (Textur 2,7 px) bei neutraler Farbe. Nimm ihn, wenn du die PS5-OberflÃ¤che oder Text scharf sehen willst."
         }
     }
 
@@ -5312,8 +5314,8 @@ struct SharpnessRow: View {
     private var linkVerdict: String {
         let mb = mbpsValue
         if mb <= 0 { return "unbekannt" }
-        if mb < 6 { return "sehr schwach — Bild wird weich" }
-        if mb < 12 { return "schwach — Filter aktiv" }
+        if mb < 6 { return "sehr schwach â€” Bild wird weich" }
+        if mb < 12 { return "schwach â€” Filter aktiv" }
         if mb < 20 { return "gut" }
         return "sehr gut"
     }
@@ -5341,7 +5343,7 @@ struct SharpnessRow: View {
             eq0 = 6.0; eq1 = 2.5; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
         case 5: // Sony Bass Boost
             eq0 = 7.0; eq1 = 4.0; eq2 = 0; eq3 = 1.5; eq4 = 1.0; audio3D = 0.10
-        case 6: // Dolby Atmos (weite Bühne)
+        case 6: // Dolby Atmos (weite BÃ¼hne)
             eq0 = 3.0; eq1 = 1.0; eq2 = 0; eq3 = 4.0; eq4 = 2.0; audio3D = 0.70
         case 7: // Bose (warm, bassbetont)
             eq0 = 5.0; eq1 = 3.5; eq2 = -1.0; eq3 = 1.0; eq4 = 1.5; audio3D = 0.20
@@ -5361,7 +5363,7 @@ struct SharpnessRow: View {
         case 1: // Warm (Kino / Sony Standard)
             wbR = 1.020; wbG = 1.000; wbB = 0.980
             gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
-        case 2: // Kühl (LG / Vivid)
+        case 2: // KÃ¼hl (LG / Vivid)
             wbR = 0.985; wbG = 1.000; wbB = 1.030
             gammaR = 1.00; gammaG = 1.00; gammaB = 1.00
         default: break
@@ -5396,7 +5398,7 @@ struct SharpnessRow: View {
 
     // MARK: - UI-Bausteine
 
-    /// Ein Regler mit Wert, "Je ..."-Regel und optionaler Erklärung.
+    /// Ein Regler mit Wert, "Je ..."-Regel und optionaler ErklÃ¤rung.
     @ViewBuilder
     private func sliderRow(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
                            step: Double, display: String, rule: String) -> some View {
@@ -5434,7 +5436,7 @@ struct SharpnessRow: View {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("PXSharp Bild").font(.headline)
-                    Text("Build 113 · jede Stufe einzeln schaltbar").font(.caption2).foregroundColor(.secondary)
+                    Text("Build 113 Â· jede Stufe einzeln schaltbar").font(.caption2).foregroundColor(.secondary)
                 }
                 Spacer()
                 Button("Notfall-Reset") { resetAll() }
@@ -5444,18 +5446,18 @@ struct SharpnessRow: View {
             }
 
             // Direktvergleich: schaltet jede Nachbearbeitung ab. Wenn sich hier
-            // nichts ändert, wirkt auch kein einzelner Regler — umgekehrt sieht
+            // nichts Ã¤ndert, wirkt auch kein einzelner Regler â€” umgekehrt sieht
             // man so sofort, was die Regler zusammen bewirken.
             Toggle("Vergleich: unbearbeitetes Bild (A/B)", isOn: $bypass)
             Text("An = reine Quelle ohne jede Verarbeitung. Schalte hin und her: was du im Bild siehst, ist der Unterschied, den die Regler machen. Bleibt das Bild gleich, hat der Stream gerade ein Problem, nicht die Einstellung.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            sliderRow("Gesamtstärke der Bearbeitung", value: $master, range: 0...1, step: 0.05,
+            sliderRow("GesamtstÃ¤rke der Bearbeitung", value: $master, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", master * 100),
-                      rule: "Skaliert Schärfe, Detail, Klarheit, Sättigung und Kontrast gemeinsam. 0 % = unbearbeitet, 100 % = wie eingestellt, 200 % = doppelt so stark. Ein Regler für den ganzen Bildeindruck.")
+                      rule: "Skaliert SchÃ¤rfe, Detail, Klarheit, SÃ¤ttigung und Kontrast gemeinsam. 0 % = unbearbeitet, 100 % = wie eingestellt, 200 % = doppelt so stark. Ein Regler fÃ¼r den ganzen Bildeindruck.")
             Toggle("Bildautomatik (passt sich jeder Szene an)", isOn: $autoEngine)
-            Text("Misst Helligkeit, Lichter und Rauschen in jeder Szene und korrigiert nur, was messbar danebenliegt: ausgebrannte Lichter zurück, abgesoffene Schwärzen leicht hoch, Schärfe bei Rauschen zurück. Bewusst kleine Korridore, damit nichts pumpt.")
+            Text("Misst Helligkeit, Lichter und Rauschen in jeder Szene und korrigiert nur, was messbar danebenliegt: ausgebrannte Lichter zurÃ¼ck, abgesoffene SchwÃ¤rzen leicht hoch, SchÃ¤rfe bei Rauschen zurÃ¼ck. Bewusst kleine Korridore, damit nichts pumpt.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             // ---------------------------------------------------------------- 1
@@ -5467,16 +5469,16 @@ struct SharpnessRow: View {
                     Text(linkVerdict).font(.caption).bold()
                         .foregroundColor(linkColor)
                 }
-                Text("\(streamMbps) Mbit/s · \(liveFPS) fps · Render \(liveRender) ms · " +
+                Text("\(streamMbps) Mbit/s Â· \(liveFPS) fps Â· Render \(liveRender) ms Â· " +
                      (liveDiag.isEmpty ? "" : liveDiag))
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
             .padding(.vertical, 2)
 
-            Text("1 · Bildmodus").font(.headline)
+            Text("1 Â· Bildmodus").font(.headline)
             Picker("Bildmodus", selection: $mode) {
-                Text("Natürlich / kalibriert (empfohlen)").tag(9)
+                Text("NatÃ¼rlich / kalibriert (empfohlen)").tag(9)
                 Text("TV-Max (P3 + Kontrast + Deband)").tag(10)
                 Text("Kino / Filmmaker (D65)").tag(0)
                 Text("Sony BRAVIA 7 II").tag(1)
@@ -5486,111 +5488,111 @@ struct SharpnessRow: View {
                 Text("Ultra (max. Detail)").tag(5)
                 Text("Game (minimal)").tag(6)
                 Text("Realistisch (kalibriert)").tag(7)
-                Text("Referenz (unverfälscht)").tag(8)
+                Text("Referenz (unverfÃ¤lscht)").tag(8)
             }
             .onChange(of: mode) { m in applyMode(m) }
             Text(modeTitle + ": " + modeInfo)
                 .font(.caption)
                 .foregroundColor(.secondary)
             if mbpsValue > 0 && mbpsValue < 10 {
-                Text("Die Verbindung liefert gerade nur \(streamMbps) Mbit/s. Bei 1080p braucht ein sauberes Bild 20–30 Mbit. Das ist die Ursache für weiche Kanten und Blockbildung — kein Regler kann das ausgleichen. Nächster Router oder 5-GHz-Band prüfen, dann neu verbinden.")
+                Text("Die Verbindung liefert gerade nur \(streamMbps) Mbit/s. Bei 1080p braucht ein sauberes Bild 20â€“30 Mbit. Das ist die Ursache fÃ¼r weiche Kanten und Blockbildung â€” kein Regler kann das ausgleichen. NÃ¤chster Router oder 5-GHz-Band prÃ¼fen, dann neu verbinden.")
                     .font(.caption)
                     .foregroundColor(.orange)
             }
-            Text("Der Bildmodus setzt alle Regler darunter auf gemessene Werte. Ändere zuerst ihn, nicht die Einzelregler.")
+            Text("Der Bildmodus setzt alle Regler darunter auf gemessene Werte. Ã„ndere zuerst ihn, nicht die Einzelregler.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
             // ---------------------------------------------------------------- 2
-            Text("2 · Automatik").font(.headline)
+            Text("2 Â· Automatik").font(.headline)
             Toggle("Szenen-Automatik (empfohlen)", isOn: $auto)
-            Text("Misst jede Szene: Helligkeit, Spitzlicht, Rauschen. Regelt Belichtung nach und passt Rauschfilter und Schärfe an. Genau das macht ein Fernseher mit „AI Brightness“ und „Dynamic Tone Mapping“.")
+            Text("Misst jede Szene: Helligkeit, Spitzlicht, Rauschen. Regelt Belichtung nach und passt Rauschfilter und SchÃ¤rfe an. Genau das macht ein Fernseher mit â€žAI Brightnessâ€œ und â€žDynamic Tone Mappingâ€œ.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            sliderRow("Automatik-Stärke", value: $autoStrength, range: 0...1, step: 0.05,
+            sliderRow("Automatik-StÃ¤rke", value: $autoStrength, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", autoStrength * 100),
-                      rule: "Je höher, desto stärker zieht die Automatik dunkle Szenen hoch und helle herunter. Über 80 % fängt es an zu pumpen.")
+                      rule: "Je hÃ¶her, desto stÃ¤rker zieht die Automatik dunkle Szenen hoch und helle herunter. Ãœber 80 % fÃ¤ngt es an zu pumpen.")
 
             // ---------------------------------------------------------------- 3
-            Text("3 · Schärfe").font(.headline)
+            Text("3 Â· SchÃ¤rfe").font(.headline)
             Picker("Skalierer (Upscaling)", selection: $scaler) {
                 Text("Lanczos (Standard)").tag(0)
-                Text("Kantengerichtet (Richtungs-Schärfung)").tag(1)
+                Text("Kantengerichtet (Richtungs-SchÃ¤rfung)").tag(1)
             }
-            Text("Lanczos interpoliert gleichmäßig. Der kantengerichtete Skalierer (EASU-Prinzip aus AMD FSR 1.0) schätzt die Kantenrichtung und tastet ENTLANG der Kante ab — schräge Konturen bleiben dadurch schärfer. Gemessen wird nach dem Install, welcher bei deinem Bild gewinnt.")
+            Text("Lanczos interpoliert gleichmÃ¤ÃŸig. Der kantengerichtete Skalierer (EASU-Prinzip aus AMD FSR 1.0) schÃ¤tzt die Kantenrichtung und tastet ENTLANG der Kante ab â€” schrÃ¤ge Konturen bleiben dadurch schÃ¤rfer. Gemessen wird nach dem Install, welcher bei deinem Bild gewinnt.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             if scaler == 1 {
-                sliderRow("Skalierer-Stärke", value: $easuAmt, range: 0...1, step: 0.1,
+                sliderRow("Skalierer-StÃ¤rke", value: $easuAmt, range: 0...1, step: 0.1,
                           display: String(format: "%.0f %%", easuAmt * 100),
-                          rule: "Je höher, desto stärker folgt die Abtastung der Kantenrichtung. Über 80 % können dünne Linien unruhig werden.")
+                          rule: "Je hÃ¶her, desto stÃ¤rker folgt die Abtastung der Kantenrichtung. Ãœber 80 % kÃ¶nnen dÃ¼nne Linien unruhig werden.")
             }
-            sliderRow("Bildschärfe (Kanten, 1 px)", value: $level, range: 0...1, step: 0.05,
+            sliderRow("BildschÃ¤rfe (Kanten, 1 px)", value: $level, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", level * 100),
-                      rule: "Je höher, desto härter werden Konturen. Über 85 % bekommen Kanten einen hellen Saum (Halo).")
-            Toggle("Schärfung nur auf Helligkeit (Farbe läuft separat)", isOn: $lumaSharpen)
-            Text("Fernseher schärfen die Helligkeit, nicht die Farbe. Dadurch entstehen an Kanten keine farbigen Ränder.")
+                      rule: "Je hÃ¶her, desto hÃ¤rter werden Konturen. Ãœber 85 % bekommen Kanten einen hellen Saum (Halo).")
+            Toggle("SchÃ¤rfung nur auf Helligkeit (Farbe lÃ¤uft separat)", isOn: $lumaSharpen)
+            Text("Fernseher schÃ¤rfen die Helligkeit, nicht die Farbe. Dadurch entstehen an Kanten keine farbigen RÃ¤nder.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            sliderRow("Texturdichte (Feinstruktur 2–5 px)", value: $detail, range: 0...1, step: 0.05,
+            sliderRow("Texturdichte (Feinstruktur 2â€“5 px)", value: $detail, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", detail * 100),
-                      rule: "Feine Struktur: Gras, Kies, Stoff, Metall. Das ist das Band, in dem sich Detaildichte abspielt — nicht die Kante. Gemessen +170 % Textur bei 10 % Rauschen.")
-            sliderRow("Farbschärfe (Chroma)", value: $chroma, range: 0...1, step: 0.05,
+                      rule: "Feine Struktur: Gras, Kies, Stoff, Metall. Das ist das Band, in dem sich Detaildichte abspielt â€” nicht die Kante. Gemessen +170 % Textur bei 10 % Rauschen.")
+            sliderRow("FarbschÃ¤rfe (Chroma)", value: $chroma, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", chroma * 100),
-                      rule: "Je höher, desto schärfer werden FARBkanten (Schildtext, Zierleisten, Lichter). Der Stream liefert Farbe nur mit halber Auflösung (4:2:0) — dieser Regler holt die Präzision zurück, ohne Helligkeitsrauschen zu erzeugen.")
+                      rule: "Je hÃ¶her, desto schÃ¤rfer werden FARBkanten (Schildtext, Zierleisten, Lichter). Der Stream liefert Farbe nur mit halber AuflÃ¶sung (4:2:0) â€” dieser Regler holt die PrÃ¤zision zurÃ¼ck, ohne Helligkeitsrauschen zu erzeugen.")
             sliderRow("Detail-Klarheit (Coring)", value: $coring, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", coring * 100),
-                      rule: "Je höher, desto konsequenter wird Rauschen von echter Textur getrennt: alles unter dem Rauschpegel wird verworfen, Struktur darüber verstärkt. Das ist der Unterschied zwischen verrauscht-scharf und kristallklar.")
+                      rule: "Je hÃ¶her, desto konsequenter wird Rauschen von echter Textur getrennt: alles unter dem Rauschpegel wird verworfen, Struktur darÃ¼ber verstÃ¤rkt. Das ist der Unterschied zwischen verrauscht-scharf und kristallklar.")
             sliderRow("Kanten-Rekonstruktion (Deconvolution)", value: $deconv, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", deconv * 100),
-                      rule: "Je höher, desto stärker wird die Kantenglättung des Spiels (TAA/FXAA) rechnerisch zurückgenommen — ein 3×3-Laplace gegen einen 1-px-Blur. Über 50 % entstehen Ringe an harten Kanten.")
-            sliderRow("Halo-Grenze (Textur gegen Höfe)", value: $halo, range: 0.15...0.55, step: 0.01,
+                      rule: "Je hÃ¶her, desto stÃ¤rker wird die KantenglÃ¤ttung des Spiels (TAA/FXAA) rechnerisch zurÃ¼ckgenommen â€” ein 3Ã—3-Laplace gegen einen 1-px-Blur. Ãœber 50 % entstehen Ringe an harten Kanten.")
+            sliderRow("Halo-Grenze (Textur gegen HÃ¶fe)", value: $halo, range: 0.15...0.55, step: 0.01,
                       display: String(format: "%.0f %%", halo * 100),
-                      rule: "Je höher, desto mehr Überschwinger an Kanten sind erlaubt — das gibt mehr Textur, aber sichtbare helle Höfe an harten Konturen. Gemessen: 30 % = 0 % Halos, 45 % = 5–8 % Halos.")
-            sliderRow("Clear Image (Vor-Schärfung 1080p)", value: $clearImage, range: 0...1, step: 0.05,
+                      rule: "Je hÃ¶her, desto mehr Ãœberschwinger an Kanten sind erlaubt â€” das gibt mehr Textur, aber sichtbare helle HÃ¶fe an harten Konturen. Gemessen: 30 % = 0 % Halos, 45 % = 5â€“8 % Halos.")
+            sliderRow("Clear Image (Vor-SchÃ¤rfung 1080p)", value: $clearImage, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", clearImage * 100),
-                      rule: "Je höher, desto mehr echte Kanten bekommt der Upscaler zu sehen. Über 75 % werden feine Linien unruhig.")
-            sliderRow("Texturtiefe (Grobband 8–16 px)", value: $clarity, range: 0...1, step: 0.05,
+                      rule: "Je hÃ¶her, desto mehr echte Kanten bekommt der Upscaler zu sehen. Ãœber 75 % werden feine Linien unruhig.")
+            sliderRow("Texturtiefe (Grobband 8â€“16 px)", value: $clarity, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", clarity * 100),
-                      rule: "Grobe Textur und Tiefe: Mauerwerk, Fels, Bodenwellen. Großes Band, wenig Halo. Über 40 % wirkt es wie ein Grauschleier.")
+                      rule: "Grobe Textur und Tiefe: Mauerwerk, Fels, Bodenwellen. GroÃŸes Band, wenig Halo. Ãœber 40 % wirkt es wie ein Grauschleier.")
             sliderRow("Rauschfilter (MPEG)", value: $denoise, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", denoise * 100),
-                      rule: "Je höher, desto glatter verrauschte Flächen. Über 60 % wirkt das Bild plastikartig.")
-            sliderRow("MPEG-Blöcke entfernen", value: $deblock, range: 0...1, step: 0.05,
+                      rule: "Je hÃ¶her, desto glatter verrauschte FlÃ¤chen. Ãœber 60 % wirkt das Bild plastikartig.")
+            sliderRow("MPEG-BlÃ¶cke entfernen", value: $deblock, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", deblock * 100),
-                      rule: "Je höher, desto stärker werden 8×8-Blockkanten bei niedriger Bitrate geglättet. Gemessen: 0,6 = −21 % Rauschen bei +4 % Schärfe.")
+                      rule: "Je hÃ¶her, desto stÃ¤rker werden 8Ã—8-Blockkanten bei niedriger Bitrate geglÃ¤ttet. Gemessen: 0,6 = âˆ’21 % Rauschen bei +4 % SchÃ¤rfe.")
 
             // ---------------------------------------------------------------- 4
-            Text("4 · Farbe").font(.headline)
-            sliderRow("Sättigung", value: $saturation, range: 0...1, step: 0.05,
+            Text("4 Â· Farbe").font(.headline)
+            sliderRow("SÃ¤ttigung", value: $saturation, range: 0...1, step: 0.05,
                       display: String(format: "%+.0f %%", (saturation - 0.5) * 75),
                       rule: "0 % ist neutral. Der Wert zeigt die echte Abweichung: +38 % bei Anschlag. Gerechnet wird im YCbCr-Raum, der Farbton bleibt dabei exakt erhalten.")
             sliderRow("Farbdynamik (Vibrance)", value: $vibrance, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", vibrance * 100),
-                      rule: "Je höher, desto mehr werden blasse Farben angehoben, kräftige bleiben stehen. Der Regler für „natürlich bunt“.")
+                      rule: "Je hÃ¶her, desto mehr werden blasse Farben angehoben, krÃ¤ftige bleiben stehen. Der Regler fÃ¼r â€žnatÃ¼rlich buntâ€œ.")
             sliderRow("Kontrast", value: $contrast, range: 0...1, step: 0.05,
                       display: String(format: "%+.0f %%", (contrast - 0.5) * 40),
                       rule: "0 % ist neutral. Der Wert ist die echte Kontrastabweichung: +20 % bei Anschlag.")
             sliderRow("Farbtemperatur", value: $temp, range: 0...1, step: 0.025,
                       display: String(format: "%.0f K", 6500 + (temp - 0.5) * 8000),
-                      rule: "Je höher, desto kühler (blauer). 6500 K ist D65 und damit der Referenz-Weißpunkt. Darunter wirkt es wärmer (Kerzenlicht).")
-            DisclosureGroup("Weißabgleich RGB (Feinschliff)") {
+                      rule: "Je hÃ¶her, desto kÃ¼hler (blauer). 6500 K ist D65 und damit der Referenz-WeiÃŸpunkt. Darunter wirkt es wÃ¤rmer (Kerzenlicht).")
+            DisclosureGroup("WeiÃŸabgleich RGB (Feinschliff)") {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("Preset", selection: $wbPreset) {
                         Text("Neutral (D65)").tag(0)
                         Text("Warm (Kino / Sony)").tag(1)
-                        Text("Kühl (LG / Vivid)").tag(2)
+                        Text("KÃ¼hl (LG / Vivid)").tag(2)
                         Text("Eigene").tag(3)
                     }
                     .onChange(of: wbPreset) { p in if p < 3 { applyWB(p) } }
                     Button {
                         NotificationCenter.default.post(name: Notification.Name("pxWhitePointMeasure"), object: nil)
                     } label: {
-                        Label("Weißpunkt jetzt abgleichen", systemImage: "eyedropper.halffull")
+                        Label("WeiÃŸpunkt jetzt abgleichen", systemImage: "eyedropper.halffull")
                             .font(.callout)
                     }
                     .buttonStyle(.borderedProminent)
-                    Text("Misst die hellen neutralen Flächen im laufenden Bild und korrigiert den Farbstich einmalig, maximal ±6 %. Ziele dabei auf eine weiße oder graue Fläche — ein weißes Hemd, eine Wand, ein Schild.")
+                    Text("Misst die hellen neutralen FlÃ¤chen im laufenden Bild und korrigiert den Farbstich einmalig, maximal Â±6 %. Ziele dabei auf eine weiÃŸe oder graue FlÃ¤che â€” ein weiÃŸes Hemd, eine Wand, ein Schild.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     if !wbNote.isEmpty {
@@ -5598,11 +5600,11 @@ struct SharpnessRow: View {
                             .font(.caption)
                             .foregroundColor(.green)
                     }
-                    Toggle("Wolken/Weiß neutral halten", isOn: $hlBalance)
-                    Text("Zieht nur die hellen Bereiche (Wolken, Spitzlichter) soweit zur Neutralität, dass Weiß wieder weiß ist. Mitten und Schatten bleiben unangetastet — dort ist eine warme oder kühle Note eine Stilfrage. Ohne das bleiben Wolken gelb-creme, wie im Spiel-Grade.")
+                    Toggle("Wolken/WeiÃŸ neutral halten", isOn: $hlBalance)
+                    Text("Zieht nur die hellen Bereiche (Wolken, Spitzlichter) soweit zur NeutralitÃ¤t, dass WeiÃŸ wieder weiÃŸ ist. Mitten und Schatten bleiben unangetastet â€” dort ist eine warme oder kÃ¼hle Note eine Stilfrage. Ohne das bleiben Wolken gelb-creme, wie im Spiel-Grade.")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Button("Weißabgleich zurücksetzen") {
+                    Button("WeiÃŸabgleich zurÃ¼cksetzen") {
                         wbR = 1.0; wbG = 1.0; wbB = 1.0; wbPreset = 3
                     }
                     .font(.caption)
@@ -5616,7 +5618,7 @@ struct SharpnessRow: View {
                             .monospacedDigit()
                     }
                     HStack {
-                        Text("Grün")
+                        Text("GrÃ¼n")
                         Slider(value: $wbG, in: 0.85...1.15, step: 0.005)
                         Text(String(format: "%.3f", wbG))
                             .font(.caption2)
@@ -5647,7 +5649,7 @@ struct SharpnessRow: View {
                             .monospacedDigit()
                     }
                     HStack {
-                        Text("Grün")
+                        Text("GrÃ¼n")
                         Slider(value: $gammaG, in: 0.85...1.15, step: 0.005)
                         Text(String(format: "%.3f", gammaG))
                             .font(.caption2)
@@ -5662,111 +5664,111 @@ struct SharpnessRow: View {
                             .foregroundColor(.secondary)
                             .monospacedDigit()
                     }
-                    Text("Je höher, desto dunkler wird dieser Kanal in den Mitteltönen. 1,000 = neutral. Korrigiert den Farbstich, den der Weißabgleich nicht trifft (CMS-Ebene eines kalibrierten Fernsehers).")
+                    Text("Je hÃ¶her, desto dunkler wird dieser Kanal in den MitteltÃ¶nen. 1,000 = neutral. Korrigiert den Farbstich, den der WeiÃŸabgleich nicht trifft (CMS-Ebene eines kalibrierten Fernsehers).")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
             sliderRow("Gamma", value: $gamma, range: 0.7...1.3, step: 0.01,
                       display: String(format: "%.2f", gamma),
-                      rule: "Je höher, desto dunkler die Mitten, desto mehr Kontrast. 1,00 = neutral (BT.1886). Über 1,10 werden Schatten zugedrückt.")
+                      rule: "Je hÃ¶her, desto dunkler die Mitten, desto mehr Kontrast. 1,00 = neutral (BT.1886). Ãœber 1,10 werden Schatten zugedrÃ¼ckt.")
             sliderRow("Schwarzwert", value: $black, range: -0.10...0.10, step: 0.005,
                       display: String(format: "%+.0f", black * 100),
-                      rule: "Je höher, desto mehr wird die Schwärze angehoben (Grauschleier). 0 ist meist richtig; nur bei zugelaufenen Schatten leicht ins Plus.")
+                      rule: "Je hÃ¶her, desto mehr wird die SchwÃ¤rze angehoben (Grauschleier). 0 ist meist richtig; nur bei zugelaufenen Schatten leicht ins Plus.")
 
             // ---------------------------------------------------------------- 5
-            Text("5 · Bild-Engine (das Innenleben des Fernsehers)").font(.headline)
+            Text("5 Â· Bild-Engine (das Innenleben des Fernsehers)").font(.headline)
             Toggle("TV-Helligkeit (an Bildschirmhelligkeit anpassen)", isOn: $tvBrightness)
-            Text("Das iPad zeigt SDR mit bis zu 600 cd/m², ein Fernseher mit 100–200. Derselbe Bildpunkt wirkt hier also drei- bis sechsmal so hell. Diese Option skaliert die Ausgabe auf TV-Leuchtdichte — bei 100 % Bildschirmhelligkeit auf 55 %, bei 50 % auf 78 %. Wenn dir das Bild dann zu dunkel ist: Bildschirmhelligkeit am iPad erhöhen, nicht den Regler darunter.")
+            Text("Das iPad zeigt SDR mit bis zu 600 cd/mÂ², ein Fernseher mit 100â€“200. Derselbe Bildpunkt wirkt hier also drei- bis sechsmal so hell. Diese Option skaliert die Ausgabe auf TV-Leuchtdichte â€” bei 100 % Bildschirmhelligkeit auf 55 %, bei 50 % auf 78 %. Wenn dir das Bild dann zu dunkel ist: Bildschirmhelligkeit am iPad erhÃ¶hen, nicht den Regler darunter.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             sliderRow("Helligkeit (Hintergrundlicht)", value: $brightness, range: 0...1, step: 0.02,
                       display: String(format: "%+.0f %%", (pow(2.0, (brightness - 0.5) * 1.6) - 1.0) * 100),
-                      rule: "Je höher, desto heller das ganze Bild — linear gerechnet wie die Hintergrundbeleuchtung. 0 % = neutral. Für dunkle Räume 5–10 % darunter.")
+                      rule: "Je hÃ¶her, desto heller das ganze Bild â€” linear gerechnet wie die Hintergrundbeleuchtung. 0 % = neutral. FÃ¼r dunkle RÃ¤ume 5â€“10 % darunter.")
             sliderRow("Lokales Dimming (Mini-LED-Zonen)", value: $localDim, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", localDim * 100),
-                      rule: "Je höher, desto tiefer werden dunkle Bildbereiche abgesenkt, helle bleiben stehen. Über 60 % laufen Schatten zu. 30 % entspricht dem QNED93.")
+                      rule: "Je hÃ¶her, desto tiefer werden dunkle Bildbereiche abgesenkt, helle bleiben stehen. Ãœber 60 % laufen Schatten zu. 30 % entspricht dem QNED93.")
             sliderRow("Schattendurchzeichnung (Black Stabilizer)", value: $shadow, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", shadow * 100),
-                      rule: "Je höher, desto mehr werden nur die dunklen Bereiche angehoben — echtes Schwarz bleibt schwarz. Für Nachtszenen im Spiel: 50 %.")
+                      rule: "Je hÃ¶her, desto mehr werden nur die dunklen Bereiche angehoben â€” echtes Schwarz bleibt schwarz. FÃ¼r Nachtszenen im Spiel: 50 %.")
             Picker("Tone Mapping (Kontrastkurve)", selection: $toneMap) {
                 Text("Aus (linear)").tag(0)
                 Text("Sony Contrast Booster").tag(1)
                 Text("LG Precision Dimming").tag(2)
             }
-            Text("Je stärker die Kurve, desto mehr Kontrast in den Mitten und Rolloff in den Lichtern. LG (2) ist gemessen die beste Kurve: heller, aber nur 1,95 % Clipping.")
+            Text("Je stÃ¤rker die Kurve, desto mehr Kontrast in den Mitten und Rolloff in den Lichtern. LG (2) ist gemessen die beste Kurve: heller, aber nur 1,95 % Clipping.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            sliderRow("Sanfte Verläufe (Deband)", value: $deband, range: 0...1, step: 0.05,
+            sliderRow("Sanfte VerlÃ¤ufe (Deband)", value: $deband, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", deband * 100),
-                      rule: "Je höher, desto stärker werden Treppenstufen in Himmel und Nebel geglättet. Gemessen praktisch gratis — 30 % reicht.")
+                      rule: "Je hÃ¶her, desto stÃ¤rker werden Treppenstufen in Himmel und Nebel geglÃ¤ttet. Gemessen praktisch gratis â€” 30 % reicht.")
             Toggle("Farb-Engine (3D-LUT, lineares Licht)", isOn: $colorEngine)
-            Text("Rechnet Weißabgleich, Sättigung, Gamma, Schwarzpegel und Kontrast in EINER 3D-LUT in linearem Licht. Verhindert Farbstiche und ausgebrannte Kanäle. Eingeschaltet lassen.")
+            Text("Rechnet WeiÃŸabgleich, SÃ¤ttigung, Gamma, Schwarzpegel und Kontrast in EINER 3D-LUT in linearem Licht. Verhindert Farbstiche und ausgebrannte KanÃ¤le. Eingeschaltet lassen.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             sliderRow("Farbcharakter (hue-selektiv)", value: $hueSat, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", hueSat * 100),
-                      rule: "Je höher, desto stärker behandelt die Engine Farbtöne unterschiedlich: Blau und Cyan werden in Nachtbildern zurückgenommen (−16 % / −7 %), Hauttöne geschützt (−7 %), Grün erhalten (+8 %). Genau das machen die Farbmanager guter Fernseher. 0 % = alle Farbtöne gleich (alte Wirkung).")
-            sliderRow("Weißpunkt-Korrektur (Mittentöne)", value: $castFix, range: 0...1, step: 0.05,
+                      rule: "Je hÃ¶her, desto stÃ¤rker behandelt die Engine FarbtÃ¶ne unterschiedlich: Blau und Cyan werden in Nachtbildern zurÃ¼ckgenommen (âˆ’16 % / âˆ’7 %), HauttÃ¶ne geschÃ¼tzt (âˆ’7 %), GrÃ¼n erhalten (+8 %). Genau das machen die Farbmanager guter Fernseher. 0 % = alle FarbtÃ¶ne gleich (alte Wirkung).")
+            sliderRow("WeiÃŸpunkt-Korrektur (MittentÃ¶ne)", value: $castFix, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", castFix * 100),
-                      rule: "Je höher, desto mehr wird der Blaustich in den Mittentönen (Helligkeit 20–45 %) entfernt — dort liegt er gemessen bei 2–4 %. Schatten und Lichter bleiben unangetastet. 0 % = wie das PS5-Signal.")
+                      rule: "Je hÃ¶her, desto mehr wird der Blaustich in den MittentÃ¶nen (Helligkeit 20â€“45 %) entfernt â€” dort liegt er gemessen bei 2â€“4 %. Schatten und Lichter bleiben unangetastet. 0 % = wie das PS5-Signal.")
             Picker("Farbumfang", selection: $gamut) {
                 Text("BT.709 (korrekt)").tag(0)
                 Text("Display P3 nativ (TV-Look)").tag(1)
             }
-            Text("„Nativ“ ist die Einstellung, die auf Fernsehern kräftigere Farben macht: das Panel nutzt seinen echten Farbraum statt auf BT.709 zu begrenzen. Für natürliche Farben BT.709.")
+            Text("â€žNativâ€œ ist die Einstellung, die auf Fernsehern krÃ¤ftigere Farben macht: das Panel nutzt seinen echten Farbraum statt auf BT.709 zu begrenzen. FÃ¼r natÃ¼rliche Farben BT.709.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             // ---------------------------------------------------------------- 6
-            Text("6 · Anzeige").font(.headline)
+            Text("6 Â· Anzeige").font(.headline)
             Toggle("Frame Pacing", isOn: $pacing)
             Picker("Bildrate (Pacing)", selection: $paceHz) {
                 Text("60 Hz (Quelle liefert 60)").tag(60)
                 Text("120 Hz (ProMotion, weniger Mikro-Ruckler)").tag(120)
                 Text("240 Hz (Panel kann max. 120)").tag(240)
             }
-            Text("Die PS5 liefert 60 Bilder pro Sekunde. 120 Hz lässt das Panel zweimal pro Bild aktualisieren — das nimmt Mikro-Ruckler, kostet aber etwas Akku. 240 Hz kann das Panel nicht; der Wert wird auf 120 begrenzt.")
+            Text("Die PS5 liefert 60 Bilder pro Sekunde. 120 Hz lÃ¤sst das Panel zweimal pro Bild aktualisieren â€” das nimmt Mikro-Ruckler, kostet aber etwas Akku. 240 Hz kann das Panel nicht; der Wert wird auf 120 begrenzt.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Picker("Farbbereich (HDMI-Level)", selection: $rangeMode) {
                 Text("Auto").tag(0)
-                Text("Limited → Full").tag(1)
-                Text("Full → Limited").tag(2)
+                Text("Limited â†’ Full").tag(1)
+                Text("Full â†’ Limited").tag(2)
             }
             sliderRow("HDR-Peak (Nits)", value: $hdrPeak, range: 300...1600, step: 50,
                       display: String(format: "%.0f", hdrPeak),
-                      rule: "Je höher, desto mehr Spielraum für Spitzlichter in HDR. Nur relevant, wenn der Stream HDR liefert (Diagnose: hdr=1).")
+                      rule: "Je hÃ¶her, desto mehr Spielraum fÃ¼r Spitzlichter in HDR. Nur relevant, wenn der Stream HDR liefert (Diagnose: hdr=1).")
             Text(diag)
                 .font(.caption2)
                 .foregroundColor(.secondary)
             Toggle("Diagnose im Bild anzeigen", isOn: $showDiag)
             Toggle("HDR deaktivieren (Test bei Farbfehlern)", isOn: $hdrOff)
-            Text("Für echtes HDR: Codec auf \"H.265 + HDR\" stellen und auf der PS5 HDR einschalten. Dann liefert die Konsole 10 Bit, und das Panel nutzt seine 1600 Nits — der einzige echte HDR-Weg, der hier möglich ist.")
+            Text("FÃ¼r echtes HDR: Codec auf \"H.265 + HDR\" stellen und auf der PS5 HDR einschalten. Dann liefert die Konsole 10 Bit, und das Panel nutzt seine 1600 Nits â€” der einzige echte HDR-Weg, der hier mÃ¶glich ist.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Toggle("1:1 Pixelmodus (kein Scaling)", isOn: $pixelPerfect)
-            Text("Je größer der Unterschied zwischen Quelle und Panel, desto mehr bringt Scaling. 1:1 zeigt die echte Quelle (kleiner, aber pixelgenau).")
+            Text("Je grÃ¶ÃŸer der Unterschied zwischen Quelle und Panel, desto mehr bringt Scaling. 1:1 zeigt die echte Quelle (kleiner, aber pixelgenau).")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Toggle("Panel 2× (2266 px statt 2732 px)", isOn: $panel2x)
-            Text("Je niedriger die Panel-Auflösung, desto mehr Bilder pro Sekunde — und desto weicher die feinste Textur. Aus: volle 2732 px (maximale Schärfe). An: 2266 px, hält 60 fps, wenn das iPad warm wird. Wirkt sofort.")
+            Toggle("Panel 2Ã— (2266 px statt 2732 px)", isOn: $panel2x)
+            Text("Je niedriger die Panel-AuflÃ¶sung, desto mehr Bilder pro Sekunde â€” und desto weicher die feinste Textur. Aus: volle 2732 px (maximale SchÃ¤rfe). An: 2266 px, hÃ¤lt 60 fps, wenn das iPad warm wird. Wirkt sofort.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Toggle("Bei Hitze automatisch Schärfe sparen", isOn: $perfAuto)
-            Text("Je wärmer das iPad, desto eher schaltet die Automatik Klarheit und Dimming ab, um die Bildrate zu halten — das kostet sichtbar Textur. Aus (Standard): die volle Kette läuft immer, auch wenn die Bildrate dadurch sinkt. An: stabilere Bildrate, weicheres Bild bei Hitze.")
+            Toggle("Bei Hitze automatisch SchÃ¤rfe sparen", isOn: $perfAuto)
+            Text("Je wÃ¤rmer das iPad, desto eher schaltet die Automatik Klarheit und Dimming ab, um die Bildrate zu halten â€” das kostet sichtbar Textur. Aus (Standard): die volle Kette lÃ¤uft immer, auch wenn die Bildrate dadurch sinkt. An: stabilere Bildrate, weicheres Bild bei Hitze.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             sliderRow("Texturtiefe (Struktur-Radius)", value: $texDepth, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", texDepth * 100),
-                      rule: "Je höher, desto größere Strukturen werden betont — Gras, Stoff, Mauerwerk, Rinde (Radius 2,7 bis 5,0 px). Je niedriger, desto mehr Feinstkontur. Über 70 % kann es an harten Kanten säumen.")
+                      rule: "Je hÃ¶her, desto grÃ¶ÃŸere Strukturen werden betont â€” Gras, Stoff, Mauerwerk, Rinde (Radius 2,7 bis 5,0 px). Je niedriger, desto mehr Feinstkontur. Ãœber 70 % kann es an harten Kanten sÃ¤umen.")
             sliderRow("Lokale Tonwertspreizung (Tiefenwirkung)", value: $localTone, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", localTone * 100),
-                      rule: "Je höher, desto stärker werden dunkle Partien tiefer und helle Partien heller — räumlich, nicht global (wie „Object-Based HDR Remaster“ bei Sony). Das erzeugt Tiefenwirkung, ohne das Bild aufzuhellen. Über 60 % können Ränder um sehr helle Flächen entstehen.")
+                      rule: "Je hÃ¶her, desto stÃ¤rker werden dunkle Partien tiefer und helle Partien heller â€” rÃ¤umlich, nicht global (wie â€žObject-Based HDR Remasterâ€œ bei Sony). Das erzeugt Tiefenwirkung, ohne das Bild aufzuhellen. Ãœber 60 % kÃ¶nnen RÃ¤nder um sehr helle FlÃ¤chen entstehen.")
 
             // ---------------------------------------------------------------- 7
             // ---------------------------------------------------------------- 7
-            Text("7 · Audio (3D + Equalizer)").font(.headline)
+            Text("7 Â· Audio (3D + Equalizer)").font(.headline)
             Picker("Klangprofil", selection: $audioPreset) {
                 Text("Standard").tag(0)
                 Text("Sony Kino").tag(1)
@@ -5781,12 +5783,18 @@ struct SharpnessRow: View {
                 Text("Eigene").tag(10)
             }
             .onChange(of: audioPreset) { p in if p < 10 { applyAudioPreset(p) } }
-            Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. „Sony Spiel“ hebt Tiefbass und Präsenz an, damit Schritte und Schüsse ortbar sind.")
+            Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. â€žSony Spielâ€œ hebt Tiefbass und PrÃ¤senz an, damit Schritte und SchÃ¼sse ortbar sind.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            sliderRow("Spiel-Lautstärke (Mix mit Spotify)", value: $audioGain, range: 0.25...2.0, step: 0.05,
+            sliderRow("Spiel-LautstÃ¤rke (Mix mit Spotify)", value: $audioGain, range: 0.25...2.0, step: 0.05,
                       display: String(format: "%.0f %%", audioGain * 100),
-                      rule: "Regelt nur den Spielton: 25 % = deutlich leiser, 100 % = original, 200 % = lauter. Spotify läuft separat über die Systemlautstärke.")
+                      rule: "Regelt nur den Spielton: 25 % = deutlich leiser, 100 % = original, 200 % = lauter. Spotify lÃ¤uft separat Ã¼ber die SystemlautstÃ¤rke.")
+            sliderRow("Club 90 Hz", value: $audioEQ90, range: 0...18, step: 0.5,
+                      display: String(format: "%+.1f dB", audioEQ90),
+                      rule: "Punch-Bereich zwischen Sub und 150 Hz. Mehr = mehr Club-Druck, ohne dass der Sub draeht.")
+            sliderRow("Bass-Punch", value: $audioPunch, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", audioPunch * 100),
+                      rule: "Komprimiert nur den Bass: Spitzen werden gezogen, der Pegel bleibt. Mehr Druck, weniger Droehnen.")
             sliderRow("Raum (mittendrin)", value: $audioSpace, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", audioSpace * 100),
                       rule: "Verzoegert den Seitenanteil um ~9 ms: Klang von ringsum, Stimmen bleiben vorn. 30-45 % natuerlich, ueber 70 % hallig.")
@@ -5795,40 +5803,40 @@ struct SharpnessRow: View {
                       rule: "Erzeugt aus dem Mono-Bass die 3. Oberwelle: auf iPad-Lautsprechern hoerbarer Druck, der Bass bleibt mono.")
             sliderRow("3D-Weite (Raumklang)", value: $audio3D, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", audio3D * 100),
-                      rule: "Je höher, desto breiter die Bühne (Mitten/Seiten-Verbreiterung mit kurzer Laufzeitverzögerung). Über 60 % wird es phasig.")
+                      rule: "Je hÃ¶her, desto breiter die BÃ¼hne (Mitten/Seiten-Verbreiterung mit kurzer LaufzeitverzÃ¶gerung). Ãœber 60 % wird es phasig.")
             VStack(alignment: .leading, spacing: 8) {
                 eqRow("Subbass 45 Hz", $eq0)
                 eqRow("Bass 150 Hz", $eq1)
                 eqRow("Mitten 600 Hz", $eq2)
-                eqRow("Präsenz 2,4 kHz", $eq3)
-                eqRow("Höhen 9 kHz", $eq4)
+                eqRow("PrÃ¤senz 2,4 kHz", $eq3)
+                eqRow("HÃ¶hen 9 kHz", $eq4)
             }
-            Text("Je höher ein Band, desto stärker wird dieser Frequenzbereich angehoben (max. ±18 dB). Gegen dumpfen Klang: Höhen +3. Gegen dröhnenden Bass: 300 Hz −3.")
+            Text("Je hÃ¶her ein Band, desto stÃ¤rker wird dieser Frequenzbereich angehoben (max. Â±18 dB). Gegen dumpfen Klang: HÃ¶hen +3. Gegen drÃ¶hnenden Bass: 300 Hz âˆ’3.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            DisclosureGroup("Welcher Regler wofür? (Kurzfassung)") {
+            DisclosureGroup("Welcher Regler wofÃ¼r? (Kurzfassung)") {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Willst du ein besseres Bild: Bildmodus wechseln. Fertig.")
-                    Text("Ist es zu hell: Helligkeit −10 %, dann Kontrast −0,05.")
-                    Text("Ist es zu bunt: Sättigung −0,05, Farbumfang auf BT.709.")
-                    Text("Ist es zu blass: Farbdynamik +10 %, Sättigung +0,05.")
-                    Text("Ist es unscharf: zuerst Detail, dann Clear Image, zuletzt Bildschärfe.")
-                    Text("Nachtszenen zu dunkel: Schattendurchzeichnung auf 50–60 %.")
-                    Text("Rauscht es: MPEG-Blöcke auf 50 %, Rauschfilter auf 40 %.")
-                    Text("Schatten laufen zu: lokales Dimming −10 %, Schwarzwert +1 %.")
-                    Text("Farbstich: Farbtemperatur in 0,025-Schritten, dann Weißabgleich RGB.")
+                    Text("Ist es zu hell: Helligkeit âˆ’10 %, dann Kontrast âˆ’0,05.")
+                    Text("Ist es zu bunt: SÃ¤ttigung âˆ’0,05, Farbumfang auf BT.709.")
+                    Text("Ist es zu blass: Farbdynamik +10 %, SÃ¤ttigung +0,05.")
+                    Text("Ist es unscharf: zuerst Detail, dann Clear Image, zuletzt BildschÃ¤rfe.")
+                    Text("Nachtszenen zu dunkel: Schattendurchzeichnung auf 50â€“60 %.")
+                    Text("Rauscht es: MPEG-BlÃ¶cke auf 50 %, Rauschfilter auf 40 %.")
+                    Text("Schatten laufen zu: lokales Dimming âˆ’10 %, Schwarzwert +1 %.")
+                    Text("Farbstich: Farbtemperatur in 0,025-Schritten, dann WeiÃŸabgleich RGB.")
                 }
                 .font(.caption)
                 .foregroundColor(.secondary)
             }
-            DisclosureGroup("Warum sieht ein 8500-€-Fernseher so aus?") {
+            DisclosureGroup("Warum sieht ein 8500-â‚¬-Fernseher so aus?") {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("1 · Zonen: 2880 Mini-LED-Zonen schalten Licht wirklich ab. Hier macht das pxLocalDim auf einer Luma-Karte mit ~3300 Zonen.")
-                    Text("2 · Farbvolumen: bei 1000 cd/m² bleibt die Sättigung erhalten, weil in linearem Licht gerechnet wird — das macht die 3D-LUT.")
-                    Text("3 · Tone Mapping: 3000 cd/m² Spitze erlauben eine flache Kurve. Auf 600 cd/m² muss gestaucht werden — dafür die S-Kurven.")
-                    Text("4 · Upscaling: Kanten werden vor der Skalierung rekonstruiert (Clear Image), nicht danach.")
-                    Text("5 · Kalibrierung: D65, BT.1886, Kanal-Gamma. Das ist der unsichtbare Teil, der „natürlich“ wirkt.")
+                    Text("1 Â· Zonen: 2880 Mini-LED-Zonen schalten Licht wirklich ab. Hier macht das pxLocalDim auf einer Luma-Karte mit ~3300 Zonen.")
+                    Text("2 Â· Farbvolumen: bei 1000 cd/mÂ² bleibt die SÃ¤ttigung erhalten, weil in linearem Licht gerechnet wird â€” das macht die 3D-LUT.")
+                    Text("3 Â· Tone Mapping: 3000 cd/mÂ² Spitze erlauben eine flache Kurve. Auf 600 cd/mÂ² muss gestaucht werden â€” dafÃ¼r die S-Kurven.")
+                    Text("4 Â· Upscaling: Kanten werden vor der Skalierung rekonstruiert (Clear Image), nicht danach.")
+                    Text("5 Â· Kalibrierung: D65, BT.1886, Kanal-Gamma. Das ist der unsichtbare Teil, der â€žnatÃ¼rlichâ€œ wirkt.")
                     Text("Physik bleibt Physik: echte Zonen, echte Spitzenhelligkeit und die Bitrate der Quelle kann keine Software erzeugen.")
                 }
                 .font(.caption)
@@ -5836,20 +5844,20 @@ struct SharpnessRow: View {
             }
             DisclosureGroup("Was technisch nicht geht") {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("4K/120: Die PS5 gibt über Remote Play maximal 1080p60 aus.")
+                    Text("4K/120: Die PS5 gibt Ã¼ber Remote Play maximal 1080p60 aus.")
                     Text("Dolby Vision: Der Stream liefert SDR bzw. HDR10, kein DV.")
-                    Text("Motion Booster (Zwischenbilder): kostet 1–2 Frames Latenz, im Spiel unbrauchbar.")
-                    Text("Echte 2880 Zonen: kein Backlight im iPad — nur der Eindruck ist nachbaubar.")
+                    Text("Motion Booster (Zwischenbilder): kostet 1â€“2 Frames Latenz, im Spiel unbrauchbar.")
+                    Text("Echte 2880 Zonen: kein Backlight im iPad â€” nur der Eindruck ist nachbaubar.")
                     Text("Ambient-Light-Anpassung: iOS gibt den Lichtsensor nicht frei.")
-                    Text("10-Bit-Panel: 8 Bit + Deband ist die Näherung.")
+                    Text("10-Bit-Panel: 8 Bit + Deband ist die NÃ¤herung.")
                 }
                 .font(.caption)
                 .foregroundColor(.secondary)
             }
-            Button("Stabile Leitung: 1080p · 60 fps · 18 Mbit · H.265 (bei WLAN empfohlen)") {
+            Button("Stabile Leitung: 1080p Â· 60 fps Â· 18 Mbit Â· H.265 (bei WLAN empfohlen)") {
                 onStableLink()
             }
-            Button("Maximale Quelle: 1080p · 60 fps · 30 Mbit · H.265 (greift beim nächsten Verbinden)") {
+            Button("Maximale Quelle: 1080p Â· 60 fps Â· 30 Mbit Â· H.265 (greift beim nÃ¤chsten Verbinden)") {
                 onMaxQuality()
             }
         }
@@ -5876,7 +5884,7 @@ struct SharpnessRow: View {
 
     /// Schreibt den neutralen Referenzpfad direkt in die UserDefaults.
     /// Der Renderer ruft das beim Start auf, weil `onAppear` dieser Ansicht
-    /// erst läuft, wenn man die Einstellungen öffnet — die Bildfehler sieht
+    /// erst lÃ¤uft, wenn man die Einstellungen Ã¶ffnet â€” die Bildfehler sieht
     /// man aber vorher schon im Stream.
     static func applyCalibratedPreset() {
         let d = UserDefaults.standard
@@ -5946,8 +5954,8 @@ struct SharpnessRow: View {
         for (key, value) in values { d.set(value, forKey: key) }
     }
 
-    /// Setzt einen Bildmodus, ohne die Einstellungen zu öffnen. Wird vom
-    /// Schnellpanel über dem Stream benutzt.
+    /// Setzt einen Bildmodus, ohne die Einstellungen zu Ã¶ffnen. Wird vom
+    /// Schnellpanel Ã¼ber dem Stream benutzt.
     static let profileKeys = ["pxSharpLevel","pxSharpDetail","pxSharpTexDepth","pxSharpClarity",
         "pxSharpClearImage","pxSharpDeconv","pxSharpHalo","pxSharpCoring","pxSharpChroma",
         "pxSharpSaturation","pxSharpVibrance","pxSharpContrast","pxSharpTemp","pxSharpBrightness",
@@ -6017,7 +6025,7 @@ struct SharpnessRow: View {
             v["pxSharpSaturation"] = 0.5; v["pxSharpContrast"] = 0.5
             v["pxSharpBrightness"] = 0.5; v["pxSharpCoring"] = 0.0
             v["pxSharpGamut"] = 0; v["pxSharpToneMap"] = 0
-        default: // Natürlich
+        default: // NatÃ¼rlich
             v["pxSharpLevel"] = 1.0; v["pxSharpDetail"] = 0.55; v["pxSharpTexDepth"] = 0.20
             v["pxSharpSaturation"] = 0.5; v["pxSharpContrast"] = 0.5
             v["pxSharpBrightness"] = 0.5; v["pxSharpVibrance"] = 0.0
@@ -6031,11 +6039,11 @@ struct SharpnessRow: View {
     }
 }
 
-// MARK: - Schnellpanel über dem Stream
+// MARK: - Schnellpanel Ã¼ber dem Stream
 
 /// Schwebendes Bild-Panel. Schreibt direkt in die UserDefaults, die der
-/// Renderer in jedem Frame neu liest — jede Änderung ist sofort sichtbar,
-/// ohne den Stream zu verlassen oder das Spiel zu schließen.
+/// Renderer in jedem Frame neu liest â€” jede Ã„nderung ist sofort sichtbar,
+/// ohne den Stream zu verlassen oder das Spiel zu schlieÃŸen.
 struct PXQuickPicturePanel: View {
     @Binding var isPresented: Bool
 
@@ -6089,7 +6097,7 @@ struct PXQuickPicturePanel: View {
             .onChange(of: mode) { m in SharpnessRow.applyPreset(m) }
 
             HStack(spacing: 12) {
-                Text("Stärke")
+                Text("StÃ¤rke")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.white.opacity(0.8))
                 Slider(value: $master, in: 0...1).tint(.white)
@@ -6110,8 +6118,8 @@ struct PXQuickPicturePanel: View {
             .padding(.horizontal, 18)
             .padding(.bottom, 12)
 
-            // Alle Einstellungen — dieselbe Ansicht wie in den Einstellungen,
-            // nur über dem Spiel.
+            // Alle Einstellungen â€” dieselbe Ansicht wie in den Einstellungen,
+            // nur Ã¼ber dem Spiel.
             ScrollView {
                 PXSettingsClean()
                     .padding(.horizontal, 18)
@@ -6133,7 +6141,7 @@ struct PXQuickPicturePanel: View {
     }
 }
 
-// MARK: - Konsolenkarte für den Startbildschirm
+// MARK: - Konsolenkarte fÃ¼r den Startbildschirm
 
 /// Grosse, zentrierte Karte mit rundem Verbinden-Knopf. Ein Ziel pro Karte,
 /// ein Tipp genuegt -- bewusst wie die PlayStation-Startseite gehalten.
@@ -6231,7 +6239,7 @@ struct PXPressStyle: ButtonStyle {
     }
 }
 
-// MARK: - Sortierte Einstellungen für das Schnellpanel
+// MARK: - Sortierte Einstellungen fÃ¼r das Schnellpanel
 
 /// Bewusst neu geordnet: erst was schaerfer macht, dann Farbe, dann Licht,
 /// dann eine eigene Sektion fuer Regler, die das Bild auch verschlechtern
@@ -6289,8 +6297,10 @@ struct PXSettingsClean: View {
     @AppStorage("pxAudioEQ3") private var eq3: Double = 4.0
     @AppStorage("pxAudioEQ4") private var eq4: Double = 9.5
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
-    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.55
-    @AppStorage("pxAudioBass") private var audioBass: Double = 0.35
+    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.70
+    @AppStorage("pxAudioBass") private var audioBass: Double = 0.50
+    @AppStorage("pxAudioEQ90") private var audioEQ90: Double = 8.0
+    @AppStorage("pxAudioPunch") private var audioPunch: Double = 0.35
     @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @State private var requestedRes: String = "-"
 
@@ -6299,11 +6309,11 @@ struct PXSettingsClean: View {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         return scenes.compactMap { $0.screen.maximumFramesPerSecond }.max() ?? 0
     }
-    @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
-    @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
-    @AppStorage("pxRenderMs") private var liveRender: String = "—"
-    @AppStorage("pxSharpStreamRes") private var streamRes: String = "—"
-    @AppStorage("pxSharpStreamLoss") private var streamLoss: String = "—"
+    @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "â€”"
+    @AppStorage("pxSharpFPS") private var liveFPS: String = "â€”"
+    @AppStorage("pxRenderMs") private var liveRender: String = "â€”"
+    @AppStorage("pxSharpStreamRes") private var streamRes: String = "â€”"
+    @AppStorage("pxSharpStreamLoss") private var streamLoss: String = "â€”"
 
     // Codec und Bitrate liegen im Stream-Preferences-Profil, nicht in
     // einzelnen UserDefaults-Schluesseln -- deshalb eigener Zustand.
@@ -6333,9 +6343,9 @@ struct PXSettingsClean: View {
                 }
                 .foregroundColor(.secondary)
                 HStack(spacing: 12) {
-                    Text("Auflösung " + requestedRes + " → " + streamRes)
+                    Text("AuflÃ¶sung " + requestedRes + " â†’ " + streamRes)
                     Text("Pacing " + String(paceHz) + " Hz")
-                    Text("Gerät max " + String(deviceMaxHz) + " Hz")
+                    Text("GerÃ¤t max " + String(deviceMaxHz) + " Hz")
                     Text(mfxActive == "1" ? "MetalFX" : "Lanczos")
                 }
                 .font(.system(size: 10, design: .monospaced))
@@ -6357,19 +6367,19 @@ struct PXSettingsClean: View {
             // KI-Upscaler: eigener Block ganz oben, damit er sofort zu finden ist.
             VStack(alignment: .leading, spacing: 6) {
                 Toggle(isOn: $aiUpscale) {
-                    Text("KI-Upscaler 2× — schärfere Texturen")
+                    Text("KI-Upscaler 2Ã— â€” schÃ¤rfere Texturen")
                         .font(.system(size: 15, weight: .semibold))
                 }
                 .toggleStyle(.switch)
-                Text("Rechnet das Bild mit einem selbst trainierten Netz von 1080p auf 2160p hoch, bevor es auf das Panel kommt. Mehr echte Textur, aber 4× Rechenarbeit — wenn es ruckelt, wieder aus.")
+                Text("Rechnet das Bild mit einem selbst trainierten Netz von 1080p auf 2160p hoch, bevor es auf das Panel kommt. Mehr echte Textur, aber 4Ã— Rechenarbeit â€” wenn es ruckelt, wieder aus.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Toggle("Vorher/Nachher: Rohbild zeigen (A/B)", isOn: $bypass)
                     .padding(.top, 4)
-                Text("An = du siehst den unveränderten Stream. Damit kannst du direkt umschalten und vergleichen.")
+                Text("An = du siehst den unverÃ¤nderten Stream. Damit kannst du direkt umschalten und vergleichen.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text(aiMsg.isEmpty ? "Tempo: noch nicht gemessen" : "Tempo: \(aiConv) ms Umwandlung + \(aiNet) ms Netz  ·  \(aiMsg)")
+                Text(aiMsg.isEmpty ? "Tempo: noch nicht gemessen" : "Tempo: \(aiConv) ms Umwandlung + \(aiNet) ms Netz  Â·  \(aiMsg)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(aiMsg.contains("aus") ? .orange : .secondary)
                     .padding(.top, 2)
@@ -6381,85 +6391,85 @@ struct PXSettingsClean: View {
             )
             .padding(.bottom, 10)
 
-            pxHead("1 · Schärfe und Detail", "Nur diese Regler machen das Bild schärfer.")
-            pxSlider("Bildschärfe (Kanten)", $level, 0...1, pct(level),
-                     "Konturen und Text. Ab 85 % entstehen helle Säume an Kanten.")
-            Toggle("Richtungsschärfe (NVIDIA-Prinzip)", isOn: $dirSharp)
-            Text("Schärft nur in der Richtung der stärksten Kante statt rundum. Gemessen: mehr Detail bei weniger hellen Säumen. Ausschalten, wenn es körnig wirkt.")
+            pxHead("1 Â· SchÃ¤rfe und Detail", "Nur diese Regler machen das Bild schÃ¤rfer.")
+            pxSlider("BildschÃ¤rfe (Kanten)", $level, 0...1, pct(level),
+                     "Konturen und Text. Ab 85 % entstehen helle SÃ¤ume an Kanten.")
+            Toggle("RichtungsschÃ¤rfe (NVIDIA-Prinzip)", isOn: $dirSharp)
+            Text("SchÃ¤rft nur in der Richtung der stÃ¤rksten Kante statt rundum. Gemessen: mehr Detail bei weniger hellen SÃ¤umen. Ausschalten, wenn es kÃ¶rnig wirkt.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            pxSlider("Farbschärfe (Farbkanten)", $chroma, 0...1, pct(chroma),
-                     "Schärft nur die FARBE, nicht die Helligkeit. Die Farbe kommt im Stream mit halber Auflösung — hier wird sie zurückgeholt. Wirkt auf farbige Kanten, Schilder, Text.")
+            pxSlider("FarbschÃ¤rfe (Farbkanten)", $chroma, 0...1, pct(chroma),
+                     "SchÃ¤rft nur die FARBE, nicht die Helligkeit. Die Farbe kommt im Stream mit halber AuflÃ¶sung â€” hier wird sie zurÃ¼ckgeholt. Wirkt auf farbige Kanten, Schilder, Text.")
             pxSlider("Texturdichte (Feinstruktur)", $detail, 0...1, pct(detail),
-                     "Gras, Kies, Stoff, Metall. Der wichtigste Regler für Detail.")
+                     "Gras, Kies, Stoff, Metall. Der wichtigste Regler fÃ¼r Detail.")
             pxSlider("Texturtiefe (grobe Struktur)", $texDepth, 0...1, pct(texDepth),
                      "Mauerwerk, Fels, Bodenwellen. Zu hoch = fleckig.")
-            pxSlider("Clear Image (Vor-Schärfung 1080p)", $clearImage, 0...1, pct(clearImage),
-                     "Gibt dem Hochskalieren echte Kanten. 20–30 % ist der gute Bereich.")
+            pxSlider("Clear Image (Vor-SchÃ¤rfung 1080p)", $clearImage, 0...1, pct(clearImage),
+                     "Gibt dem Hochskalieren echte Kanten. 20â€“30 % ist der gute Bereich.")
             pxSlider("Halo-Grenze", $halo, 0.05...0.90, pct(halo),
-                     "Wie viel Überschwinger erlaubt ist. Niedriger = sauberer, höher = knackiger.")
+                     "Wie viel Ãœberschwinger erlaubt ist. Niedriger = sauberer, hÃ¶her = knackiger.")
 
-            pxHead("2 · Farbe und Realismus", "Für natürliche Farben: alles hier auf neutral lassen.")
-            pxSlider("Sättigung", $saturation, 0.3...0.8, signed(saturation),
-                     "0 % ist neutral. Mehr wird schnell künstlich.")
+            pxHead("2 Â· Farbe und Realismus", "FÃ¼r natÃ¼rliche Farben: alles hier auf neutral lassen.")
+            pxSlider("SÃ¤ttigung", $saturation, 0.3...0.8, signed(saturation),
+                     "0 % ist neutral. Mehr wird schnell kÃ¼nstlich.")
             pxSlider("Farbdynamik (nur blasse Farben)", $vibrance, 0...1, pct(vibrance),
-                     "Hebt nur schwache Farben — wirkt natürlicher als Sättigung.")
+                     "Hebt nur schwache Farben â€” wirkt natÃ¼rlicher als SÃ¤ttigung.")
             pxSlider("Kontrast", $contrast, 0.35...0.65, signedContrast(contrast),
                      "0 % ist neutral.")
             pxSlider("Farbtemperatur", $temp, 0.35...0.65,
                      String(format: "%.0f K", 6500 + (temp - 0.5) * 8000),
-                     "6500 K ist der Referenz-Weißpunkt.")
+                     "6500 K ist der Referenz-WeiÃŸpunkt.")
             Picker("Farbumfang", selection: $gamut) {
                 Text("BT.709 (realistisch)").tag(0)
-                Text("DCI-P3 (kräftiger)").tag(1)
+                Text("DCI-P3 (krÃ¤ftiger)").tag(1)
             }
-            Toggle("Wolken und Weiß neutral halten", isOn: $hlBalance)
-            Text("Zieht nur die hellen Flächen auf Weiß. Ohne das bleiben Wolken gelb-creme.")
+            Toggle("Wolken und WeiÃŸ neutral halten", isOn: $hlBalance)
+            Text("Zieht nur die hellen FlÃ¤chen auf WeiÃŸ. Ohne das bleiben Wolken gelb-creme.")
                 .font(.caption).foregroundColor(.secondary)
 
-            pxHead("3 · Licht und Automatik", "Helligkeit und wie viel die App selbst regelt.")
+            pxHead("3 Â· Licht und Automatik", "Helligkeit und wie viel die App selbst regelt.")
             pxSlider("Helligkeit", $brightness, 0.35...0.65,
                      String(format: "%+.0f %%", (pow(2.0, (brightness - 0.5) * 1.6) - 1.0) * 100),
-                     "0 % ist neutral. Bei zu hellem Bild 3–5 % darunter.")
+                     "0 % ist neutral. Bei zu hellem Bild 3â€“5 % darunter.")
             pxSlider("Schattendurchzeichnung", $shadow, 0...0.6, pct(shadow),
-                     "Nur für dunkle Szenen. Über 30 % wird das Bild flau.")
+                     "Nur fÃ¼r dunkle Szenen. Ãœber 30 % wird das Bild flau.")
             Toggle("Automatik (Belichtung)", isOn: $auto)
-            Text("Nimmt Überbelichtung zurück und hellt dunkle Szenen leicht auf. Maximal ±6 %.")
+            Text("Nimmt Ãœberbelichtung zurÃ¼ck und hellt dunkle Szenen leicht auf. Maximal Â±6 %.")
                 .font(.caption).foregroundColor(.secondary)
             if auto {
-                pxSlider("Automatik-Stärke", $autoStrength, 0.2...1.0, pct(autoStrength),
-                         "50 % ist ein guter Wert. Höher greift stärker ein.")
+                pxSlider("Automatik-StÃ¤rke", $autoStrength, 0.2...1.0, pct(autoStrength),
+                         "50 % ist ein guter Wert. HÃ¶her greift stÃ¤rker ein.")
             }
             Toggle("Bildautomatik (Feinabgleich)", isOn: $autoEngine)
-            Text("Kleine Korrekturen pro Szene: Lichter zurück, Schwärzen leicht hoch, Schärfe bei Rauschen runter. Bewusst klein gehalten.")
+            Text("Kleine Korrekturen pro Szene: Lichter zurÃ¼ck, SchwÃ¤rzen leicht hoch, SchÃ¤rfe bei Rauschen runter. Bewusst klein gehalten.")
                 .font(.caption).foregroundColor(.secondary)
 
-            pxHead("4 · Kann das Bild verschlechtern", "Vorsicht: Diese Regler helfen nur bei schlechter Quelle.")
+            pxHead("4 Â· Kann das Bild verschlechtern", "Vorsicht: Diese Regler helfen nur bei schlechter Quelle.")
             Toggle("Neuronales Entrauschen (nur helle Szenen)", isOn: $neural)
-            Text("Ein kleines, selbst trainiertes Netz entfernt das Kompressions-Korn in Flächen — gemessen 34 % weniger bei gleicher Schärfe. Läuft nur, wenn das Bild hell genug ist.")
+            Text("Ein kleines, selbst trainiertes Netz entfernt das Kompressions-Korn in FlÃ¤chen â€” gemessen 34 % weniger bei gleicher SchÃ¤rfe. LÃ¤uft nur, wenn das Bild hell genug ist.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Toggle("Kantenbewahrte Entrauschung (Diffusion)", isOn: $diffuse)
-            Text("Glättet nur dort, wo keine Kante ist — das Prinzip aus NVIDIAs Denoisern. Gemessen: Korn −12 %, Detail −6 %.")
+            Text("GlÃ¤ttet nur dort, wo keine Kante ist â€” das Prinzip aus NVIDIAs Denoisern. Gemessen: Korn âˆ’12 %, Detail âˆ’6 %.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            pxSlider("Zeitliche Akkumulation (echte Mehrbild-Schärfe)", $accum, 0...0.85, pct(accum),
-                     "Nutzt aus, dass die Kamera sich zwischen zwei Bildern um Bruchteile eines Pixels bewegt: 2–4 ausgerichtete Bilder ergeben echte zusätzliche Abtastpunkte. Das ist der einzige Weg zu mehr Auflösung, der nichts erfindet — kein Überschärfen, keine Halos. Bei schneller Bewegung greift der Ghosting-Schutz.")
+            pxSlider("Zeitliche Akkumulation (echte Mehrbild-SchÃ¤rfe)", $accum, 0...0.85, pct(accum),
+                     "Nutzt aus, dass die Kamera sich zwischen zwei Bildern um Bruchteile eines Pixels bewegt: 2â€“4 ausgerichtete Bilder ergeben echte zusÃ¤tzliche Abtastpunkte. Das ist der einzige Weg zu mehr AuflÃ¶sung, der nichts erfindet â€” kein ÃœberschÃ¤rfen, keine Halos. Bei schneller Bewegung greift der Ghosting-Schutz.")
             pxSlider("Zeitliches Entrauschen (Nacht)", $temporal, 0...0.9, pct(temporal),
-                     "Mittelt das Bild über die Zeit — aber nur, wo sich nichts bewegt. Das ist das einzige Mittel gegen flackernde Kompressionsblöcke bei niedriger Bitrate (nachts, 5–10 Mbit). Bei Bewegung bleibt alles scharf.")
+                     "Mittelt das Bild Ã¼ber die Zeit â€” aber nur, wo sich nichts bewegt. Das ist das einzige Mittel gegen flackernde KompressionsblÃ¶cke bei niedriger Bitrate (nachts, 5â€“10 Mbit). Bei Bewegung bleibt alles scharf.")
             pxSlider("Rauschfilter", $denoise, 0...0.5, pct(denoise),
                      "Zu hoch = Textur verschwindet.")
-            pxSlider("MPEG-Blöcke glätten", $deblock, 0...0.5, pct(deblock),
+            pxSlider("MPEG-BlÃ¶cke glÃ¤tten", $deblock, 0...0.5, pct(deblock),
                      "Zu hoch = matschig.")
-            pxSlider("Sanfte Verläufe (Deband)", $deband, 0...1.2, pct(deband),
+            pxSlider("Sanfte VerlÃ¤ufe (Deband)", $deband, 0...1.2, pct(deband),
                      "Hilft gegen Streifen im Himmel. Zu hoch = Textur weg.")
             pxSlider("Klarheit (lokaler Kontrast)", $clarity, 0...1.2, pct(clarity),
-                     "Mehr „Pop“, aber flach und teuer in der Rechnung.")
+                     "Mehr â€žPopâ€œ, aber flach und teuer in der Rechnung.")
             pxSlider("Lokales Dimming", $localDim, 0...1, pct(localDim),
                      "Hebt in Tests das Schwarz an. Meist aus lassen.")
             Toggle("TV-Helligkeit (dunkler machen)", isOn: $tvBrightness)
 
-            pxHead("5 · Ausgabe", "Bildrate und Rechenlast.")
+            pxHead("5 Â· Ausgabe", "Bildrate und Rechenlast.")
             Toggle("Frame Pacing", isOn: $pacing)
             Picker("Bildrate", selection: $paceHz) {
                 Text("60 Hz").tag(60)
@@ -6471,36 +6481,40 @@ struct PXSettingsClean: View {
                 Text("40 fps").tag(40)
                 Text("30 fps").tag(30)
             }
-            Text("Rastet die Anzeige auf ein festes Vielfaches des Bildschirmtakts ein. Bei 120 Hz sind 40 fps (120 ÷ 3) völlig gleichmäßig — das wirkt deutlich flüssiger als unregelmäßige 45. Bei ausgeschaltetem KI-Upscaler schafft „automatisch“ wieder 60.")
+            Text("Rastet die Anzeige auf ein festes Vielfaches des Bildschirmtakts ein. Bei 120 Hz sind 40 fps (120 Ã· 3) vÃ¶llig gleichmÃ¤ÃŸig â€” das wirkt deutlich flÃ¼ssiger als unregelmÃ¤ÃŸige 45. Bei ausgeschaltetem KI-Upscaler schafft â€žautomatischâ€œ wieder 60.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Toggle("Panel 0,83× (weniger Rechenlast)", isOn: $panel2x)
-            Toggle("Früh schärfen (halbe Rechenzeit, etwas weicher)", isOn: $detailEarly)
-            Text("Schärft bei 1080p vor dem Hochskalieren statt bei Panel-Größe: halbe Pixelzahl, halbe Rechenzeit. Kostet laut Messung rund 5 % Kantenschärfe.")
+            Toggle("Panel 0,83Ã— (weniger Rechenlast)", isOn: $panel2x)
+            Toggle("FrÃ¼h schÃ¤rfen (halbe Rechenzeit, etwas weicher)", isOn: $detailEarly)
+            Text("SchÃ¤rft bei 1080p vor dem Hochskalieren statt bei Panel-GrÃ¶ÃŸe: halbe Pixelzahl, halbe Rechenzeit. Kostet laut Messung rund 5 % KantenschÃ¤rfe.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Picker("Upscaler", selection: $metalFX) {
                 Text("Lanczos (stabil)").tag(false)
-                Text("MetalFX (kantenschärfer)").tag(true)
+                Text("MetalFX (kantenschÃ¤rfer)").tag(true)
             }
-            Text("Lanczos ist der bewährte Weg. MetalFX ist Apples GPU-Scaler — er kann Kanten besser schärfen, war aber bisher instabil. Wenn das Bild grau wird: zurück auf Lanczos.")
+            Text("Lanczos ist der bewÃ¤hrte Weg. MetalFX ist Apples GPU-Scaler â€” er kann Kanten besser schÃ¤rfen, war aber bisher instabil. Wenn das Bild grau wird: zurÃ¼ck auf Lanczos.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            pxHead("6 · Audio (EQ)", "Bass, Präsenz und 3D-Weite — wirkt auf Kopfhörer und Lautsprecher.")
+            pxHead("6 Â· Audio (EQ)", "Bass, PrÃ¤senz und 3D-Weite â€” wirkt auf KopfhÃ¶rer und Lautsprecher.")
             pxSlider("Bass-Shelf 100 Hz", $eq0, -18...18, String(format: "%+.1f dB", eq0),
-                     "Hebt den ganzen Bassbereich an. Hochpass unter 35 Hz hält ihn trocken.")
+                     "Hebt den ganzen Bassbereich an. Hochpass unter 35 Hz hÃ¤lt ihn trocken.")
             pxSlider("Bass 150 Hz", $eq1, -18...18, String(format: "%+.1f dB", eq1),
                      "Punch. Zu viel klingt boxig.")
             pxSlider("Mitten 600 Hz", $eq2, -18...18, String(format: "%+.1f dB", eq2),
                      "Gegen dumpfen Klang.")
-            pxSlider("Präsenz 2,4 kHz", $eq3, -18...18, String(format: "%+.1f dB", eq3),
+            pxSlider("PrÃ¤senz 2,4 kHz", $eq3, -18...18, String(format: "%+.1f dB", eq3),
                      "Stimmen und Schritte ortbar.")
-            pxSlider("Höhen 9 kHz", $eq4, -18...18, String(format: "%+.1f dB", eq4),
+            pxSlider("HÃ¶hen 9 kHz", $eq4, -18...18, String(format: "%+.1f dB", eq4),
                      "Luft. Zu viel zischt.")
-            pxSlider("Spiel-Lautstärke (Mix mit Spotify)", $audioGain, 0.25...2.0,
+            pxSlider("Spiel-LautstÃ¤rke (Mix mit Spotify)", $audioGain, 0.25...2.0,
                      String(format: "%.0f %%", audioGain * 100),
-                     "Regelt nur den Spielton: 25 % leiser, 100 % original, 200 % lauter. Spotify läuft separat über die Systemlautstärke.")
+                     "Regelt nur den Spielton: 25 % leiser, 100 % original, 200 % lauter. Spotify lÃ¤uft separat Ã¼ber die SystemlautstÃ¤rke.")
+            pxSlider("Club 90 Hz", $audioEQ90, 0...18, String(format: "%+.1f dB", audioEQ90),
+                     "Punch-Bereich zwischen Sub und 150 Hz: Club-Druck ohne Droehnen.")
+            pxSlider("Bass-Punch", $audioPunch, 0...1, pct(audioPunch),
+                     "Komprimiert nur den Bass: mehr Druck, weniger Droehnen.")
             pxSlider("Raum (mittendrin)", $audioSpace, 0...1, pct(audioSpace),
                      "Seitenanteil ~9 ms verzoegert: Klang von ringsum, Stimmen bleiben vorn. 30-45 % natuerlich.")
             pxSlider("Bass-Druck (Harmonik)", $audioBass, 0...1, pct(audioBass),
@@ -6508,44 +6522,44 @@ struct PXSettingsClean: View {
             pxSlider("3D-Weite", $audio3D, 0...0.6, pct(audio3D),
                      "Stereo-Verbreiterung. Der Bass bleibt mono, damit nichts hohl wird.")
 
-            pxHead("7 · GPU-Techniken", "Was moderne Karten können — als Option, soweit übertragbar.")
+            pxHead("7 Â· GPU-Techniken", "Was moderne Karten kÃ¶nnen â€” als Option, soweit Ã¼bertragbar.")
             Picker("Upscaler (DLSS-Super-Resolution-Prinzip)", selection: $metalFX) {
-                Text("Lanczos — bewährt").tag(false)
-                Text("MetalFX — Apples KI-Scaler").tag(true)
+                Text("Lanczos â€” bewÃ¤hrt").tag(false)
+                Text("MetalFX â€” Apples KI-Scaler").tag(true)
             }
             Picker("Bildlage bei MetalFX", selection: $mfxFlip) {
                 Text("normal").tag(0)
-                Text("kopfüber").tag(1)
+                Text("kopfÃ¼ber").tag(1)
                 Text("seitenverkehrt").tag(2)
                 Text("beides").tag(3)
             }
-            Text("Metal-Texturen und Core Image zählen die Y-Achse verschieden — deshalb kann das Bild bei MetalFX kopfüber stehen. Die passende Lage hier einmal einstellen; sie bleibt gespeichert.")
+            Text("Metal-Texturen und Core Image zÃ¤hlen die Y-Achse verschieden â€” deshalb kann das Bild bei MetalFX kopfÃ¼ber stehen. Die passende Lage hier einmal einstellen; sie bleibt gespeichert.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text("Bildet DLSS Super Resolution nach: rekonstruiert Kanten beim Hochskalieren. Lanczos ist stabil, MetalFX schärfer — wird das Bild grau, zurück auf Lanczos.")
+            Text("Bildet DLSS Super Resolution nach: rekonstruiert Kanten beim Hochskalieren. Lanczos ist stabil, MetalFX schÃ¤rfer â€” wird das Bild grau, zurÃ¼ck auf Lanczos.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Picker("Latenz-Modus (Reflex-Prinzip)", selection: $paceHz) {
-                Text("60 Hz — 1:1 mit der Quelle").tag(60)
-                Text("120 Hz — Bild früher auf dem Glas").tag(120)
-                Text("240 Hz — Maximum").tag(240)
+                Text("60 Hz â€” 1:1 mit der Quelle").tag(60)
+                Text("120 Hz â€” Bild frÃ¼her auf dem Glas").tag(120)
+                Text("240 Hz â€” Maximum").tag(240)
             }
-            Text("Reflex senkt die Latenz der Render-Pipeline. Bei uns entspricht das der Anzeige-Frequenz: 120 Hz zeigt jedes Bild bis zu 8 ms früher.")
+            Text("Reflex senkt die Latenz der Render-Pipeline. Bei uns entspricht das der Anzeige-Frequenz: 120 Hz zeigt jedes Bild bis zu 8 ms frÃ¼her.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Nicht übertragbar:").font(.caption).bold()
-                Text("• Frame Generation braucht Bewegungsvektoren je Pixel — die liefert nur die Engine, nicht der Stream.")
-                Text("• Ray Reconstruction braucht Raytracing-Daten. Der Stream enthält nur ein fertiges Bild.")
-                Text("• 3D-Guided Rendering braucht Tiefe und Material-IDs.")
+                Text("Nicht Ã¼bertragbar:").font(.caption).bold()
+                Text("â€¢ Frame Generation braucht Bewegungsvektoren je Pixel â€” die liefert nur die Engine, nicht der Stream.")
+                Text("â€¢ Ray Reconstruction braucht Raytracing-Daten. Der Stream enthÃ¤lt nur ein fertiges Bild.")
+                Text("â€¢ 3D-Guided Rendering braucht Tiefe und Material-IDs.")
             }
             .font(.caption2)
             .foregroundColor(.secondary)
 
-            pxHead("8 · Verbindung", "Gilt beim nächsten Verbinden.")
+            pxHead("8 Â· Verbindung", "Gilt beim nÃ¤chsten Verbinden.")
             Picker("Codec", selection: $codecIdx) {
                 Text("H.264 (kompatibel)").tag(0)
-                Text("H.265 (bessere Qualität)").tag(1)
+                Text("H.265 (bessere QualitÃ¤t)").tag(1)
                 Text("H.265 + HDR (10 Bit)").tag(2)
             }
             .onChange(of: codecIdx) { v in
@@ -6560,11 +6574,11 @@ struct PXSettingsClean: View {
                     p.save()
                     codecIdx = p.codec
                 }
-            Text("Nur mit PS5-HDR und einem HDR-Spiel. Wirkt beim nächsten Verbinden. Bei einer Absturz-Schleife schaltet die App HDR nach 3 Fehlstarts selbst ab.")
+            Text("Nur mit PS5-HDR und einem HDR-Spiel. Wirkt beim nÃ¤chsten Verbinden. Bei einer Absturz-Schleife schaltet die App HDR nach 3 Fehlstarts selbst ab.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Picker("Auflösung", selection: $resIdx) {
-                Text("4K (3840×2160, experimentell)").tag(4)
+            Picker("AuflÃ¶sung", selection: $resIdx) {
+                Text("4K (3840Ã—2160, experimentell)").tag(4)
                 Text("1080p").tag(3)
                 Text("720p").tag(2)
                 Text("540p").tag(1)
@@ -6580,7 +6594,7 @@ struct PXSettingsClean: View {
                     p.bitrate = v
                     p.save()
                 }
-            Text("Die Konsole deckelt selbst — 30000 bis 50000 anfordern reicht. Höhere Werte schaden nicht, bringen aber nichts.")
+            Text("Die Konsole deckelt selbst â€” 30000 bis 50000 anfordern reicht. HÃ¶here Werte schaden nicht, bringen aber nichts.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -6595,7 +6609,7 @@ struct PXSettingsClean: View {
             codecIdx = p.codec
             bitrateVal = p.bitrate == 0 ? 30000 : p.bitrate
             resIdx = p.resolutionIndex
-            requestedRes = "\(p.resolution.width)×\(p.resolution.height)"
+            requestedRes = "\(p.resolution.width)Ã—\(p.resolution.height)"
         }
     }
 
@@ -6745,8 +6759,8 @@ struct PXProfileSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("9 · Profile").font(.system(size: 15, weight: .semibold))
-                Text("Eigene Werte speichern, laden und mit dem laufenden Spiel verknüpfen.")
+                Text("9 Â· Profile").font(.system(size: 15, weight: .semibold))
+                Text("Eigene Werte speichern, laden und mit dem laufenden Spiel verknÃ¼pfen.")
                     .font(.caption).foregroundColor(.secondary)
             }
             .padding(.top, 6)
@@ -6767,7 +6781,7 @@ struct PXProfileSection: View {
                     Spacer()
                     Button("Laden") { PXProfileStore.apply(name) }
                         .buttonStyle(.bordered)
-                    Button("Löschen") {
+                    Button("LÃ¶schen") {
                         PXProfileStore.delete(name)
                         profileNames = PXProfileStore.names()
                     }
@@ -6780,16 +6794,16 @@ struct PXProfileSection: View {
                 Button("Aktuelles Spiel erkennen") {
                     PSNPresence.fetchCurrentGame { t in
                         presenceTitle = t ?? ""
-                        presenceMsg = t.map { "Erkannt: \($0)" } ?? "Kein Titel sichtbar (PSN-Privatsphäre?)"
+                        presenceMsg = t.map { "Erkannt: \($0)" } ?? "Kein Titel sichtbar (PSN-PrivatsphÃ¤re?)"
                     }
                 }
                 .buttonStyle(.bordered)
                 if !presenceTitle.isEmpty {
-                    Button("Mit Profil verknüpfen") {
+                    Button("Mit Profil verknÃ¼pfen") {
                         let n = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !n.isEmpty else { presenceMsg = "Erst Profilnamen eingeben/speichern."; return }
                         PXProfileStore.setAuto(title: presenceTitle, profile: n)
-                        presenceMsg = "Verknüpft: \(presenceTitle) → \(n)"
+                        presenceMsg = "VerknÃ¼pft: \(presenceTitle) â†’ \(n)"
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -7215,10 +7229,12 @@ typedef struct {
     float width;
     float space;        // 0..1 Haas/Raum: Seitenanteil verzoegert zumischen
     float bass;         // 0..1 Bass-Harmonik (auf kleinen Speakern hoerbar)
+    float punch;        // 0..1 Bass-Kompressor (Club-Punch, kein Dröhnen)
     float preGain;      // Headroom gegen Clipping bei Bass-Boost
     float userGain;     // Nutzer-Lautstaerke des Spieltons (pxAudioGain, 0.25..2.0)
     float bassAlpha;    // Low-Pass fuer Bass-Mono (200 Hz)
     float hpB0, hpB1, hpB2, hpA1, hpA2; // Hochpass 35 Hz gegen Sub-Rumpe
+    float x90b0, x90b1, x90b2, x90a1, x90a2; // 90-Hz-Punch-Band
     uint32_t channels;
 } PyluxEqCfg;
 
@@ -7236,9 +7252,11 @@ typedef struct PyluxChiakiAudioOutput {
     // EQ-Konfiguration (decode thread schreibt, audio thread liest)
     PyluxEqCfg cfg;
     float cfgDb[EQ_BANDS];
+    float cfgDb90;
     // Filterzustand (nur audio thread)
     float z1[EQ_MAX_CH][EQ_BANDS];
     float z2[EQ_MAX_CH][EQ_BANDS];
+    float z90_1[EQ_MAX_CH], z90_2[EQ_MAX_CH];
     float hpz1[EQ_MAX_CH], hpz2[EQ_MAX_CH]; // Hochpass-Zustand
     float lpL, lpR; // Bass-Mono-Tiefpass (nur audio thread)
     float sideBuf[1024]; // Haas-Verzoegerung fuer den Seitenanteil
@@ -7248,6 +7266,8 @@ typedef struct PyluxChiakiAudioOutput {
     int sidePos2;
     int sideLen2;
     float dampZ;          // Daempfung der Reflexionen
+    float bassEnv;        // Huellkurve des Bass-Kompressors
+    float atkA, relA;     // Attack/Release-Koeffizienten
 } PyluxChiakiAudioOutput;
 
 // Audio-Unterbrechung (z. B. Spotify uebernimmt): Queue pausieren und danach
@@ -7299,6 +7319,28 @@ static void eq_rebuild_locked(PyluxChiakiAudioOutput *a) {
         a->cfg.b2[i] = (float)(b2 / a0);
         a->cfg.a1[i] = (float)(a1 / a0);
         a->cfg.a2[i] = (float)(a2 / a0);
+    }
+    // 90-Hz-Punch-Band (Peaking, Q=1.2): der "Club"-Bereich zwischen Sub
+    // und 150 Hz. Genau hier sitzt der Druck, ohne dass es draehnend wird.
+    {
+        double db = a->cfgDb90;
+        if (db > 18.0) db = 18.0;
+        if (db < -18.0) db = -18.0;
+        double A = pow(10.0, db / 40.0);
+        double w0 = 2.0 * M_PI * 90.0 / fs;
+        double alpha = sin(w0) / (2.0 * 1.2);
+        double cw = cos(w0);
+        double b0 = 1.0 + alpha * A;
+        double b1 = -2.0 * cw;
+        double b2 = 1.0 - alpha * A;
+        double a0 = 1.0 + alpha / A;
+        double a1 = -2.0 * cw;
+        double a2 = 1.0 - alpha / A;
+        a->cfg.x90b0 = (float)(b0 / a0);
+        a->cfg.x90b1 = (float)(b1 / a0);
+        a->cfg.x90b2 = (float)(b2 / a0);
+        a->cfg.x90a1 = (float)(a1 / a0);
+        a->cfg.x90a2 = (float)(a2 / a0);
     }
     // Hochpass 35 Hz (Q=0.707): entfernt Sub-Rumpe, die den Bass aufblaeht.
     {
@@ -7352,6 +7394,16 @@ static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
     if (bs < 0.0f) bs = 0.0f;
     if (bs > 1.0f) bs = 1.0f;
     if (fabsf(bs - a->cfg.bass) > 0.005f) changed = YES;
+    NSNumber *puN = [d objectForKey:@"pxAudioPunch"];
+    float pu = puN ? (float)puN.doubleValue : 0.35f;
+    if (pu < 0.0f) pu = 0.0f;
+    if (pu > 1.0f) pu = 1.0f;
+    if (fabsf(pu - a->cfg.punch) > 0.005f) changed = YES;
+    NSNumber *q90 = [d objectForKey:@"pxAudioEQ90"];
+    float db90 = q90 ? (float)q90.doubleValue : 8.0f;
+    if (db90 < -18.0f) db90 = -18.0f;
+    if (db90 > 18.0f) db90 = 18.0f;
+    if (fabsf(db90 - a->cfgDb90) > 0.01f) changed = YES;
     float ug = (float)[d doubleForKey:@"pxAudioGain"];
     if (ug < 0.05f) ug = 1.0f;
     if (ug < 0.25f) ug = 0.25f;
@@ -7364,6 +7416,8 @@ static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
     a->cfg.width = w;
     a->cfg.space = sp;
     a->cfg.bass = bs;
+    a->cfg.punch = pu;
+    a->cfgDb90 = db90;
     a->cfg.userGain = ug;
     eq_rebuild_locked(a);
     pthread_mutex_unlock(&a->mtx);
@@ -7412,6 +7466,9 @@ static void ring_reset(PyluxChiakiAudioOutput *a) {
     memset(a->z2, 0, sizeof(a->z2));
     memset(a->hpz1, 0, sizeof(a->hpz1));
     memset(a->hpz2, 0, sizeof(a->hpz2));
+    memset(a->z90_1, 0, sizeof(a->z90_1));
+    memset(a->z90_2, 0, sizeof(a->z90_2));
+    a->bassEnv = 0.0f;
     a->lpL = 0.0f;
     a->lpR = 0.0f;
 }
@@ -7496,10 +7553,26 @@ static void audio_process(PyluxChiakiAudioOutput *a, int16_t *s, size_t frames, 
                 R = biquad(R, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
                            &a->z1[1][b], &a->z2[1][b]);
             }
+            L = biquad(L, cfg->x90b0, cfg->x90b1, cfg->x90b2, cfg->x90a1, cfg->x90a2,
+                       &a->z90_1[0], &a->z90_2[0]);
+            R = biquad(R, cfg->x90b0, cfg->x90b1, cfg->x90b2, cfg->x90a1, cfg->x90a2,
+                       &a->z90_1[1], &a->z90_2[1]);
             // Bass (<200 Hz) bleibt mono -- sonst wird er hohl/phasig ("roehrend").
             a->lpL += alpha * (L - a->lpL);
             a->lpR += alpha * (R - a->lpR);
             float lowM = (a->lpL + a->lpR) * 0.5f;
+            // Bass-Punch: sanfte Kompression des Mono-Basses. Spitzen (Droehen)
+            // werden gezogen, der Grundpegel bleibt -- mehr Druck, weniger Kiste.
+            if (cfg->punch > 0.005f) {
+                float bx = fabsf(lowM);
+                float bcoef = (bx > a->bassEnv) ? a->atkA : a->relA;
+                a->bassEnv += bcoef * (bx - a->bassEnv);
+                const float thr = 0.20f;
+                if (a->bassEnv > thr) {
+                    float gr = powf(thr / a->bassEnv, 0.45f);
+                    lowM *= gr * (1.0f + cfg->punch * 0.55f);
+                }
+            }
             float highL = L - a->lpL;
             float highR = R - a->lpR;
             float Mh = (highL + highR) * 0.5f;
@@ -7625,6 +7698,12 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
     ao->sidePos2 = 0;
     ao->dampZ = 0.0f;
     memset(ao->sideBuf2, 0, sizeof(ao->sideBuf2));
+    // Bass-Punch: 8 ms Attack, 150 ms Release.
+    ao->atkA = 1.0f - expf(-1.0f / ((float)rate * 0.008f));
+    ao->relA = 1.0f - expf(-1.0f / ((float)rate * 0.150f));
+    ao->bassEnv = 0.0f;
+    memset(ao->z90_1, 0, sizeof(ao->z90_1));
+    memset(ao->z90_2, 0, sizeof(ao->z90_2));
 
     run_on_main(^{
         audio_teardown(ao);
