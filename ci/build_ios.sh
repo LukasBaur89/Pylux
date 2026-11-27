@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2012 ] 2>/dev/null; then BUILD_NUM=2012; fi
+if [ "$BUILD_NUM" -lt 2013 ] 2>/dev/null; then BUILD_NUM=2013; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -494,7 +494,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
         bufferLock.lock()
         latestBuffer = frameToUse
-        let depth = UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 1
+        let depth = UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 2
         if depth > 0 {
             frameQueue.append(frameToUse)
             // Nie mehr als depth+1 halten (kein Aufstauen, max. ~33 ms).
@@ -658,10 +658,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 let interval = 1.0 / Double(max(want, 1))
                 let panel = 1.0 / Double(max(deviceHz, 1))
                 if interval > panel * 1.5 {
-                    // Build 2010: kein Verwerfen mehr. needsPresent ist nur nach
-                    // einem NEUEN Bild gesetzt -- ein frueh eintreffendes Bild
-                    // wird gezeichnet statt weggeworfen (das kostete ~12 fps).
-                    lastPacedDraw = CACurrentMediaTime()
+                    let now = CACurrentMediaTime()
+                    // Nur den Takt begrenzen (max. Zielrate). Das Bild wird
+                    // NICHT verworfen: es bleibt im Puffer und kommt beim
+                    // naechsten Takt (max. 8 ms spaeter).
+                    if now - lastPacedDraw < interval * 0.90 { return }
+                    lastPacedDraw = now
                 }
             }
         }
@@ -672,7 +674,13 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         if wantFill != (currentMode == .zoom) {
             updateVideoGravity(wantFill ? .zoom : .fit)
         }
-        guard needsPresent else { idleTicks += 1; return }
+        var anyFrame = needsPresent
+        if !anyFrame {
+            bufferLock.lock()
+            anyFrame = !frameQueue.isEmpty
+            bufferLock.unlock()
+        }
+        guard anyFrame else { idleTicks += 1; return }
         needsPresent = false
         metalView?.draw()
     }
@@ -2693,14 +2701,19 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
               let cb = commandQueue?.makeCommandBuffer() else { return }
 
         bufferLock.lock()
-        let depth = UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 1
+        let depth = UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 2
         let pb: CVPixelBuffer?
         if depth > 0 {
             pb = frameQueue.isEmpty ? nil : frameQueue.removeFirst()
         } else {
             pb = latestBuffer
         }
+        // Build 2013: liegt noch ein Bild im Puffer, ist der naechste Takt
+        // SOFORT faellig. Vorher wurde nur bei einem NEUEN Bild gezeichnet --
+        // dadurch lief der Puffer nie leer und warf staendig Bilder weg.
+        let moreQueued = depth > 0 && !frameQueue.isEmpty
         bufferLock.unlock()
+        if moreQueued { needsPresent = true }
         guard let pixelBuffer0 = pb else { return }
         // PXProbe-Debugpfad entfernt (Build 2008): kein per-Frame-Probe mehr.
         // Stream laeuft -> Startzaehler zuruecksetzen (kein Safe-Mode noetig).
@@ -3529,6 +3542,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                         outCI = outCI.transformed(by: CGAffineTransform(translationX: outCI.extent.width, y: 0)
                             .scaledBy(x: -1, y: 1))
                     }
+                    // Build 2013: Bild fuer /shot ablegen (nur wenn Probe an).
+                    PXProbe.shared.set(outCI, context: c, space: outSpace,
+                                       width: outW, height: outH)
                 }
                 cb.commit()
                 noteFrameRendered()
@@ -3566,6 +3582,11 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let canvasRect = CGRect(origin: .zero, size: target)
         let canvas = CIImage(color: CIColor.black).cropped(to: canvasRect)
         let composited = image.composited(over: canvas)
+        if (UserDefaults.standard.object(forKey: "pxSharpProbeLive") as? NSNumber)?.boolValue ?? false,
+           let c = ciContext {
+            PXProbe.shared.set(composited, context: c, space: outSpace,
+                               width: Int(target.width), height: Int(target.height))
+        }
         if UserDefaults.standard.bool(forKey: "pxSharpProfile") {
             profPrefixes.append(("fertig", composited))
             measureProfile(space: outSpace)
@@ -4151,6 +4172,9 @@ final class PXTuner {
             else if let f = Double(v) { d.set(f, forKey: k) }
             else { d.set(v, forKey: k) }
             return "{\"ok\":true,\"key\":\"\(k)\"}"
+        }
+        if path.hasPrefix("/shot") {
+            return PXProbe.shared.shotPNG(maxW: 1920)
         }
         if path.hasPrefix("/bwlog") {
             return UserDefaults.standard.string(forKey: "pxBwLog") ?? ""
