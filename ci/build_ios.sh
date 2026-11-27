@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2008 ] 2>/dev/null; then BUILD_NUM=2008; fi
+if [ "$BUILD_NUM" -lt 2009 ] 2>/dev/null; then BUILD_NUM=2009; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -7444,7 +7444,7 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
         // MixWithOthers: Spotify darf parallel weiterlaufen (Spielton + Musik).
         // pxAudioMix (Default an) erlaubt das Abschalten per /set.
         NSNumber *mixNum = [[NSUserDefaults standardUserDefaults] objectForKey:@"pxAudioMix"];
-        BOOL mix = mixNum ? mixNum.boolValue : YES;
+        BOOL mix = mixNum ? mixNum.boolValue : NO;
         AVAudioSessionCategoryOptions opts = mix ? AVAudioSessionCategoryOptionMixWithOthers : 0;
         if (![session setCategory:AVAudioSessionCategoryPlayback withOptions:opts error:&nserr]) {
             os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] setCategory failed: %{public}@", nserr.localizedDescription);
@@ -7642,30 +7642,9 @@ struct StreamView: View {
             latencyText = String(format: "LATENZ ~%.0f ms\nRTT %.0f · Frame %.0f · PL %.1f%%",
                                  est, m.rttMs, frame, m.packetLoss * 100)
 
-            // Bitrate/RTT/Loss-Log (max. 240 Zeilen, ~4 min) fuer die Diagnose.
-            let d = UserDefaults.standard
-            d.set(m.rttMs, forKey: "pxRttMs")
-            d.set(m.packetLoss, forKey: "pxLoss")
-            let line = String(format: "%d,%.1f,%.0f,%.4f,%.0f\n",
-                              Int(Date().timeIntervalSince1970), m.bitrateMbps, m.rttMs,
-                              m.packetLoss, m.fps)
-            var log = d.string(forKey: "pxBwLog") ?? ""
-            log += line
-            let parts = log.split(separator: "\n")
-            if parts.count > 240 { log = parts.suffix(240).joined(separator: "\n") + "\n" }
-            d.set(log, forKey: "pxBwLog")
-
-            // Auto-Profil: alle 30 s PSN-Presence pruefen und passendes Profil laden.
-            let now = Date().timeIntervalSince1970
-            if now - lastPresenceCheck > 30 {
-                lastPresenceCheck = now
-                PSNPresence.fetchCurrentGame { title in
-                    guard let title = title else { return }
-                    if let profile = PXProfileStore.autoProfile(for: title) {
-                        PXProfileStore.apply(profile)
-                    }
-                }
-            }
+            // Build 2009: Diagnose-Schreiber (pxRtt/pxLoss/pxBwLog) und die
+            // 30-s-PSN-Abfrage entfernt. Die HUD-Anzeige liest direkt aus den
+            // Metriken; dadurch keine Dauer-Schreibzugriffe/Netzabfragen mehr.
         }
         // No native read unless the overlay is actually showing — zero cost when off.
         guard showStats, isConnected, let m = session.metrics() else { return }
