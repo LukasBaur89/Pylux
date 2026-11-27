@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2009 ] 2>/dev/null; then BUILD_NUM=2009; fi
+if [ "$BUILD_NUM" -lt 2010 ] 2>/dev/null; then BUILD_NUM=2010; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -261,6 +261,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var toneTried = false
     private let diagLabel = UILabel()
     private var frameCount = 0
+    // CPU-Zeit pro draw() (Encoding/Upload), wird 1x pro Sekunde geschrieben.
+    private var drawMsSum = 0.0
+    private var drawMsCount = 0
     /// Startzeit der Sitzung + Merker: sobald 8 s stabil gerendert wurde, ist
     /// der Start "gesund" und der Absturz-Zaehler wird zurueckgesetzt.
     private var sessionStart: CFTimeInterval = 0
@@ -593,9 +596,15 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             let hzPref = Float(UserDefaults.standard.object(forKey: "pxSharpPaceHz") as? Int ?? 60)
             let lockPref = UserDefaults.standard.object(forKey: "pxSharpLockFps") as? Int ?? 0
             let gpuMs = max(1.0, PXScene.shared.renderMs)
+            let adapt = (UserDefaults.standard.object(forKey: "pxSharpAdapt") as? NSNumber)?.boolValue ?? false
             var want: Float
             if lockPref > 0 {
                 want = min(Float(lockPref), deviceHz)
+            } else if !adapt {
+                // Build 2010: Ziel bleibt fest beim Wunsch (60). Vorher hat die
+                // (auf dem Geraet ungenaue) Renderzeit das Ziel selbst auf 40
+                // gesenkt -- genau das war die 48/40-fps-Bremse.
+                want = min(hzPref <= 0 ? 60 : hzPref, deviceHz)
             } else {
                 var d: Float = 1
                 while (d / deviceHz) < Float(gpuMs / 1000.0 * 1.06) && d < 8 { d += 1 }
@@ -619,9 +628,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 let interval = 1.0 / Double(max(want, 1))
                 let panel = 1.0 / Double(max(deviceHz, 1))
                 if interval > panel * 1.5 {
-                    let now = CACurrentMediaTime()
-                    if now - lastPacedDraw < interval * 0.80 { return }
-                    lastPacedDraw = now
+                    // Build 2010: kein Verwerfen mehr. needsPresent ist nur nach
+                    // einem NEUEN Bild gesetzt -- ein frueh eintreffendes Bild
+                    // wird gezeichnet statt weggeworfen (das kostete ~12 fps).
+                    lastPacedDraw = CACurrentMediaTime()
                 }
             }
         }
@@ -2460,6 +2470,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         if now - fpsWindowStart >= 1.0 {
             let fps = Double(frameCount) / (now - fpsWindowStart)
             UserDefaults.standard.set(String(format: "%.0f", fps), forKey: "pxSharpFPS")
+            if drawMsCount > 0 {
+                UserDefaults.standard.set(String(format: "%.2f", drawMsSum / Double(drawMsCount)),
+                                          forKey: "pxDrawMs")
+            }
+            drawMsSum = 0
+            drawMsCount = 0
             frameCount = 0
             fpsWindowStart = now
         }
@@ -2467,6 +2483,11 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
     /// Rendert jede gespeicherte Kette einzeln und misst die GPU-Zeit.
     /// Das ist der Ersatz fuer Instruments: dieselben Zahlen, von innen.
+    private func pxProfMark(_ name: String, _ img: CIImage) {
+        guard UserDefaults.standard.bool(forKey: "pxSharpProfile") else { return }
+        profPrefixes.append((name, img))
+    }
+
     private func measureProfile(space: CGColorSpace) {
         guard let ctx = ciContext, let q = commandQueue, let device = metalView?.device else { return }
         var ergebnis: [String: Double] = [:]
@@ -2600,7 +2621,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        let t0 = CACurrentMediaTime()
         autoreleasepool { drawInner(in: view) }
+        drawMsSum += (CACurrentMediaTime() - t0) * 1000.0
+        drawMsCount += 1
     }
 
     private func drawInner(in view: MTKView) {
@@ -2677,6 +2701,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             // Range (16-235 vs 0-255) als Attachments an den Buffer. Ein hartes BT.709-Tag
             // überschreibt die Range und drückt das Bild zusammen -> Schatten laufen zu.
             image = CIImage(cvPixelBuffer: sourceBuffer)
+        }
+        if UserDefaults.standard.bool(forKey: "pxSharpProfile") {
+            profPrefixes = [("quelle", image)]
         }
 
         // ---- Zeitliches Entrauschen (Nacht / niedrige Bitrate) --------------
@@ -2951,6 +2978,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                                           NSNumber(value: shadowAmt * 0.035)]) {
             image = out
         }
+        pxProfMark("schatten", image)
 
         var denoise = Float(UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.06)
         if autoOn {
@@ -3016,6 +3044,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
 
         // ---- Anisotrope Diffusion (NVIDIA-Denoiser-Prinzip) ---------------
+        pxProfMark("clean", image)
         let diffAmt = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0) * 2.0, 0.0), 1.0))
         if !bypassNow, diffAmt > 0.05, (UserDefaults.standard.object(forKey: "pxSharpDiffuse") as? Bool ?? true),
            let dk = diffuseKernelInstance() {
@@ -3030,6 +3059,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
 
         // ---- Helligkeits-Entrauschung (eigener Durchgang) ------------------
+        pxProfMark("diffusion", image)
         let lumaDN = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0) * 2.0, 0.0), 1.0))
         if !bypassNow, lumaDN > 0.05, let lk = lumaDNKernelInstance(),
            let out = lk.apply(extent: image.extent,
@@ -3041,6 +3071,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
         // ---- Farb-Entrauschung (eigener Durchgang) -------------------------
         // Nur die Farbe wird geglaettet, die Helligkeit bleibt unberuehrt.
+        pxProfMark("lumaDN", image)
         let chromaDN = Float(min(max((UserDefaults.standard.object(forKey: "pxSharpDenoise") as? Double ?? 0.0) * 1.6, 0.0), 1.0))
         if !bypassNow, chromaDN > 0.05, let dnk = chromaDNKernelInstance(),
            let out = dnk.apply(extent: image.extent,
@@ -3051,6 +3082,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
 
         // ---- Chroma-Rekonstruktion -----------------------------------------
+        pxProfMark("chromaDN", image)
         let chromaAmt = Float((UserDefaults.standard.object(forKey: "pxSharpChroma") as? Double ?? 0.0)
                               * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0))
         if !bypassNow, chromaAmt > 0.01, let ck = chromaKernelInstance(),
@@ -3086,6 +3118,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
 
         // Kanten-Rekonstruktion (Deconvolution) bei 1080p, vor der Skalierung.
+        pxProfMark("clear", image)
         let deconvAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpDeconv") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0)))
         // Deconvolution läuft IMMER — sie ist die Stufe mit dem größten
         // Texturgewinn (+44 % gemessen). Sie wird von keiner Lastregel
@@ -3103,6 +3136,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Klarheit (lokaler Kontrast) bei Quellauflösung: eine 8-px-Wirkung auf
         // dem Panel ist bei 1080p eine 12-px-Wirkung — sichtbar identisch, aber
         // ein Drittel der Pixel.
+        pxProfMark("deconv", image)
         let clarityAmt = Float(bypassNow ? 0 : ((UserDefaults.standard.object(forKey: "pxSharpClarity") as? Double ?? 0.0) * min(max((UserDefaults.standard.object(forKey: "pxSharpMaster") as? Double) ?? 1.0, 0.0), 1.0) * Double(thermalScale())))
         if clarityAmt > 0.02, let lc = diffKernelInstance() {
             let small = image.transformed(by: CGAffineTransform(scaleX: 0.125, y: 0.125))
@@ -3140,6 +3174,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         if colorEngine && !hdrActive && !bypassNow {
             image = applyColorEngine(image)
         }
+        pxProfMark("color", image)
         // Messung NACH der Farb-LUT: sonst sieht der Spitzlichtschutz die
         // Aufhellung durch LUT und Bereichsspreizung nicht -- und genau die
         // hat das Bild ueberzogen.
@@ -3156,8 +3191,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             lastClipShare *= 0.90
         }
 
-        let profiling = UserDefaults.standard.bool(forKey: "pxSharpProfile")
-        if profiling { profPrefixes = [("1080p", image)] }
+        pxProfMark("1080p", image)
         let sx = target.width / src.width
         let sy = target.height / src.height
         let pixelPerfect = UserDefaults.standard.object(forKey: "pxSharpPixelPerfect") as? Bool ?? false
@@ -3341,6 +3375,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                               arguments: [image, NSNumber(value: 0.0024)]) {
             image = out
         }
+        pxProfMark("dither", image)
 
         let outSpace: CGColorSpace
         if hdrActive, let pq = CGColorSpace(name: CGColorSpace.itur_2100_PQ) {
@@ -3428,7 +3463,13 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 }
                 cb.present(drawable)
                 cb.addCompletedHandler { [weak self] _ in
-                    PXScene.shared.noteRenderMs((CACurrentMediaTime() - renderStartMFX) * 1000.0)
+                    // Build 2010: echte GPU-Zeit (gpuStart/gpuEnd) statt Wanduhr.
+                    // Wanduhr enthielt das Warten auf den Bildschirm-Takt und
+                    // liess die Lastregel das Ziel selbst herunterregeln.
+                    let g0 = cb.gpuStartTime, g1 = cb.gpuEndTime
+                    let ms = g1 > g0 ? (g1 - g0) * 1000.0
+                                      : (CACurrentMediaTime() - renderStartMFX) * 1000.0
+                    PXScene.shared.noteRenderMs(ms)
                     // Probe asynchron im Completed-Handler: kein waitUntilCompleted()
                     // mehr, damit die CPU nicht nach jedem Frame auf die GPU wartet.
                     // /shot bekommt das Bild, sobald die GPU fertig ist.
@@ -3449,6 +3490,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 cb.commit()
                 noteFrameRendered()
                 runMemGuard()
+                if UserDefaults.standard.bool(forKey: "pxSharpProfile") {
+                    measureProfile(space: outSpace)
+                }
                 return
             }
         }
@@ -3483,7 +3527,6 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             profPrefixes.append(("fertig", composited))
             measureProfile(space: outSpace)
         }
-
         if mfxStateFlag != false {
             mfxStateFlag = false
             UserDefaults.standard.set("0", forKey: "pxSharpMfxActive")
@@ -3497,7 +3540,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
 
         let renderStart = CACurrentMediaTime()
         cb.addCompletedHandler { _ in
-            PXScene.shared.noteRenderMs((CACurrentMediaTime() - renderStart) * 1000.0)
+            let g0 = cb.gpuStartTime, g1 = cb.gpuEndTime
+            let ms = g1 > g0 ? (g1 - g0) * 1000.0
+                              : (CACurrentMediaTime() - renderStart) * 1000.0
+            PXScene.shared.noteRenderMs(ms)
         }
         cb.present(drawable)
         cb.commit()
@@ -4128,6 +4174,9 @@ final class PXTuner {
         o["pxLutBuilds"] = String(UserDefaults.standard.integer(forKey: "pxLutBuildsTotal"))
         o["pxFill"] = UserDefaults.standard.bool(forKey: "pxSharpFill") ? "an" : "aus"
         o["pxProfile"] = UserDefaults.standard.string(forKey: "pxProfileText") ?? "-"
+        // Build 2010: echte GPU-Zeit (ohne Bildschirm-Warten) und CPU-Zeit pro Bild.
+        o["pxGpuMs"] = String(format: "%.2f", PXScene.shared.renderMs)
+        o["pxDrawMs"] = UserDefaults.standard.string(forKey: "pxDrawMs") ?? "-"
         let mbpsNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
         let gateOn = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
         let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
