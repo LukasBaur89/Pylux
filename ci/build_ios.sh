@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2010 ] 2>/dev/null; then BUILD_NUM=2010; fi
+if [ "$BUILD_NUM" -lt 2011 ] 2>/dev/null; then BUILD_NUM=2011; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -139,6 +139,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     private var commandQueue: MTLCommandQueue?
     private let bufferLock = NSLock()
     private var latestBuffer: CVPixelBuffer?
+    // Build 2011: kleiner Bildpuffer gegen Ausreisser im Netz/Decode.
+    // Bisher wurde immer nur das NEUESTE Bild gezeigt: kamen zwei Bilder
+    // zwischen zwei Takten an, fiel das aeltere weg (gemessen: 60 an, 49
+    // gezeigt). Die Warteschlange zeigt jedes Bild genau einmal.
+    private var frameQueue: [CVPixelBuffer] = []
+    private var queueDropped = 0
     private var currentMode: DisplayMode = .fit
     private var loggedFrame = false
     static func pxFootprintMB() -> Double {
@@ -203,6 +209,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     /// gezeichnet wird auf jedem zweiten Takt).
     private var tickParity: Int = 0
     private var lastPacedDraw: CFTimeInterval = 0
+    // Build 2011: Takt-Diagnose (wie oft der Display-Link tickt / leer bleibt).
+    private var tickCount = 0
+    private var idleTicks = 0
+    private var tickWindowStart = CACurrentMediaTime()
     private var lutData: Data?
     private var lutKey: String = ""
     private var colorLUTData: Data?
@@ -484,6 +494,17 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         }
         bufferLock.lock()
         latestBuffer = frameToUse
+        let depth = UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 1
+        if depth > 0 {
+            frameQueue.append(frameToUse)
+            // Nie mehr als depth+1 halten (kein Aufstauen, max. ~33 ms).
+            while frameQueue.count > depth + 1 {
+                frameQueue.removeFirst()
+                queueDropped += 1
+            }
+        } else if !frameQueue.isEmpty {
+            frameQueue.removeAll(keepingCapacity: true)
+        }
         bufferLock.unlock()
         let hdr = pixelBufferIsHDR(pixelBuffer)
         if !hdrLocked, hdr != hdrActive {            // Hysterese: erst nach 8 gleichen Frames umschalten, sonst flackert
@@ -581,6 +602,15 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     }
 
     @objc private func displayTick() {
+        tickCount += 1
+        let tickNow = CACurrentMediaTime()
+        if tickNow - tickWindowStart >= 1.0 {
+            UserDefaults.standard.set(String(tickCount), forKey: "pxTick")
+            UserDefaults.standard.set(String(idleTicks), forKey: "pxIdle")
+            tickCount = 0
+            idleTicks = 0
+            tickWindowStart = tickNow
+        }
         // ---- Ausgabe-Takt -------------------------------------------------
         // Zwei Betriebsarten:
         //  A) Panel auf 60 Hz zwingen (alt): das iPad schaltet ProMotion auf
@@ -642,7 +672,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         if wantFill != (currentMode == .zoom) {
             updateVideoGravity(wantFill ? .zoom : .fit)
         }
-        guard needsPresent else { return }
+        guard needsPresent else { idleTicks += 1; return }
         needsPresent = false
         metalView?.draw()
     }
@@ -2493,7 +2523,8 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         var ergebnis: [String: Double] = [:]
         var vorher = 0.0
         for (name, img) in profPrefixes {
-            let w = Int(img.extent.width), h = Int(img.extent.height)
+            let ext = img.extent
+            let w = Int(ext.width), h = Int(ext.height)
             guard w > 8, h > 8 else { continue }
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
                                                              width: w, height: h, mipmapped: false)
@@ -2502,7 +2533,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             guard let tex = device.makeTexture(descriptor: d),
                   let cb = q.makeCommandBuffer() else { continue }
             let rect = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
-            ctx.render(img.cropped(to: rect), to: tex, commandBuffer: cb,
+            // Bild auf Nullpunkt legen: nach Skalierung/Verschiebung liegt der
+            // Ursprung nicht mehr bei (0,0) -- sonst wurde ein leerer Bereich
+            // gerendert und alle Stufen meldeten 0,0 ms.
+            let norm = img.transformed(by: CGAffineTransform(translationX: -ext.origin.x,
+                                                             y: -ext.origin.y))
+            ctx.render(norm.cropped(to: rect), to: tex, commandBuffer: cb,
                        bounds: rect, colorSpace: space)
             cb.commit()
             cb.waitUntilCompleted()
@@ -2656,7 +2692,13 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
               let cb = commandQueue?.makeCommandBuffer() else { return }
 
         bufferLock.lock()
-        let pb = latestBuffer
+        let depth = UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 1
+        let pb: CVPixelBuffer?
+        if depth > 0 {
+            pb = frameQueue.isEmpty ? nil : frameQueue.removeFirst()
+        } else {
+            pb = latestBuffer
+        }
         bufferLock.unlock()
         guard let pixelBuffer0 = pb else { return }
         // PXProbe-Debugpfad entfernt (Build 2008): kein per-Frame-Probe mehr.
@@ -4177,6 +4219,10 @@ final class PXTuner {
         // Build 2010: echte GPU-Zeit (ohne Bildschirm-Warten) und CPU-Zeit pro Bild.
         o["pxGpuMs"] = String(format: "%.2f", PXScene.shared.renderMs)
         o["pxDrawMs"] = UserDefaults.standard.string(forKey: "pxDrawMs") ?? "-"
+        o["pxTick"] = UserDefaults.standard.string(forKey: "pxTick") ?? "-"
+        o["pxIdle"] = UserDefaults.standard.string(forKey: "pxIdle") ?? "-"
+        o["pxBuf"] = String(UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 1)
+        o["pxQueueDrop"] = String(queueDropped)
         let mbpsNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
         let gateOn = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
         let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
