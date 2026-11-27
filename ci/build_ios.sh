@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2007 ] 2>/dev/null; then BUILD_NUM=2007; fi
+if [ "$BUILD_NUM" -lt 2008 ] 2>/dev/null; then BUILD_NUM=2008; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -2635,14 +2635,14 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         let pb = latestBuffer
         bufferLock.unlock()
         guard let pixelBuffer0 = pb else { return }
-        PXProbe.shared.note(pixelBuffer0)
+        // PXProbe-Debugpfad entfernt (Build 2008): kein per-Frame-Probe mehr.
         // Stream laeuft -> Startzaehler zuruecksetzen (kein Safe-Mode noetig).
         if UserDefaults.standard.integer(forKey: "pxLaunchCount") > 0 {
             UserDefaults.standard.set(0, forKey: "pxLaunchCount")
         }
         // Szenenanalyse fuer die Automatik (Belichtung, Rauschen).
-        PXScene.shared.analyze(PXProbe.shared.frozenBuffer ?? pixelBuffer0)
-        let pixelBuffer = PXProbe.shared.frozenBuffer ?? pixelBuffer0
+        PXScene.shared.analyze(pixelBuffer0)
+        let pixelBuffer = pixelBuffer0
 
         let target = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         guard target.width > 0, target.height > 0 else { return }
@@ -3445,8 +3445,6 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                         outCI = outCI.transformed(by: CGAffineTransform(translationX: outCI.extent.width, y: 0)
                             .scaledBy(x: -1, y: 1))
                     }
-                    PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
-                                       width: outW, height: outH)
                 }
                 cb.commit()
                 noteFrameRendered()
@@ -3491,10 +3489,6 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             UserDefaults.standard.set("0", forKey: "pxSharpMfxActive")
         }
         let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
-        if let c = ctx, ((UserDefaults.standard.object(forKey: "pxSharpProbeLive") as? NSNumber)?.boolValue ?? false) {
-            PXProbe.shared.set(composited, context: c, space: outSpace,
-                               width: Int(target.width), height: Int(target.height))
-        }
         ctx?.render(composited,
                     to: drawable.texture,
                     commandBuffer: cb,
@@ -4071,24 +4065,6 @@ final class PXTuner {
         }
         if path.hasPrefix("/bwlog") {
             return UserDefaults.standard.string(forKey: "pxBwLog") ?? ""
-        }
-        if path.hasPrefix("/freeze") {
-            let on = val("on") == "1"
-            PXProbe.shared.freeze(on)
-            return "{\"ok\":true,\"frozen\":\(on)}"
-        }
-        if path.hasPrefix("/probe") {
-            return PXProbe.shared.probe()
-        }
-        if path.hasPrefix("/shot") {
-            // Aktuelles Bild als JPEG (base64). ?w=2732 liefert volle Panelbreite
-            // fuer 1:1-Ausschnitte. ?fmt=png liefert verlustfrei (fuer Messungen).
-            let w = Int(val("w") ?? "") ?? 1200
-            let width = min(max(w, 200), 2732)
-            if val("fmt") == "png" {
-                return PXProbe.shared.shotPNG(maxW: min(width, 1920))
-            }
-            return PXProbe.shared.shotJPEG(maxW: width)
         }
         if path.hasPrefix("/state") {
             var o: [String: Any] = [:]
