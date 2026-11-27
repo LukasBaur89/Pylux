@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2011 ] 2>/dev/null; then BUILD_NUM=2011; fi
+if [ "$BUILD_NUM" -lt 2012 ] 2>/dev/null; then BUILD_NUM=2012; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -2504,6 +2504,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                 UserDefaults.standard.set(String(format: "%.2f", drawMsSum / Double(drawMsCount)),
                                           forKey: "pxDrawMs")
             }
+            UserDefaults.standard.set(String(queueDropped), forKey: "pxQueueDrop")
             drawMsSum = 0
             drawMsCount = 0
             frameCount = 0
@@ -4222,7 +4223,7 @@ final class PXTuner {
         o["pxTick"] = UserDefaults.standard.string(forKey: "pxTick") ?? "-"
         o["pxIdle"] = UserDefaults.standard.string(forKey: "pxIdle") ?? "-"
         o["pxBuf"] = String(UserDefaults.standard.object(forKey: "pxSharpBuffer") as? Int ?? 1)
-        o["pxQueueDrop"] = String(queueDropped)
+        o["pxQueueDrop"] = UserDefaults.standard.string(forKey: "pxQueueDrop") ?? "-"
         let mbpsNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0.0
         let gateOn = (UserDefaults.standard.object(forKey: "pxSharpAiAutoBitrate") as? NSNumber)?.boolValue ?? true
         let gateLimit = (UserDefaults.standard.object(forKey: "pxSharpAiGateMbit") as? Double) ?? 18.0
