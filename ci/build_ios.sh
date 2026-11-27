@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2006 ] 2>/dev/null; then BUILD_NUM=2006; fi
+if [ "$BUILD_NUM" -lt 2007 ] 2>/dev/null; then BUILD_NUM=2007; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -5789,7 +5789,7 @@ struct SharpnessRow: View {
             "pxSharpGamma": 1.0,
             "pxSharpBlack": 0.0,
             "pxSharpRange": 0,
-            "pxSharpTexDepth": 0.20,
+            "pxSharpTexDepth": 0.0,
             "pxSharpLocalTone": 0.0,
             "pxSharpHueSat": 0.0,
             "pxSharpCastFix": 0.0,
@@ -5798,7 +5798,7 @@ struct SharpnessRow: View {
             "pxSharpClearImage": 0.30,
             "pxSharpToneMap": 0,
             "pxSharpLocalDim": 0.0,
-            "pxSharpBrightness": 0.37,
+            "pxSharpBrightness": 0.40,
             "pxSharpShadow": 0.12,
             "pxSharpTvBrightness": false,
             "pxSharpChroma": 0.0,
@@ -9324,6 +9324,22 @@ elif "response.rp_prohibit && ctrl->session->display_sink.cantdisplay_cb" in s:
 else:
     raise SystemExit("rp-guard: ANKER FEHLT")
 RP_GUARD_EOF
+
+echo "--- PSN/LAN-Guard ---"
+python3 - <<'PSN_GUARD_EOF'
+p = "ios/Pylux/Services/StreamSession.swift"
+s = open(p, encoding="utf-8").read()
+old = '    var isPsnConnection: Bool {\n        guard let duid = duid, !duid.isEmpty,\n              let token = psnToken, !token.isEmpty else { return false }\n        return true\n    }'
+new = '    var isPsnConnection: Bool {\n        // Lokaler Host (IP) hat Vorrang: LAN statt PSN-Holepunch.\n        if !host.isEmpty { return false }\n        guard let duid = duid, !duid.isEmpty,\n              let token = psnToken, !token.isEmpty else { return false }\n        return true\n    }'
+if old in s:
+    s = s.replace(old, new, 1)
+    open(p, "w", encoding="utf-8").write(s)
+    print("psn-local-guard: gesetzt")
+elif "Lokaler Host (IP) hat Vorrang" in s:
+    print("psn-local-guard: schon vorhanden")
+else:
+    raise SystemExit("psn-local-guard: ANKER FEHLT")
+PSN_GUARD_EOF
 
 echo "--- Baue chiaki-lib ---"
 cd ios
