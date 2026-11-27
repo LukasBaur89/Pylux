@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2004 ] 2>/dev/null; then BUILD_NUM=2004; fi
+if [ "$BUILD_NUM" -lt 2005 ] 2>/dev/null; then BUILD_NUM=2005; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -4981,6 +4981,7 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpScaler") private var scaler: Int = 0
     @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
+    @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @AppStorage("pxAudioEQ0") private var eq0: Double = 7.5
     @AppStorage("pxAudioEQ1") private var eq1: Double = 5.5
     @AppStorage("pxAudioEQ2") private var eq2: Double = -1.0
@@ -5685,6 +5686,9 @@ struct SharpnessRow: View {
             Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. „Sony Spiel“ hebt Tiefbass und Präsenz an, damit Schritte und Schüsse ortbar sind.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            sliderRow("Spiel-Lautstärke (Mix mit Spotify)", value: $audioGain, range: 0.25...2.0, step: 0.05,
+                      display: String(format: "%.0f %%", audioGain * 100),
+                      rule: "Regelt nur den Spielton: 25 % = deutlich leiser, 100 % = original, 200 % = lauter. Spotify läuft separat über die Systemlautstärke.")
             sliderRow("3D-Weite (Raumklang)", value: $audio3D, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", audio3D * 100),
                       rule: "Je höher, desto breiter die Bühne (Mitten/Seiten-Verbreiterung mit kurzer Laufzeitverzögerung). Über 60 % wird es phasig.")
@@ -7096,6 +7100,7 @@ typedef struct {
     float b0[EQ_BANDS], b1[EQ_BANDS], b2[EQ_BANDS], a1[EQ_BANDS], a2[EQ_BANDS];
     float width;
     float preGain;      // Headroom gegen Clipping bei Bass-Boost
+    float userGain;     // Nutzer-Lautstaerke des Spieltons (pxAudioGain, 0.25..2.0)
     float bassAlpha;    // Low-Pass fuer Bass-Mono (200 Hz)
     float hpB0, hpB1, hpB2, hpA1, hpA2; // Hochpass 35 Hz gegen Sub-Rumpe
     uint32_t channels;
@@ -7212,11 +7217,17 @@ static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
     if (w < 0.0f) w = 0.0f;
     if (w > 1.0f) w = 1.0f;
     if (fabsf(w - a->cfg.width) > 0.005f) changed = YES;
+    float ug = (float)[d doubleForKey:@"pxAudioGain"];
+    if (ug < 0.05f) ug = 1.0f;
+    if (ug < 0.25f) ug = 0.25f;
+    if (ug > 2.0f) ug = 2.0f;
+    if (fabsf(ug - a->cfg.userGain) > 0.005f) changed = YES;
     if (!changed) return;
 
     pthread_mutex_lock(&a->mtx);
     for (int i = 0; i < EQ_BANDS; i++) a->cfgDb[i] = db[i];
     a->cfg.width = w;
+    a->cfg.userGain = ug;
     eq_rebuild_locked(a);
     pthread_mutex_unlock(&a->mtx);
 }
@@ -7329,6 +7340,8 @@ static void audio_process(PyluxChiakiAudioOutput *a, int16_t *s, size_t frames, 
     float widthGain = 1.0f + cfg->width * 1.5f; // 1.0 .. 2.5
 
     float pre = cfg->preGain > 0.01f ? cfg->preGain : 1.0f;
+    float ug = cfg->userGain > 0.01f ? cfg->userGain : 1.0f;
+    pre *= ug;
     float alpha = cfg->bassAlpha;
     if (alpha <= 0.0f || alpha > 1.0f) alpha = 0.02f;
 
