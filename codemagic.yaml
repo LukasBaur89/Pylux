@@ -1,4 +1,4 @@
-﻿workflows:
+workflows:
   pxsharp:
     name: PXSharp
     instance_type: mac_mini_m2
@@ -8,7 +8,7 @@
       cancel_previous_builds: true
     environment:
       vars:
-        BUILD_NUM: "2009"
+        BUILD_NUM: "2010"
       xcode: latest
     scripts:
       - name: Werkzeuge
