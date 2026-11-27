@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2014 ] 2>/dev/null; then BUILD_NUM=2014; fi
+if [ "$BUILD_NUM" -lt 2015 ] 2>/dev/null; then BUILD_NUM=2015; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -5077,6 +5077,8 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpScaler") private var scaler: Int = 0
     @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
+    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.35
+    @AppStorage("pxAudioBass") private var audioBass: Double = 0.40
     @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @AppStorage("pxAudioEQ0") private var eq0: Double = 7.5
     @AppStorage("pxAudioEQ1") private var eq1: Double = 5.5
@@ -5785,6 +5787,12 @@ struct SharpnessRow: View {
             sliderRow("Spiel-Lautstärke (Mix mit Spotify)", value: $audioGain, range: 0.25...2.0, step: 0.05,
                       display: String(format: "%.0f %%", audioGain * 100),
                       rule: "Regelt nur den Spielton: 25 % = deutlich leiser, 100 % = original, 200 % = lauter. Spotify läuft separat über die Systemlautstärke.")
+            sliderRow("Raum (mittendrin)", value: $audioSpace, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", audioSpace * 100),
+                      rule: "Verzoegert den Seitenanteil um ~9 ms: Klang von ringsum, Stimmen bleiben vorn. 30-45 % natuerlich, ueber 70 % hallig.")
+            sliderRow("Bass-Druck (Harmonik)", value: $audioBass, range: 0...1, step: 0.05,
+                      display: String(format: "%.0f %%", audioBass * 100),
+                      rule: "Erzeugt aus dem Mono-Bass die 3. Oberwelle: auf iPad-Lautsprechern hoerbarer Druck, der Bass bleibt mono.")
             sliderRow("3D-Weite (Raumklang)", value: $audio3D, range: 0...1, step: 0.05,
                       display: String(format: "%.0f %%", audio3D * 100),
                       rule: "Je höher, desto breiter die Bühne (Mitten/Seiten-Verbreiterung mit kurzer Laufzeitverzögerung). Über 60 % wird es phasig.")
@@ -6281,6 +6289,8 @@ struct PXSettingsClean: View {
     @AppStorage("pxAudioEQ3") private var eq3: Double = 4.0
     @AppStorage("pxAudioEQ4") private var eq4: Double = 9.5
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
+    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.35
+    @AppStorage("pxAudioBass") private var audioBass: Double = 0.40
     @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @State private var requestedRes: String = "-"
 
@@ -6491,6 +6501,10 @@ struct PXSettingsClean: View {
             pxSlider("Spiel-Lautstärke (Mix mit Spotify)", $audioGain, 0.25...2.0,
                      String(format: "%.0f %%", audioGain * 100),
                      "Regelt nur den Spielton: 25 % leiser, 100 % original, 200 % lauter. Spotify läuft separat über die Systemlautstärke.")
+            pxSlider("Raum (mittendrin)", $audioSpace, 0...1, pct(audioSpace),
+                     "Seitenanteil ~9 ms verzoegert: Klang von ringsum, Stimmen bleiben vorn. 30-45 % natuerlich.")
+            pxSlider("Bass-Druck (Harmonik)", $audioBass, 0...1, pct(audioBass),
+                     "3. Oberwelle des Mono-Basses: auf iPad-Lautsprechern hoerbarer Druck.")
             pxSlider("3D-Weite", $audio3D, 0...0.6, pct(audio3D),
                      "Stereo-Verbreiterung. Der Bass bleibt mono, damit nichts hohl wird.")
 
@@ -7199,6 +7213,8 @@ static os_log_t g_audio_log;
 typedef struct {
     float b0[EQ_BANDS], b1[EQ_BANDS], b2[EQ_BANDS], a1[EQ_BANDS], a2[EQ_BANDS];
     float width;
+    float space;        // 0..1 Haas/Raum: Seitenanteil verzoegert zumischen
+    float bass;         // 0..1 Bass-Harmonik (auf kleinen Speakern hoerbar)
     float preGain;      // Headroom gegen Clipping bei Bass-Boost
     float userGain;     // Nutzer-Lautstaerke des Spieltons (pxAudioGain, 0.25..2.0)
     float bassAlpha;    // Low-Pass fuer Bass-Mono (200 Hz)
@@ -7225,6 +7241,9 @@ typedef struct PyluxChiakiAudioOutput {
     float z2[EQ_MAX_CH][EQ_BANDS];
     float hpz1[EQ_MAX_CH], hpz2[EQ_MAX_CH]; // Hochpass-Zustand
     float lpL, lpR; // Bass-Mono-Tiefpass (nur audio thread)
+    float sideBuf[1024]; // Haas-Verzoegerung fuer den Seitenanteil
+    int sidePos;
+    int sideLen;
 } PyluxChiakiAudioOutput;
 
 // Audio-Unterbrechung (z. B. Spotify uebernimmt): Queue pausieren und danach
@@ -7317,6 +7336,18 @@ static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
     if (w < 0.0f) w = 0.0f;
     if (w > 1.0f) w = 1.0f;
     if (fabsf(w - a->cfg.width) > 0.005f) changed = YES;
+    // 3D-Stufe: Raum (Haas) und Bass-Harmonik. Fehlt der Schluessel, bleibt
+    // die Stufe aus -- das bisherige Klangbild aendert sich also nicht.
+    NSNumber *spN = [d objectForKey:@"pxAudioSpace"];
+    float sp = spN ? (float)spN.doubleValue : 0.35f;
+    if (sp < 0.0f) sp = 0.0f;
+    if (sp > 1.0f) sp = 1.0f;
+    if (fabsf(sp - a->cfg.space) > 0.005f) changed = YES;
+    NSNumber *bsN = [d objectForKey:@"pxAudioBass"];
+    float bs = bsN ? (float)bsN.doubleValue : 0.40f;
+    if (bs < 0.0f) bs = 0.0f;
+    if (bs > 1.0f) bs = 1.0f;
+    if (fabsf(bs - a->cfg.bass) > 0.005f) changed = YES;
     float ug = (float)[d doubleForKey:@"pxAudioGain"];
     if (ug < 0.05f) ug = 1.0f;
     if (ug < 0.25f) ug = 0.25f;
@@ -7327,6 +7358,8 @@ static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
     pthread_mutex_lock(&a->mtx);
     for (int i = 0; i < EQ_BANDS; i++) a->cfgDb[i] = db[i];
     a->cfg.width = w;
+    a->cfg.space = sp;
+    a->cfg.bass = bs;
     a->cfg.userGain = ug;
     eq_rebuild_locked(a);
     pthread_mutex_unlock(&a->mtx);
@@ -7469,6 +7502,27 @@ static void audio_process(PyluxChiakiAudioOutput *a, int16_t *s, size_t frames, 
             float Sh = (highL - highR) * 0.5f;
             L = lowM + Mh + Sh * widthGain;
             R = lowM + Mh - Sh * widthGain;
+            // Raum (Haas): Seitenanteil ~9 ms verzoegert zumischen. Der
+            // Vorrang-Effekt haelt Stimmen vorn, der Rest kommt von "ueberall".
+            if (a->sideLen > 0) {
+                float sd = a->sideBuf[a->sidePos];
+                a->sideBuf[a->sidePos] = Sh;
+                if (++a->sidePos >= a->sideLen) a->sidePos = 0;
+                if (cfg->space > 0.005f) {
+                    float add = sd * cfg->space * 0.85f;
+                    L += add;
+                    R -= add;
+                }
+            }
+            // Bass-Harmonik: aus dem Mono-Bass die 3. Oberwelle. Der Grundton
+            // ist auf den iPad-Lautsprechern fast unhörbar, die Oberwelle
+            // macht ihn hörbar ("Druck"), ohne den Bass wieder stereo/phasig
+            // zu machen.
+            if (cfg->bass > 0.005f) {
+                float bh = lowM * lowM * lowM * 8.0f * cfg->bass;
+                L += bh;
+                R += bh;
+            }
             L = softclip(L);
             R = softclip(R);
             s[n * ch] = clamp16(L);
@@ -7552,6 +7606,12 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
 
     ao->channels = channels;
     ao->rate = rate;
+    // Haas-Laenge: ~9 ms bei der aktuellen Samplerate.
+    ao->sideLen = (int)(rate * 0.009);
+    if (ao->sideLen < 8) ao->sideLen = 8;
+    if (ao->sideLen > 1023) ao->sideLen = 1023;
+    ao->sidePos = 0;
+    memset(ao->sideBuf, 0, sizeof(ao->sideBuf));
 
     run_on_main(^{
         audio_teardown(ao);
