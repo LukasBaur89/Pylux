@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2015 ] 2>/dev/null; then BUILD_NUM=2015; fi
+if [ "$BUILD_NUM" -lt 2016 ] 2>/dev/null; then BUILD_NUM=2016; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -5077,8 +5077,8 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpScaler") private var scaler: Int = 0
     @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
-    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.35
-    @AppStorage("pxAudioBass") private var audioBass: Double = 0.40
+    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.55
+    @AppStorage("pxAudioBass") private var audioBass: Double = 0.35
     @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @AppStorage("pxAudioEQ0") private var eq0: Double = 7.5
     @AppStorage("pxAudioEQ1") private var eq1: Double = 5.5
@@ -6289,8 +6289,8 @@ struct PXSettingsClean: View {
     @AppStorage("pxAudioEQ3") private var eq3: Double = 4.0
     @AppStorage("pxAudioEQ4") private var eq4: Double = 9.5
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
-    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.35
-    @AppStorage("pxAudioBass") private var audioBass: Double = 0.40
+    @AppStorage("pxAudioSpace") private var audioSpace: Double = 0.55
+    @AppStorage("pxAudioBass") private var audioBass: Double = 0.35
     @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @State private var requestedRes: String = "-"
 
@@ -7244,6 +7244,10 @@ typedef struct PyluxChiakiAudioOutput {
     float sideBuf[1024]; // Haas-Verzoegerung fuer den Seitenanteil
     int sidePos;
     int sideLen;
+    float sideBuf2[2048]; // zweite, laengere Reflexion (~22 ms)
+    int sidePos2;
+    int sideLen2;
+    float dampZ;          // Daempfung der Reflexionen
 } PyluxChiakiAudioOutput;
 
 // Audio-Unterbrechung (z. B. Spotify uebernimmt): Queue pausieren und danach
@@ -7339,12 +7343,12 @@ static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
     // 3D-Stufe: Raum (Haas) und Bass-Harmonik. Fehlt der Schluessel, bleibt
     // die Stufe aus -- das bisherige Klangbild aendert sich also nicht.
     NSNumber *spN = [d objectForKey:@"pxAudioSpace"];
-    float sp = spN ? (float)spN.doubleValue : 0.35f;
+    float sp = spN ? (float)spN.doubleValue : 0.55f;
     if (sp < 0.0f) sp = 0.0f;
     if (sp > 1.0f) sp = 1.0f;
     if (fabsf(sp - a->cfg.space) > 0.005f) changed = YES;
     NSNumber *bsN = [d objectForKey:@"pxAudioBass"];
-    float bs = bsN ? (float)bsN.doubleValue : 0.40f;
+    float bs = bsN ? (float)bsN.doubleValue : 0.35f;
     if (bs < 0.0f) bs = 0.0f;
     if (bs > 1.0f) bs = 1.0f;
     if (fabsf(bs - a->cfg.bass) > 0.005f) changed = YES;
@@ -7502,24 +7506,26 @@ static void audio_process(PyluxChiakiAudioOutput *a, int16_t *s, size_t frames, 
             float Sh = (highL - highR) * 0.5f;
             L = lowM + Mh + Sh * widthGain;
             R = lowM + Mh - Sh * widthGain;
-            // Raum (Haas): Seitenanteil ~9 ms verzoegert zumischen. Der
-            // Vorrang-Effekt haelt Stimmen vorn, der Rest kommt von "ueberall".
+            // Raum: zwei Reflexionen (9 ms + 22 ms), die zweite gedaempft.
+            // Der Vorrang-Effekt haelt Stimmen vorn, der Rest kommt von ringsum.
             if (a->sideLen > 0) {
                 float sd = a->sideBuf[a->sidePos];
                 a->sideBuf[a->sidePos] = Sh;
                 if (++a->sidePos >= a->sideLen) a->sidePos = 0;
+                float sd2 = a->sideBuf2[a->sidePos2];
+                a->sideBuf2[a->sidePos2] = Sh;
+                if (++a->sidePos2 >= a->sideLen2) a->sidePos2 = 0;
                 if (cfg->space > 0.005f) {
-                    float add = sd * cfg->space * 0.85f;
+                    a->dampZ += 0.35f * (sd2 - a->dampZ);
+                    float add = (sd * 0.85f + a->dampZ * 0.55f) * cfg->space;
                     L += add;
                     R -= add;
                 }
             }
-            // Bass-Harmonik: aus dem Mono-Bass die 3. Oberwelle. Der Grundton
-            // ist auf den iPad-Lautsprechern fast unhörbar, die Oberwelle
-            // macht ihn hörbar ("Druck"), ohne den Bass wieder stereo/phasig
-            // zu machen.
+            // Bass-Harmonik: aus dem Mono-Bass die 3. Oberwelle. Bewusst
+            // schlank gehalten -- zu viel davon klingt "röhrig" (Kiste).
             if (cfg->bass > 0.005f) {
-                float bh = lowM * lowM * lowM * 8.0f * cfg->bass;
+                float bh = lowM * lowM * lowM * 4.5f * cfg->bass;
                 L += bh;
                 R += bh;
             }
@@ -7612,6 +7618,13 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
     if (ao->sideLen > 1023) ao->sideLen = 1023;
     ao->sidePos = 0;
     memset(ao->sideBuf, 0, sizeof(ao->sideBuf));
+    // Zweite Reflexion: ~22 ms, dunkler (Daempfung im Callback).
+    ao->sideLen2 = (int)(rate * 0.022);
+    if (ao->sideLen2 < 16) ao->sideLen2 = 16;
+    if (ao->sideLen2 > 2047) ao->sideLen2 = 2047;
+    ao->sidePos2 = 0;
+    ao->dampZ = 0.0f;
+    memset(ao->sideBuf2, 0, sizeof(ao->sideBuf2));
 
     run_on_main(^{
         audio_teardown(ao);
