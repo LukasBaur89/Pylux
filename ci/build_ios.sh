@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2013 ] 2>/dev/null; then BUILD_NUM=2013; fi
+if [ "$BUILD_NUM" -lt 2014 ] 2>/dev/null; then BUILD_NUM=2014; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -7564,7 +7564,7 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
         // MixWithOthers: Spotify darf parallel weiterlaufen (Spielton + Musik).
         // pxAudioMix (Default an) erlaubt das Abschalten per /set.
         NSNumber *mixNum = [[NSUserDefaults standardUserDefaults] objectForKey:@"pxAudioMix"];
-        BOOL mix = mixNum ? mixNum.boolValue : NO;
+        BOOL mix = mixNum ? mixNum.boolValue : YES;
         AVAudioSessionCategoryOptions opts = mix ? AVAudioSessionCategoryOptionMixWithOthers : 0;
         if (![session setCategory:AVAudioSessionCategoryPlayback withOptions:opts error:&nserr]) {
             os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] setCategory failed: %{public}@", nserr.localizedDescription);
