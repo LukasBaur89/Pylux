@@ -8,7 +8,7 @@
       cancel_previous_builds: true
     environment:
       vars:
-        BUILD_NUM: "2003"
+        BUILD_NUM: "2004"
       xcode: latest
     scripts:
       - name: Werkzeuge
