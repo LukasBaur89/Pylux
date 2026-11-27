@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2002 ] 2>/dev/null; then BUILD_NUM=2002; fi
+if [ "$BUILD_NUM" -lt 2003 ] 2>/dev/null; then BUILD_NUM=2003; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -5785,16 +5785,16 @@ struct SharpnessRow: View {
             "pxSharpGamma": 1.0,
             "pxSharpBlack": 0.0,
             "pxSharpRange": 0,
-            "pxSharpTexDepth": 0.0,
+            "pxSharpTexDepth": 0.20,
             "pxSharpLocalTone": 0.0,
             "pxSharpHueSat": 0.0,
             "pxSharpCastFix": 0.0,
             "pxSharpDeblock": 0.14,
             "pxSharpDeband": 0.30,
-            "pxSharpClearImage": 0.25,
+            "pxSharpClearImage": 0.30,
             "pxSharpToneMap": 0,
             "pxSharpLocalDim": 0.0,
-            "pxSharpBrightness": 0.40,
+            "pxSharpBrightness": 0.37,
             "pxSharpShadow": 0.12,
             "pxSharpTvBrightness": false,
             "pxSharpChroma": 0.0,
@@ -9289,6 +9289,22 @@ if [ ! -f ios.toolchain.cmake ]; then
     https://raw.githubusercontent.com/leetal/ios-cmake/master/ios.toolchain.cmake
 fi
 cd ..
+
+echo "--- RP-Prohibit-Guard ---"
+python3 - <<'RP_GUARD_EOF'
+p = "lib/src/ctrl.c"
+s = open(p, encoding="utf-8").read()
+old = "\tif(response.rp_prohibit)\n\t\tctrl->session->display_sink.cantdisplay_cb(ctrl->session->display_sink.user, true);"
+new = "\tif(response.rp_prohibit && ctrl->session->display_sink.cantdisplay_cb)\n\t\tctrl->session->display_sink.cantdisplay_cb(ctrl->session->display_sink.user, true);"
+if old in s:
+    s = s.replace(old, new, 1)
+    open(p, "w", encoding="utf-8").write(s)
+    print("rp-guard: gesetzt")
+elif "response.rp_prohibit && ctrl->session->display_sink.cantdisplay_cb" in s:
+    print("rp-guard: schon vorhanden")
+else:
+    raise SystemExit("rp-guard: ANKER FEHLT")
+RP_GUARD_EOF
 
 echo "--- Baue chiaki-lib ---"
 cd ios
