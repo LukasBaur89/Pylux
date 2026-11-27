@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2005 ] 2>/dev/null; then BUILD_NUM=2005; fi
+if [ "$BUILD_NUM" -lt 2006 ] 2>/dev/null; then BUILD_NUM=2006; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -6185,6 +6185,7 @@ struct PXSettingsClean: View {
     @AppStorage("pxAudioEQ3") private var eq3: Double = 4.0
     @AppStorage("pxAudioEQ4") private var eq4: Double = 9.5
     @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
+    @AppStorage("pxAudioGain") private var audioGain: Double = 1.0
     @State private var requestedRes: String = "-"
 
     /// Was das Panel wirklich kann -- vom System, nicht von mir behauptet.
@@ -6391,6 +6392,9 @@ struct PXSettingsClean: View {
                      "Stimmen und Schritte ortbar.")
             pxSlider("Höhen 9 kHz", $eq4, -18...18, String(format: "%+.1f dB", eq4),
                      "Luft. Zu viel zischt.")
+            pxSlider("Spiel-Lautstärke (Mix mit Spotify)", $audioGain, 0.25...2.0,
+                     String(format: "%.0f %%", audioGain * 100),
+                     "Regelt nur den Spielton: 25 % leiser, 100 % original, 200 % lauter. Spotify läuft separat über die Systemlautstärke.")
             pxSlider("3D-Weite", $audio3D, 0...0.6, pct(audio3D),
                      "Stereo-Verbreiterung. Der Bass bleibt mono, damit nichts hohl wird.")
 
