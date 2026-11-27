@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
+# iOS verweigert Downgrades: immer ueber der installierten 1228 bleiben.
+if [ "$BUILD_NUM" -lt 2000 ] 2>/dev/null; then BUILD_NUM=2000; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -163,6 +165,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     /// Kontext freigibt. Kostet ein Bild, kein Trennen der Verbindung.
     private func rebuildCIContext() {
         guard let device = metalView?.device else { return }
+        // Der Probe haelt sonst den ALTEN Kontext (und dessen Textur-Pools)
+        // fest -- dann bringt der Neuaufbau nichts.
+        PXProbe.shared.clear()
         ciContext = CIContext(mtlDevice: device, options: [
             .cacheIntermediates: false,
             .workingColorSpace: CGColorSpaceCreateDeviceRGB()
@@ -197,6 +202,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
     /// Zaehlt die Display-Takte fuer den 2:2-Rhythmus (Panel bleibt auf 120 Hz,
     /// gezeichnet wird auf jedem zweiten Takt).
     private var tickParity: Int = 0
+    private var lastPacedDraw: CFTimeInterval = 0
     private var lutData: Data?
     private var lutKey: String = ""
     private var colorLUTData: Data?
@@ -285,10 +291,11 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // damit eine falsche Einstellung die App nicht dauerhaft blockiert.
         // HDR-Codec beim Start abschalten -- 10-Bit-Decode stuerzt ab.
         var prefsNow = StreamPreferences.load()
-        if prefsNow.codec == 2 {
+        let hdrAllow = (UserDefaults.standard.object(forKey: "pxSharpHdrEnable") as? NSNumber)?.boolValue ?? false
+        if prefsNow.codec == 2 && !hdrAllow {
             prefsNow.codec = 1
             prefsNow.save()
-            os_log(.error, log: videoViewLog, "[px] Codec 2 (HDR) auf H.265 zurueckgesetzt")
+            os_log(.error, log: videoViewLog, "[px] Codec 2 (HDR) auf H.265 zurueckgesetzt (HDR-Schalter aus)")
         }
         let launches = UserDefaults.standard.integer(forKey: "pxLaunchCount") + 1
         UserDefaults.standard.set(launches, forKey: "pxLaunchCount")
@@ -300,9 +307,16 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // (also wirklich eine Absturz-Schleife). noteFrameRendered() setzt den
         // Zaehler zurueck, sobald die Sitzung laeuft.
         if launches >= 3 {
-            SharpnessRow.applyCalibratedPreset()
+            // WICHTIG: Hier werden NUR noch HDR/Codec zurueckgesetzt.
+            // Frueher wurde applyCalibratedPreset() gerufen -- dadurch hat ein
+            // normaler Neustart (ohne Stream) die getunte Schaerfe/Helligkeit
+            // geloescht und das Bild wurde ploetzlich flau. Bildeinstellungen
+            // bleiben jetzt unangetastet.
+            UserDefaults.standard.set(false, forKey: "pxSharpHdrEnable")
+            var safePrefs = StreamPreferences.load()
+            if safePrefs.codec == 2 { safePrefs.codec = 1; safePrefs.save() }
             UserDefaults.standard.set(1, forKey: "pxLaunchCount")
-            os_log(.error, log: videoViewLog, "[px] Safe-Mode (Absturz-Schleife): Einstellungen zurueckgesetzt")
+            os_log(.error, log: videoViewLog, "[px] Safe-Mode: nur HDR/Codec zurueckgesetzt (Bild bleibt)")
         }
         diagLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         diagLabel.textColor = .white
@@ -596,12 +610,19 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                     : CAFrameRateRange(minimum: want, maximum: want, preferred: want)
                 os_log(.default, log: videoViewLog, "[px] Takt -> %.0f Hz (Ziel %.0f, GPU %.1f ms)", linkHz, want, gpuMs)
             }
-            if stay120 {
-                // Nur jeden zweiten Takt zeichnen, solange das Ziel unter der
-                // Panelrate liegt. Bei 120-Ziel wird jeder Takt genutzt.
-                tickParity &+= 1
-                let every = max(1, Int((deviceHz / max(want, 1)).rounded()))
-                if every > 1 && (tickParity % every) != 0 { return }
+            if stay120, needsPresent {
+                // Zeitbasiert statt Paritaet: ein verspaeteter Takt darf nicht
+                // dazu fuehren, dass der naechste ebenfalls uebersprungen wird
+                // (das war die Ursache der 30-fps-Dips). Gezeichnet wird, sobald
+                // seit dem letzten Bild fast ein Frame-Intervall vergangen ist;
+                // ein spaeter Takt zeichnet sofort.
+                let interval = 1.0 / Double(max(want, 1))
+                let panel = 1.0 / Double(max(deviceHz, 1))
+                if interval > panel * 1.5 {
+                    let now = CACurrentMediaTime()
+                    if now - lastPacedDraw < interval * 0.80 { return }
+                    lastPacedDraw = now
+                }
             }
         }
         // Bild in den Schirm: 16:9 auf einem 4:3-Panel kann nicht ohne
@@ -2713,21 +2734,9 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Unterschied zwischen "verarbeitet" und "roh" direkt sieht.
         let bypassNow = UserDefaults.standard.bool(forKey: "pxSharpBypass")
 
-        // QUALITAETS-WATCHDOG. Bekanntes Problem in chiaki: der Stream wird
-        // mit der Zeit schlechter, bis man die Verbindung neu aufbaut. Ein
-        // neues Keyframe holt die Qualitaet zurueck, ohne die Sitzung zu
-        // trennen. Faellt die Rate 6 Sekunden unter 7 Mbit, fordern wir eins an.
-        let rateNow = Double(UserDefaults.standard.string(forKey: "pxSharpStreamMbps") ?? "") ?? 0
-        if rateNow > 0.2 && rateNow < 7.0 {
-            lowRateAccum += 1.0 / 60.0
-            if lowRateAccum > 6.0 {
-                lowRateAccum = 0
-                PyluxVideoDecoderRequestKeyframe()
-                os_log(.default, log: videoViewLog, "[px] keyframe angefordert (%.1f Mbit)", rateNow)
-            }
-        } else {
-            lowRateAccum = 0
-        }
+        // Keyframe-Watchdog entfernt: Ein haengengebliebener Testwert (2,5 Mbit)
+        // hat alle 6 s Keyframes angefordert und damit den Encoder/Bitrate
+        // destabilisiert ("stream ended"). Ohne ihn bleibt der Stream ruhig.
 
         // ---- Bildautomatik ------------------------------------------------
         // Misst jede Szene und korrigiert nur das, was messbar danebenliegt:
@@ -2962,7 +2971,10 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         if mbps > 0.1 {
             bitrateFactor = Float(min(max((mbps - 7.0) / 15.0, 0.0), 1.0))
         }
-        let filterBoost = 1.0 + (1.0 - bitrateFactor) * 0.35   // bis +35 % Filter
+        // KEIN automatisches Weichzeichnen mehr. Der Test hat gezeigt: der
+        // Filter-Boost brachte kaum etwas, kostete aber Schaerfe. Die Bitrate
+        // wird nur noch angezeigt, nicht zur Filterdaempfung benutzt.
+        let filterBoost: Float = 1.0
         denoise = min(1.0, denoise * filterBoost)
 
         let aD = denoise > 0.02 ? min(min(denoise, 1.0) * 2.0, 1.0) : 0.0
@@ -3415,19 +3427,14 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                     UserDefaults.standard.set("1", forKey: "pxSharpMfxActive")
                 }
                 cb.present(drawable)
-                cb.addCompletedHandler { _ in
+                cb.addCompletedHandler { [weak self] _ in
                     PXScene.shared.noteRenderMs((CACurrentMediaTime() - renderStartMFX) * 1000.0)
-                }
-                cb.commit()
-                noteFrameRendered()
-
-                // Probe ERST nach der GPU. Vorher wurde outTex gelesen, bevor der
-                // Command-Buffer überhaupt abgeschickt war — deshalb lieferte /shot
-                // ein leeres graues Bild, obwohl der Scaler auf dem Panel normal
-                // rechnete. Das war ein Messfehler, kein Scaler-Fehler.
-                cb.waitUntilCompleted()
-                if let c = ciContext,
-                   var outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) {
+                    // Probe asynchron im Completed-Handler: kein waitUntilCompleted()
+                    // mehr, damit die CPU nicht nach jedem Frame auf die GPU wartet.
+                    // /shot bekommt das Bild, sobald die GPU fertig ist.
+                    guard (UserDefaults.standard.object(forKey: "pxSharpProbeLive") as? NSNumber)?.boolValue ?? false,
+                          let c = self?.ciContext,
+                          var outCI = CIImage(mtlTexture: outTex, options: [.colorSpace: outSpace]) else { return }
                     let r = CGRect(x: 0, y: 0, width: CGFloat(outW), height: CGFloat(outH))
                     let fl = (UserDefaults.standard.object(forKey: "pxSharpMfxFlip") as? Int) ?? 0
                     if fl == 1 || fl == 3 {
@@ -3438,11 +3445,12 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
                         outCI = outCI.transformed(by: CGAffineTransform(translationX: outCI.extent.width, y: 0)
                             .scaledBy(x: -1, y: 1))
                     }
-                    if !UserDefaults.standard.bool(forKey: "pxProbeOff") {
-                        PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
-                                           width: outW, height: outH)
-                    }
+                    PXProbe.shared.set(outCI.cropped(to: r), context: c, space: outSpace,
+                                       width: outW, height: outH)
                 }
+                cb.commit()
+                noteFrameRendered()
+                runMemGuard()
                 return
             }
         }
@@ -3483,7 +3491,7 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
             UserDefaults.standard.set("0", forKey: "pxSharpMfxActive")
         }
         let ctx = hdrActive ? (hdrContext ?? ciContext) : ciContext
-        if let c = ctx, !UserDefaults.standard.bool(forKey: "pxProbeOff") {
+        if let c = ctx, ((UserDefaults.standard.object(forKey: "pxSharpProbeLive") as? NSNumber)?.boolValue ?? false) {
             PXProbe.shared.set(composited, context: c, space: outSpace,
                                width: Int(target.width), height: Int(target.height))
         }
@@ -3503,29 +3511,33 @@ final class StreamVideoUIView: UIView, MTKViewDelegate {
         // Renderrate messen: /state liefert pxSharpFPS.
         noteFrameRendered()
 
-        // Speicher-Bremse: Core Image und Metal halten Puffer, die iOS erst
-        // unter Druck freigibt. Gemessen wuchs der Speicher 300-400 MB/min bis
-        // zum Absturz. Ab 900 MB wird hier aktiv aufgeraeumt statt gewartet.
+        // Speicher-Bremse (laeuft jetzt in beiden Pfaden: MetalFX und Core Image)
+        runMemGuard()
+    }
+
+    /// Core Image und Metal halten Puffer, die iOS erst unter Druck freigibt.
+    /// Gemessen wuchs der Speicher 300-500 MB/min bis zum Absturz. Diese Bremse
+    /// lief bisher nur im Nicht-MetalFX-Pfad -- mit MetalFX an stieg der
+    /// Speicher ungebremst. Jetzt laeuft sie nach jedem Frame in beiden Pfaden.
+    private func runMemGuard() {
         memGuardFrame += 1
         let guardEvery = max(1, UserDefaults.standard.integer(forKey: "pxSharpMemBrakeEvery") == 0
                              ? 30 : UserDefaults.standard.integer(forKey: "pxSharpMemBrakeEvery"))
         let guardAbove = UserDefaults.standard.object(forKey: "pxSharpMemBrakeMB") as? Int ?? 900
-        if memGuardFrame >= guardEvery {
-            memGuardFrame = 0
-            let mb = Self.pxFootprintMB()
-            if mb > Double(guardAbove) {
-                ciContext?.clearCaches()
-                hdrContext?.clearCaches()
-                memGuardRuns += 1
-                UserDefaults.standard.set(Int(mb), forKey: "pxMemGuardLast")
-                // Ab 1,2 GB reicht clearCaches() nicht: den Kontext neu bauen.
-                // Das gibt die internen Pools frei, ohne die Verbindung zu
-                // unterbrechen (kostet ein Bild).
-                if mb > 1200, CACurrentMediaTime() - lastContextReset > 30.0 {
-                    rebuildCIContext()
-                    UserDefaults.standard.set(Int(Self.pxFootprintMB()), forKey: "pxMemAfterReset")
-                }
-            }
+        guard memGuardFrame >= guardEvery else { return }
+        memGuardFrame = 0
+        let mb = Self.pxFootprintMB()
+        guard mb > Double(guardAbove) else { return }
+        ciContext?.clearCaches()
+        hdrContext?.clearCaches()
+        memGuardRuns += 1
+        UserDefaults.standard.set(Int(mb), forKey: "pxMemGuardLast")
+        // Ab 1,2 GB reicht clearCaches() nicht: den Kontext neu bauen.
+        // Das gibt die internen Pools frei, ohne die Verbindung zu
+        // unterbrechen (kostet ein Bild).
+        if mb > 900, CACurrentMediaTime() - lastContextReset > 15.0 {
+            rebuildCIContext()
+            UserDefaults.standard.set(Int(Self.pxFootprintMB()), forKey: "pxMemAfterReset")
         }
     }
 }
@@ -3649,7 +3661,9 @@ final class PXScene {
         let p = base.assumingMemoryBound(to: UInt8.self)
         let p16 = base.assumingMemoryBound(to: UInt16.self)
         func luma(_ x: Int, _ y: Int) -> Double {
-            if isTenBit { return Double(p16[y * (bpr / 2) + x]) / maxVal * 255.0 }
+            // P010: die 10 Bit liegen in den oberen Bits des 16-Bit-Worts.
+            // Ohne >>6 wurde der Histogramm-Index riesig -> Absturz.
+            if isTenBit { return Double(p16[y * (bpr / 2) + x] >> 6) / maxVal * 255.0 }
             return Double(p[y * bpr + x]) / maxVal * 255.0
         }
 
@@ -3664,14 +3678,14 @@ final class PXScene {
             let row = y * bpr
             var x = 4
             while x < w - 6 {
-                let v = Int(luma(x, y))
+                let v = min(max(Int(luma(x, y)), 0), 255)
                 hist[v] += 1
                 n += 1
                 // Rauschen nur in FLACHEN Stellen messen: nur wenn auch der
                 // Pixel 2 Stellen weiter fast gleich ist. Sonst misst man
                 // Textur statt Rauschen.
-                let v1 = Int(luma(x + 1, y))
-                let v2 = Int(luma(x + 2, y))
+                let v1 = min(max(Int(luma(x + 1, y)), 0), 255)
+                let v2 = min(max(Int(luma(x + 2, y)), 0), 255)
                 let d = abs(v1 - v)
                 if abs(v2 - v) <= 6 && d <= 24 {
                     flatSum += Double(d)
@@ -3758,6 +3772,22 @@ final class PXProbe {
     func note(_ pb: CVPixelBuffer) {
         lock.lock()
         lastBuffer = pb
+        lock.unlock()
+    }
+
+    /// Gibt Bild und Kontext frei. Wird beim Kontext-Neuaufbau gerufen --
+    /// sonst haelt der Probe den alten CIContext samt Textur-Pools am Leben
+    /// und der Speicher sinkt nie.
+    func clear() {
+        lock.lock()
+        image = nil
+        ctx = nil
+        space = nil
+        w = 0
+        h = 0
+        prevLuma = nil
+        lastBuffer = nil
+        frozenBuffer = nil
         lock.unlock()
     }
 
@@ -4023,7 +4053,7 @@ final class PXTuner {
         let d = UserDefaults.standard
 
         if path.hasPrefix("/set"), let k = val("key"), let v = val("value"),
-           k.hasPrefix("pxSharp") || k == "bitrate" {
+           k.hasPrefix("pxSharp") || k.hasPrefix("pxAudio") || k == "bitrate" {
             if k == "bitrate" {
                 // Stream-Bitrate in kbit/s (0 = automatisch). Wirkt beim naechsten
                 // Verbinden. Wichtig: 1080p H.265 laeuft "automatisch" nur mit
@@ -4038,6 +4068,9 @@ final class PXTuner {
             else if let f = Double(v) { d.set(f, forKey: k) }
             else { d.set(v, forKey: k) }
             return "{\"ok\":true,\"key\":\"\(k)\"}"
+        }
+        if path.hasPrefix("/bwlog") {
+            return UserDefaults.standard.string(forKey: "pxBwLog") ?? ""
         }
         if path.hasPrefix("/freeze") {
             let on = val("on") == "1"
@@ -4092,6 +4125,13 @@ final class PXTuner {
             o["pxNeuralRun"] = String(PXNeuralDenoise.shared.ranCount)
             o["pxNeuralMs"] = String(format: "%.2f", PXNeuralDenoise.shared.avgMs)
         o["pxNeuralMsg"] = UserDefaults.standard.string(forKey: "pxNeuralMsg") ?? ""
+        for i in 0..<5 {
+            o["pxAudioEQ\(i)"] = UserDefaults.standard.double(forKey: "pxAudioEQ\(i)")
+        }
+        o["pxAudio3D"] = UserDefaults.standard.double(forKey: "pxAudio3D")
+        o["pxSharpHdrEnable"] = (UserDefaults.standard.object(forKey: "pxSharpHdrEnable") as? NSNumber)?.boolValue ?? false
+        o["pxRttMs"] = String(format: "%.0f", UserDefaults.standard.double(forKey: "pxRttMs"))
+        o["pxLoss"] = String(format: "%.4f", UserDefaults.standard.double(forKey: "pxLoss"))
         o["pxAvSent"] = String(UserDefaults.standard.integer(forKey: "pxAvSent"))
         o["pxAvDrop"] = String(UserDefaults.standard.integer(forKey: "pxAvDrop"))
         o["pxSharpAvSkip"] = UserDefaults.standard.bool(forKey: "pxSharpAvSkip") ? "1" : "0"
@@ -4878,10 +4918,10 @@ struct SharpnessRow: View {
     var onMaxQuality: () -> Void = {}
     var onStableLink: () -> Void = {}
 
-    @AppStorage("pxSharpLevel") private var level: Double = 1.0
+    @AppStorage("pxSharpLevel") private var level: Double = 0.8
     @AppStorage("pxSharpClarity") private var clarity: Double = 0.0
-    @AppStorage("pxSharpDetail") private var detail: Double = 0.55
-    @AppStorage("pxSharpDenoise") private var denoise: Double = 0.06
+    @AppStorage("pxSharpDetail") private var detail: Double = 0.60
+    @AppStorage("pxSharpDenoise") private var denoise: Double = 0.10
     @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
     @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
     @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
@@ -4902,13 +4942,13 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpPixelPerfect") private var pixelPerfect: Bool = false
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
     @AppStorage("pxSharpPerfAuto") private var perfAuto: Bool = false
-    @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.20
+    @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.0
     @AppStorage("pxSharpUpscale") private var upscaleKernel: Bool = false
     @AppStorage("pxSharpUpScale") private var upscaleAmount: Double = 0.60
     @AppStorage("pxSharpLocalTone") private var localTone: Double = 0.0
     @AppStorage("pxSharpHueSat") private var hueSat: Double = 0.0
     @AppStorage("pxSharpCastFix") private var castFix: Double = 0.0
-    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
+    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = true
     @AppStorage("pxSharpWB_R") private var wbR: Double = 1.0
     @AppStorage("pxSharpWB_G") private var wbG: Double = 1.0
     @AppStorage("pxSharpWB_B") private var wbB: Double = 1.0
@@ -4920,12 +4960,12 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpGammaG") private var gammaG: Double = 1.0
     @AppStorage("pxSharpGammaB") private var gammaB: Double = 1.0
     @AppStorage("pxSharpMode") private var mode: Int = 11
-    @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.20
+    @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.25
     @AppStorage("pxSharpToneMap") private var toneMap: Int = 0
     @AppStorage("pxSharpWBPreset") private var wbPreset: Int = 3
     @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.0
     @AppStorage("pxSharpDeband") private var deband: Double = 0.30
-    @AppStorage("pxSharpBrightness") private var brightness: Double = 0.50
+    @AppStorage("pxSharpBrightness") private var brightness: Double = 0.37
     @AppStorage("pxSharpLumaSharpen") private var lumaSharpen: Bool = true
     @AppStorage("pxSharpGamut") private var gamut: Int = 0
     @AppStorage("pxSharpColorEngine") private var colorEngine: Bool = true
@@ -4933,19 +4973,19 @@ struct SharpnessRow: View {
     @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.65
     @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
     @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
-    @AppStorage("pxSharpChroma") private var chroma: Double = 0.30
-    @AppStorage("pxSharpCoring") private var coring: Double = 0.03
+    @AppStorage("pxSharpChroma") private var chroma: Double = 0.0
+    @AppStorage("pxSharpCoring") private var coring: Double = 0.0
     @AppStorage("pxSharpHalo") private var halo: Double = 0.12
     @AppStorage("pxSharpAiUpscale") private var aiUpscale: Bool = false
     @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
     @AppStorage("pxSharpScaler") private var scaler: Int = 0
     @AppStorage("pxSharpEasu") private var easuAmt: Double = 0.6
-    @AppStorage("pxAudio3D") private var audio3D: Double = 0.0
-    @AppStorage("pxAudioEQ0") private var eq0: Double = 3.0
-    @AppStorage("pxAudioEQ1") private var eq1: Double = 1.5
-    @AppStorage("pxAudioEQ2") private var eq2: Double = 0.0
-    @AppStorage("pxAudioEQ3") private var eq3: Double = 0.5
-    @AppStorage("pxAudioEQ4") private var eq4: Double = 0.0
+    @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
+    @AppStorage("pxAudioEQ0") private var eq0: Double = 7.5
+    @AppStorage("pxAudioEQ1") private var eq1: Double = 5.5
+    @AppStorage("pxAudioEQ2") private var eq2: Double = -1.0
+    @AppStorage("pxAudioEQ3") private var eq3: Double = 4.0
+    @AppStorage("pxAudioEQ4") private var eq4: Double = 9.5
     @AppStorage("pxAudioPreset") private var audioPreset: Int = 0
     @AppStorage("pxSharpStreamMbps") private var streamMbps: String = "—"
     @AppStorage("pxSharpFPS") private var liveFPS: String = "—"
@@ -5201,15 +5241,15 @@ struct SharpnessRow: View {
         case 4: // Nacht
             eq0 = 6.0; eq1 = 2.5; eq2 = 0; eq3 = -1; eq4 = -3; audio3D = 0.55
         case 5: // Sony Bass Boost
-            eq0 = 9.0; eq1 = 5.0; eq2 = 0; eq3 = 2.0; eq4 = 1.0; audio3D = 0.20
+            eq0 = 7.0; eq1 = 4.0; eq2 = 0; eq3 = 1.5; eq4 = 1.0; audio3D = 0.10
         case 6: // Dolby Atmos (weite Bühne)
             eq0 = 3.0; eq1 = 1.0; eq2 = 0; eq3 = 4.0; eq4 = 2.0; audio3D = 0.70
         case 7: // Bose (warm, bassbetont)
-            eq0 = 6.5; eq1 = 5.5; eq2 = -1.0; eq3 = 1.0; eq4 = 2.5; audio3D = 0.35
+            eq0 = 5.0; eq1 = 3.5; eq2 = -1.0; eq3 = 1.0; eq4 = 1.5; audio3D = 0.20
         case 8: // Sony WH-1000XM4 (starker Bass, weite Buehne)
-            eq0 = 15.0; eq1 = 11.0; eq2 = 1.0; eq3 = 2.0; eq4 = 3.5; audio3D = 0.55
+            eq0 = 7.0; eq1 = 4.0; eq2 = 0; eq3 = 2.0; eq4 = 2.0; audio3D = 0.15
         case 9: // Sony WH-1000XM4 maximal (mit Subbass)
-            eq0 = 18.0; eq1 = 14.0; eq2 = 2.0; eq3 = 2.5; eq4 = 4.0; audio3D = 0.70
+            eq0 = 9.0; eq1 = 5.0; eq2 = 0; eq3 = 2.5; eq4 = 2.0; audio3D = 0.20
         default: break
         }
     }
@@ -5734,10 +5774,10 @@ struct SharpnessRow: View {
         let d = UserDefaults.standard
         let values: [String: Any] = [
             "pxSharpMode": 11,
-            "pxSharpLevel": 1.0,
+            "pxSharpLevel": 0.8,
             "pxSharpClarity": 0.0,
-            "pxSharpDetail": 0.55,
-            "pxSharpDenoise": 0.06,
+            "pxSharpDetail": 0.60,
+            "pxSharpDenoise": 0.10,
             "pxSharpVibrance": 0.0,
             "pxSharpSaturation": 0.5,
             "pxSharpContrast": 0.5,
@@ -5745,20 +5785,20 @@ struct SharpnessRow: View {
             "pxSharpGamma": 1.0,
             "pxSharpBlack": 0.0,
             "pxSharpRange": 0,
-            "pxSharpTexDepth": 0.20,
+            "pxSharpTexDepth": 0.0,
             "pxSharpLocalTone": 0.0,
             "pxSharpHueSat": 0.0,
             "pxSharpCastFix": 0.0,
             "pxSharpDeblock": 0.14,
             "pxSharpDeband": 0.30,
-            "pxSharpClearImage": 0.20,
+            "pxSharpClearImage": 0.25,
             "pxSharpToneMap": 0,
             "pxSharpLocalDim": 0.0,
-            "pxSharpBrightness": 0.5,
+            "pxSharpBrightness": 0.40,
             "pxSharpShadow": 0.12,
             "pxSharpTvBrightness": false,
-            "pxSharpChroma": 0.30,
-            "pxSharpCoring": 0.03,
+            "pxSharpChroma": 0.0,
+            "pxSharpCoring": 0.0,
             "pxSharpHalo": 0.12,
             "pxSharpDeconv": 0.0,
             "pxSharpAuto": false,
@@ -5782,6 +5822,15 @@ struct SharpnessRow: View {
             "pxSharpMaster": 1.0,
             "pxSharpAutoEngine": true,
             "pxSharpHdrPeak": 1600,
+            "pxSharpMetalFX": true,
+            "pxSharpLockFps": 60,
+            "pxSharpPace120": true,
+            "pxAudioEQ0": 7.5,
+            "pxAudioEQ1": 5.5,
+            "pxAudioEQ2": -1.0,
+            "pxAudioEQ3": 4.0,
+            "pxAudioEQ4": 9.5,
+            "pxAudio3D": 0.20,
             "pxSharpTunedV1": true,
             "pxSharpTunedV2": true,
             "pxSharpTunedV3": true,
@@ -5823,11 +5872,11 @@ struct SharpnessRow: View {
         var v: [String: Any] = [
             "pxSharpClarity": 0.0, "pxSharpClearImage": 0.0, "pxSharpDeconv": 0.0,
             "pxSharpLocalTone": 0.0, "pxSharpLocalDim": 0.0, "pxSharpAuto": false,
-            "pxSharpChroma": 0.30, "pxSharpHueSat": 0.0, "pxSharpCastFix": 0.0,
+            "pxSharpChroma": 0.0, "pxSharpHueSat": 0.0, "pxSharpCastFix": 0.0,
             "pxSharpRange": 0, "pxSharpTvBrightness": false, "pxSharpTemp": 0.5,
             "pxSharpGamma": 1.0, "pxSharpBlack": 0.0, "pxSharpScaler": 0,
             "pxSharpEasu": 0.6, "pxSharpCoring": 0.05, "pxSharpHalo": 0.12,
-            "pxSharpDeblock": 0.14, "pxSharpDenoise": 0.06, "pxSharpDeband": 0.30,
+            "pxSharpDeblock": 0.14, "pxSharpDenoise": 0.10, "pxSharpDeband": 0.30,
         ]
         switch m {
         case 11:
@@ -5882,8 +5931,8 @@ struct SharpnessRow: View {
 struct PXQuickPicturePanel: View {
     @Binding var isPresented: Bool
 
-    @AppStorage("pxSharpLevel") private var level: Double = 1.0
-    @AppStorage("pxSharpDetail") private var detail: Double = 0.55
+    @AppStorage("pxSharpLevel") private var level: Double = 0.8
+    @AppStorage("pxSharpDetail") private var detail: Double = 0.60
     @AppStorage("pxSharpShadow") private var shadow: Double = 0.12
     @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
     @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
@@ -6080,43 +6129,44 @@ struct PXPressStyle: ButtonStyle {
 /// dann eine eigene Sektion fuer Regler, die das Bild auch verschlechtern
 /// koennen -- mit Warnung. Ganz unten die Ausgabe.
 struct PXSettingsClean: View {
-    @AppStorage("pxSharpLevel") private var level: Double = 1.0
-    @AppStorage("pxSharpDetail") private var detail: Double = 0.75
-    @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.35
+    @AppStorage("pxSharpLevel") private var level: Double = 0.8
+    @AppStorage("pxSharpDetail") private var detail: Double = 0.60
+    @AppStorage("pxSharpTexDepth") private var texDepth: Double = 0.0
     @AppStorage("pxSharpClarity") private var clarity: Double = 0.0
-    @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.20
+    @AppStorage("pxSharpClearImage") private var clearImage: Double = 0.25
     @AppStorage("pxSharpDeconv") private var deconv: Double = 0.0
-    @AppStorage("pxSharpHalo") private var halo: Double = 0.15
-    @AppStorage("pxSharpCoring") private var coring: Double = 0.05
-    @AppStorage("pxSharpChroma") private var chroma: Double = 0.5
+    @AppStorage("pxSharpHalo") private var halo: Double = 0.12
+    @AppStorage("pxSharpCoring") private var coring: Double = 0.0
+    @AppStorage("pxSharpChroma") private var chroma: Double = 0.0
     @AppStorage("pxSharpSaturation") private var saturation: Double = 0.5
     @AppStorage("pxSharpVibrance") private var vibrance: Double = 0.0
     @AppStorage("pxSharpContrast") private var contrast: Double = 0.5
     @AppStorage("pxSharpTemp") private var temp: Double = 0.5
     @AppStorage("pxSharpGamut") private var gamut: Int = 0
     @AppStorage("pxSharpHlBalance") private var hlBalance: Bool = true
-    @AppStorage("pxSharpBrightness") private var brightness: Double = 0.49
+    @AppStorage("pxSharpBrightness") private var brightness: Double = 0.37
     @AppStorage("pxSharpShadow") private var shadow: Double = 0.0
     @AppStorage("pxSharpAuto") private var auto: Bool = false
     @AppStorage("pxSharpAutoStrength") private var autoStrength: Double = 0.5
     @AppStorage("pxSharpAutoEngine") private var autoEngine: Bool = true
-    @AppStorage("pxSharpDenoise") private var denoise: Double = 0.06
+    @AppStorage("pxSharpDenoise") private var denoise: Double = 0.10
     @AppStorage("pxSharpDeblock") private var deblock: Double = 0.14
     @AppStorage("pxSharpDeband") private var deband: Double = 0.30
     @AppStorage("pxSharpLocalDim") private var localDim: Double = 0.0
     @AppStorage("pxSharpTvBrightness") private var tvBrightness: Bool = false
     @AppStorage("pxSharpPacing") private var pacing: Bool = true
     @AppStorage("pxSharpPaceHz") private var paceHz: Int = 60
-    @AppStorage("pxSharpLockFps") private var lockFps: Int = 0
+    @AppStorage("pxSharpLockFps") private var lockFps: Int = 60
     @AppStorage("pxSharpDetailEarly") private var detailEarly: Bool = false
+    @AppStorage("pxSharpHdrEnable") private var hdrEnable: Bool = false
     @AppStorage("pxSharpPanel2x") private var panel2x: Bool = false
-    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = false
+    @AppStorage("pxSharpMetalFX") private var metalFX: Bool = true
     @AppStorage("pxSharpLutSize") private var lutSize: Int = 33
     @AppStorage("pxSharpDirSharp") private var dirSharp: Bool = true
-    @AppStorage("pxSharpDiffuse") private var diffuse: Bool = true
+    @AppStorage("pxSharpDiffuse") private var diffuse: Bool = false
     @AppStorage("pxSharpTemporal") private var temporal: Double = 0.0
     @AppStorage("pxSharpAccum") private var accum: Double = 0.0
-    @AppStorage("pxSharpNeural") private var neural: Bool = true
+    @AppStorage("pxSharpNeural") private var neural: Bool = false
     @AppStorage("pxSharpAiUpscale") private var aiUpscale: Bool = false
     @AppStorage("pxSharpBypass") private var bypass: Bool = false
     @AppStorage("pxAiUpMsgUI") private var aiMsg: String = ""
@@ -6125,6 +6175,12 @@ struct PXSettingsClean: View {
     @AppStorage("pxSharpShowDiag") private var showDiag: Bool = false
     @AppStorage("pxSharpMfxActive") private var mfxActive: String = "0"
     @AppStorage("pxSharpMfxFlip") private var mfxFlip: Int = 0
+    @AppStorage("pxAudioEQ0") private var eq0: Double = 7.5
+    @AppStorage("pxAudioEQ1") private var eq1: Double = 5.5
+    @AppStorage("pxAudioEQ2") private var eq2: Double = -1.0
+    @AppStorage("pxAudioEQ3") private var eq3: Double = 4.0
+    @AppStorage("pxAudioEQ4") private var eq4: Double = 9.5
+    @AppStorage("pxAudio3D") private var audio3D: Double = 0.20
     @State private var requestedRes: String = "-"
 
     /// Was das Panel wirklich kann -- vom System, nicht von mir behauptet.
@@ -6145,6 +6201,7 @@ struct PXSettingsClean: View {
     @State private var resIdx: Int = 3
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
 
             // Leitung: die Zahlen, an denen man sofort sieht, was der Stream
@@ -6319,7 +6376,21 @@ struct PXSettingsClean: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            pxHead("6 · GPU-Techniken", "Was moderne Karten können — als Option, soweit übertragbar.")
+            pxHead("6 · Audio (EQ)", "Bass, Präsenz und 3D-Weite — wirkt auf Kopfhörer und Lautsprecher.")
+            pxSlider("Bass-Shelf 100 Hz", $eq0, -18...18, String(format: "%+.1f dB", eq0),
+                     "Hebt den ganzen Bassbereich an. Hochpass unter 35 Hz hält ihn trocken.")
+            pxSlider("Bass 150 Hz", $eq1, -18...18, String(format: "%+.1f dB", eq1),
+                     "Punch. Zu viel klingt boxig.")
+            pxSlider("Mitten 600 Hz", $eq2, -18...18, String(format: "%+.1f dB", eq2),
+                     "Gegen dumpfen Klang.")
+            pxSlider("Präsenz 2,4 kHz", $eq3, -18...18, String(format: "%+.1f dB", eq3),
+                     "Stimmen und Schritte ortbar.")
+            pxSlider("Höhen 9 kHz", $eq4, -18...18, String(format: "%+.1f dB", eq4),
+                     "Luft. Zu viel zischt.")
+            pxSlider("3D-Weite", $audio3D, 0...0.6, pct(audio3D),
+                     "Stereo-Verbreiterung. Der Bass bleibt mono, damit nichts hohl wird.")
+
+            pxHead("7 · GPU-Techniken", "Was moderne Karten können — als Option, soweit übertragbar.")
             Picker("Upscaler (DLSS-Super-Resolution-Prinzip)", selection: $metalFX) {
                 Text("Lanczos — bewährt").tag(false)
                 Text("MetalFX — Apples KI-Scaler").tag(true)
@@ -6353,16 +6424,27 @@ struct PXSettingsClean: View {
             .font(.caption2)
             .foregroundColor(.secondary)
 
-            pxHead("7 · Verbindung", "Gilt beim nächsten Verbinden.")
+            pxHead("8 · Verbindung", "Gilt beim nächsten Verbinden.")
             Picker("Codec", selection: $codecIdx) {
                 Text("H.264 (kompatibel)").tag(0)
                 Text("H.265 (bessere Qualität)").tag(1)
+                Text("H.265 + HDR (10 Bit)").tag(2)
             }
             .onChange(of: codecIdx) { v in
                 var p = StreamPreferences.load()
                 p.codec = v
                 p.save()
             }
+            Toggle("HDR erlauben (10 Bit, experimentell)", isOn: $hdrEnable)
+                .onChange(of: hdrEnable) { on in
+                    var p = StreamPreferences.load()
+                    p.codec = on ? 2 : 1
+                    p.save()
+                    codecIdx = p.codec
+                }
+            Text("Nur mit PS5-HDR und einem HDR-Spiel. Wirkt beim nächsten Verbinden. Bei einer Absturz-Schleife schaltet die App HDR nach 3 Fehlstarts selbst ab.")
+                .font(.caption)
+                .foregroundColor(.secondary)
             Picker("Auflösung", selection: $resIdx) {
                 Text("4K (3840×2160, experimentell)").tag(4)
                 Text("1080p").tag(3)
@@ -6383,10 +6465,15 @@ struct PXSettingsClean: View {
             Text("Die Konsole deckelt selbst — 30000 bis 50000 anfordern reicht. Höhere Werte schaden nicht, bringen aber nichts.")
                 .font(.caption)
                 .foregroundColor(.secondary)
+
+            PXProfileSection()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
         }
         .onAppear {
             var p = StreamPreferences.load()
-            if p.codec == 2 { p.codec = 1; p.save() }
+            if p.codec == 2 && !hdrEnable { p.codec = 1; p.save() }
             codecIdx = p.codec
             bitrateVal = p.bitrate == 0 ? 30000 : p.bitrate
             resIdx = p.resolutionIndex
@@ -6430,7 +6517,1639 @@ struct PXSettingsClean: View {
         }
     }
 }
+
+// MARK: - PX-Profile + PSN-Presence
+
+enum PXProfileStore {
+    static let doubleKeys = ["pxSharpLevel","pxSharpDetail","pxSharpDenoise","pxSharpDeband",
+        "pxSharpDeblock","pxSharpClearImage","pxSharpChroma","pxSharpTexDepth","pxSharpCoring",
+        "pxSharpHalo","pxSharpBrightness","pxSharpContrast","pxSharpShadow","pxSharpSaturation",
+        "pxSharpVibrance","pxSharpTemp","pxAudioEQ0","pxAudioEQ1","pxAudioEQ2","pxAudioEQ3",
+        "pxAudioEQ4","pxAudio3D"]
+    static let intKeys = ["pxSharpLockFps","pxSharpPaceHz","pxSharpGamut"]
+    static let boolKeys = ["pxSharpHlBalance","pxSharpAutoEngine","pxSharpMetalFX","pxSharpPacing"]
+    static let listKey = "pxProfileNames"
+
+    static func names() -> [String] { UserDefaults.standard.stringArray(forKey: listKey) ?? [] }
+
+    static func save(_ name: String) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        let d = UserDefaults.standard
+        var dict: [String: Any] = [:]
+        for k in doubleKeys { dict[k] = d.double(forKey: k) }
+        for k in intKeys { dict[k] = d.integer(forKey: k) }
+        for k in boolKeys { dict[k] = d.bool(forKey: k) }
+        d.set(dict, forKey: "pxProfile_\(n)")
+        var list = names()
+        if !list.contains(n) { list.append(n); d.set(list, forKey: listKey) }
+    }
+
+    static func apply(_ name: String) {
+        let d = UserDefaults.standard
+        guard let dict = d.dictionary(forKey: "pxProfile_\(name)") else { return }
+        for k in doubleKeys {
+            if let n = dict[k] as? NSNumber { d.set(n.doubleValue, forKey: k) }
+            else if let v = dict[k] as? Double { d.set(v, forKey: k) }
+        }
+        for k in intKeys {
+            if let n = dict[k] as? NSNumber { d.set(n.intValue, forKey: k) }
+        }
+        for k in boolKeys {
+            if let n = dict[k] as? NSNumber { d.set(n.boolValue, forKey: k) }
+        }
+    }
+
+    static func delete(_ name: String) {
+        let d = UserDefaults.standard
+        d.removeObject(forKey: "pxProfile_\(name)")
+        var list = names(); list.removeAll { $0 == name }; d.set(list, forKey: listKey)
+    }
+
+    static func has(_ name: String) -> Bool {
+        UserDefaults.standard.dictionary(forKey: "pxProfile_\(name)") != nil
+    }
+
+    static func autoMap() -> [String: String] {
+        guard let data = UserDefaults.standard.data(forKey: "pxAutoProfileMap"),
+              let m = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return m
+    }
+
+    static func setAuto(title: String, profile: String) {
+        var m = autoMap(); m[title] = profile
+        if let data = try? JSONEncoder().encode(m) {
+            UserDefaults.standard.set(data, forKey: "pxAutoProfileMap")
+        }
+    }
+
+    static func autoProfile(for title: String) -> String? { autoMap()[title] }
+}
+
+enum PSNPresence {
+    /// Fragt die PSN-Presence des eingeloggten Accounts ab und liefert den laufenden Spieltitel.
+    static func fetchCurrentGame(_ completion: @escaping (String?) -> Void) {
+        let token = SecureStore.shared.authToken
+        guard !token.isEmpty else { completion(nil); return }
+        let hosts = ["us-prof.np.community.playstation.net",
+                     "eu-prof.np.community.playstation.net"]
+        func tryHost(_ i: Int) {
+            guard i < hosts.count else { completion(nil); return }
+            let urlString = "https://\(hosts[i])/userProfile/v1/users/me/profile2?fields=presence"
+            guard let url = URL(string: urlString) else { completion(nil); return }
+            var req = URLRequest(url: url)
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.timeoutInterval = 8
+            URLSession.shared.dataTask(with: req) { data, _, _ in
+                guard let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let profile = json["profile"] as? [String: Any],
+                      let presence = profile["presence"] as? [[String: Any]],
+                      let games = presence.first?["gameTitleInfoList"] as? [[String: Any]],
+                      let title = games.first?["titleName"] as? String,
+                      !title.isEmpty else {
+                    tryHost(i + 1)
+                    return
+                }
+                DispatchQueue.main.async { completion(title) }
+            }.resume()
+        }
+        tryHost(0)
+    }
+}
+
+struct PXProfileSection: View {
+    @State private var profileName: String = ""
+    @State private var profileNames: [String] = PXProfileStore.names()
+    @State private var presenceMsg: String = ""
+    @State private var presenceTitle: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("9 · Profile").font(.system(size: 15, weight: .semibold))
+                Text("Eigene Werte speichern, laden und mit dem laufenden Spiel verknüpfen.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            .padding(.top, 6)
+
+            HStack {
+                TextField("Profilname (z. B. GTA Tag)", text: $profileName)
+                    .textFieldStyle(.roundedBorder)
+                Button("Speichern") {
+                    PXProfileStore.save(profileName)
+                    profileNames = PXProfileStore.names()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            ForEach(profileNames, id: \.self) { name in
+                HStack {
+                    Text(name).font(.system(size: 13))
+                    Spacer()
+                    Button("Laden") { PXProfileStore.apply(name) }
+                        .buttonStyle(.bordered)
+                    Button("Löschen") {
+                        PXProfileStore.delete(name)
+                        profileNames = PXProfileStore.names()
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+            }
+
+            HStack {
+                Button("Aktuelles Spiel erkennen") {
+                    PSNPresence.fetchCurrentGame { t in
+                        presenceTitle = t ?? ""
+                        presenceMsg = t.map { "Erkannt: \($0)" } ?? "Kein Titel sichtbar (PSN-Privatsphäre?)"
+                    }
+                }
+                .buttonStyle(.bordered)
+                if !presenceTitle.isEmpty {
+                    Button("Mit Profil verknüpfen") {
+                        let n = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !n.isEmpty else { presenceMsg = "Erst Profilnamen eingeben/speichern."; return }
+                        PXProfileStore.setAuto(title: presenceTitle, profile: n)
+                        presenceMsg = "Verknüpft: \(presenceTitle) → \(n)"
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            Text(presenceMsg).font(.caption).foregroundColor(.secondary)
+        }
+    }
+}
 ROW_EOF
+
+
+cat > ios/Pylux/Bridge/VideoDecoder.m <<'VDEC_CI_EOF'
+// SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+// VideoToolbox-based H.264/HEVC decoder
+
+#import "VideoDecoder.h"
+#import <VideoToolbox/VideoToolbox.h>
+#import <AVFoundation/AVFoundation.h>
+#import <CoreMedia/CoreMedia.h>
+#import <os/log.h>
+
+static os_log_t g_vdec_log;
+
+@interface PyluxVideoDecoder ()
+@property (nonatomic, assign) VTDecompressionSessionRef session;
+@property (nonatomic, assign) CMVideoFormatDescriptionRef formatDesc;
+@property (nonatomic, assign) uint64_t presentationTimeStamp;
+@property (nonatomic, strong) AVSampleBufferDisplayLayer *displayLayer;
+@property (nonatomic, assign) uint64_t framesDecoded;
+@property (nonatomic, assign) BOOL loggedFirstFrame;
+@end
+
+static void outputCallback(void *decompressionOutputRefCon,
+                           void *sourceFrameRefCon,
+                           OSStatus status,
+                           VTDecodeInfoFlags infoFlags,
+                           CVImageBufferRef imageBuffer,
+                           CMTime presentationTimeStamp,
+                           CMTime presentationDuration) {
+    @autoreleasepool {
+    (void)sourceFrameRefCon;
+    (void)infoFlags;
+    (void)presentationDuration;
+    PyluxVideoDecoder *dec = (__bridge PyluxVideoDecoder *)decompressionOutputRefCon;
+    if (status != noErr || !imageBuffer) {
+#if DEBUG
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[outputCallback] VT decode status %d", (int)status);
+#else
+        /* kVTVideoDecoderBadDataErr (-12909): common when upstream drops/corrupts frames (FEC gaps). */
+        if (status != -12909)
+            os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[outputCallback] VT decode status %d", (int)status);
+#endif
+        return;
+    }
+    dec.framesDecoded++;
+    if (!dec.loggedFirstFrame) {
+        dec.loggedFirstFrame = YES;
+        os_log(g_vdec_log, "[outputCallback] First decoded frame (status=%d)", (int)status);
+    } else if (dec.framesDecoded % 300 == 0) {
+        os_log(g_vdec_log, "[outputCallback] Decoded frame %llu", (unsigned long long)dec.framesDecoded);
+    }
+    if (dec.frameCallback) {
+        dec.frameCallback(imageBuffer, presentationTimeStamp);
+    }
+    __strong AVSampleBufferDisplayLayer *layer = dec.displayLayer;
+    if (!layer && dec.framesDecoded <= 3) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_DEFAULT, "[outputCallback] No displayLayer attached, frame %llu", (unsigned long long)dec.framesDecoded);
+    }
+    if (layer) {
+        CMVideoFormatDescriptionRef fmtDesc = NULL;
+        OSStatus err = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &fmtDesc);
+        if (err == noErr && fmtDesc) {
+            CMSampleBufferRef sbuf = NULL;
+            // Order: duration, presentationTimeStamp, decodeTimeStamp (not PTS first).
+            CMTime pts = presentationTimeStamp;
+            if (!CMTIME_IS_VALID(pts) || !CMTIME_IS_NUMERIC(pts)) {
+                pts = CMTimeMake((int64_t)dec.framesDecoded, 90000);
+            }
+            CMSampleTimingInfo timing = {
+                .duration = kCMTimeInvalid,
+                .presentationTimeStamp = pts,
+                .decodeTimeStamp = kCMTimeInvalid
+            };
+            err = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, true, NULL, NULL, fmtDesc, &timing, &sbuf);
+            CFRelease(fmtDesc);
+            if (err == noErr && sbuf) {
+                CMSetAttachment(sbuf, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue, kCMAttachmentMode_ShouldNotPropagate);
+                __strong AVSampleBufferDisplayLayer *layerStrong = layer;
+                uint64_t frameNum = dec.framesDecoded;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    CGRect b = layerStrong.bounds;
+                    if (frameNum <= 2) {
+                        os_log(g_vdec_log, "[outputCallback] enqueue frame %llu bounds=%.0fx%.0f", (unsigned long long)frameNum, b.size.width, b.size.height);
+                    }
+                    [layerStrong enqueueSampleBuffer:sbuf];
+                    CFRelease(sbuf);
+                });
+            }
+        }
+    }
+    }  // @autoreleasepool
+}
+
+@implementation PyluxVideoDecoder
+
++ (void)initialize {
+    if (self == [PyluxVideoDecoder class]) {
+        g_vdec_log = os_log_create("com.pylux.stream", "VideoDecoder");
+    }
+}
+
+- (instancetype)initWithWidth:(int32_t)width height:(int32_t)height codec:(PyluxVideoCodec)codec {
+    self = [super init];
+    if (self) {
+        _width = width;
+        _height = height;
+        _codec = codec;
+        _presentationTimeStamp = 0;
+        _framesDecoded = 0;
+        _loggedFirstFrame = NO;
+        os_log(g_vdec_log, "[init] VideoDecoder %dx%d codec=%{public}@", width, height, codec == PyluxVideoCodecH265 ? @"HEVC" : @"H264");
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [self reset];
+}
+
+static BOOL findNextNAL(const uint8_t *data, size_t size, size_t *startOut, size_t *lenOut) {
+    // A NAL begins after a 3-byte (00 00 01) or 4-byte (00 00 00 01) start code
+    // and ends at the next start code OF EITHER STYLE (or the buffer end).
+    // Streams freely mix styles within one access unit — PSNOW PS3 frames carry
+    // slice 1 behind a 4-byte code and slice 2 behind a 3-byte code. Scanning
+    // only for the same style (as this function once did) merges the slices into
+    // one corrupt "NAL" with an embedded start code, which hardware VideoToolbox
+    // rejects (-12909) for every frame.
+    size_t i = 0;
+    while (i + 3 <= size) {
+        size_t nalStart;
+        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 1)
+            nalStart = i + 3;
+        else if (i + 4 <= size && data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1)
+            nalStart = i + 4;
+        else {
+            i++;
+            continue;
+        }
+        if (nalStart >= size) return NO;
+        size_t j = nalStart;
+        while (j + 3 <= size) {
+            if (data[j] == 0 && data[j+1] == 0
+                && (data[j+2] == 1 || (j + 4 <= size && data[j+2] == 0 && data[j+3] == 1)))
+                break;
+            j++;
+        }
+        size_t nalEnd = (j + 3 <= size) ? j : size;
+        if (nalEnd == nalStart) {
+            // Adjacent start codes (zero-length NAL, only in malformed streams):
+            // skip past it and keep scanning instead of dropping the rest of the
+            // buffer's NALs.
+            i = nalStart;
+            continue;
+        }
+        *startOut = nalStart;
+        *lenOut = nalEnd - nalStart;
+        return YES;
+    }
+    return NO;
+}
+
+static uint8_t h264NALType(const uint8_t *nal, size_t len) {
+    if (len < 1) return 0;
+    return nal[0] & 0x1f;
+}
+
+static uint8_t h265NALType(const uint8_t *nal, size_t len) {
+    if (len < 2) return 0;
+    return (nal[0] >> 1) & 0x3f;
+}
+
+- (BOOL)updateFormatFromAnnexB:(const uint8_t *)buf size:(size_t)bufSize {
+    const uint8_t *params[3] = { NULL, NULL, NULL }; // H265: VPS/SPS/PPS, H264: SPS/PPS
+    size_t paramSizes[3] = { 0, 0, 0 };
+    size_t paramCount = 0;
+    BOOL isH265 = (self.codec == PyluxVideoCodecH265);
+    size_t off = 0;
+    size_t start, len;
+    while (findNextNAL(buf + off, bufSize - off, &start, &len)) {
+        const uint8_t *nal = buf + off + start;
+        uint8_t type = isH265 ? h265NALType(nal, len) : h264NALType(nal, len);
+        if (isH265) {
+            if (type == 32) { params[0] = nal; paramSizes[0] = len; } // VPS
+            else if (type == 33) { params[1] = nal; paramSizes[1] = len; } // SPS
+            else if (type == 34) { params[2] = nal; paramSizes[2] = len; } // PPS
+            if (params[1] && params[2]) {
+                // Prefer VPS+SPS+PPS when available, but still accept SPS+PPS only.
+                paramCount = params[0] ? 3 : 2;
+                break;
+            }
+        } else {
+            if (type == 7) { params[0] = nal; paramSizes[0] = len; } // SPS
+            else if (type == 8 && params[0]) { params[1] = nal; paramSizes[1] = len; paramCount = 2; break; } // PPS
+        }
+        off += start + len;
+    }
+    if (paramCount < 2 && !isH265) {
+        if (params[0]) { paramCount = 1; params[1] = NULL; paramSizes[1] = 0; }
+    }
+    if (paramCount < 1) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[updateFormatFromAnnexB] No param sets found");
+        return NO;
+    }
+    CMVideoFormatDescriptionRef newFmt = NULL;
+    if (isH265) {
+        if (paramCount < 2) return NO;
+        const uint8_t *paramSetPointers[3] = { 0 };
+        size_t paramSetSizes[3] = { 0 };
+        if (paramCount == 3) {
+            // VPS + SPS + PPS
+            paramSetPointers[0] = params[0];
+            paramSetPointers[1] = params[1];
+            paramSetPointers[2] = params[2];
+            paramSetSizes[0] = paramSizes[0];
+            paramSetSizes[1] = paramSizes[1];
+            paramSetSizes[2] = paramSizes[2];
+        } else {
+            // SPS + PPS fallback
+            paramSetPointers[0] = params[1];
+            paramSetPointers[1] = params[2];
+            paramSetSizes[0] = paramSizes[1];
+            paramSetSizes[1] = paramSizes[2];
+        }
+        OSStatus err = CMVideoFormatDescriptionCreateFromHEVCParameterSets(kCFAllocatorDefault, paramCount, paramSetPointers, paramSetSizes, 4, NULL, &newFmt);
+        if (err != noErr) return NO;
+    } else {
+        OSStatus err = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, paramCount, params, paramSizes, 4, &newFmt);
+        if (err != noErr) return NO;
+    }
+    if (self.formatDesc) CFRelease(self.formatDesc);
+    self.formatDesc = newFmt;
+    os_log(g_vdec_log, "[updateFormatFromAnnexB] Format created paramCount=%zu %{public}s", (size_t)paramCount, isH265 ? "HEVC" : "H264");
+    [self createSession];
+    return YES;
+}
+
+- (void)createSession {
+    if (self.session) {
+        os_log(g_vdec_log, "[createSession] invalidating previous session");
+        VTDecompressionSessionInvalidate(self.session);
+        CFRelease(self.session);
+        self.session = NULL;
+    }
+    self.presentationTimeStamp = 0;
+    if (!self.formatDesc) return;
+    os_log(g_vdec_log, "[createSession] VTDecompressionSessionCreate");
+    NSDictionary *attrs = @{
+        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
+    };
+    VTDecompressionOutputCallbackRecord cb = { outputCallback, (__bridge void *)self };
+    OSStatus err = VTDecompressionSessionCreate(kCFAllocatorDefault, self.formatDesc, NULL, (__bridge CFDictionaryRef)attrs, &cb, &_session);
+    os_log(g_vdec_log, "[createSession] err=%d session=%p", (int)err, (void *)self.session);
+    if (err != noErr) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[createSession] VTDecompressionSessionCreate FAILED %d", (int)err);
+    }
+}
+
+- (void)setDisplayLayer:(AVSampleBufferDisplayLayer *)layer {
+    _displayLayer = layer;
+    if (layer) {
+        CGRect b = layer.bounds;
+        os_log(g_vdec_log, "[setDisplayLayer] bounds=%.0fx%.0f superlayer=%d", b.size.width, b.size.height, layer.superlayer ? 1 : 0);
+    } else {
+        os_log(g_vdec_log, "[setDisplayLayer] cleared");
+    }
+}
+
+- (void)reset {
+    if (self.session) {
+        VTDecompressionSessionInvalidate(self.session);
+        CFRelease(self.session);
+        _session = NULL;
+    }
+    if (self.formatDesc) {
+        CFRelease(self.formatDesc);
+        _formatDesc = NULL;
+    }
+}
+
+- (BOOL)feedSample:(const uint8_t *)buf size:(size_t)bufSize framesLost:(int32_t)framesLost frameRecovered:(BOOL)frameRecovered {
+    static uint64_t s_callbackCount = 0;
+    s_callbackCount++;
+    if (s_callbackCount <= 3 || (s_callbackCount % 300 == 0)) {
+        os_log(g_vdec_log, "[feedSample] #%llu size=%zu lost=%d recovered=%{public}s", (unsigned long long)s_callbackCount, bufSize, (int)framesLost, frameRecovered ? "Y" : "N");
+    }
+    if (!buf || bufSize == 0) return YES;
+    BOOL isH265 = (self.codec == PyluxVideoCodecH265);
+    size_t off = 0;
+    size_t start, len;
+    BOOL hasSlice = NO;
+    BOOL needsFormatUpdate = NO;  // Track if we have param NALs; update format once per buffer
+    while (findNextNAL(buf + off, bufSize - off, &start, &len)) {
+        const uint8_t *nal = buf + off + start;
+        uint8_t type = isH265 ? h265NALType(nal, len) : h264NALType(nal, len);
+        if (isH265) {
+            if (type == 32 || type == 33 || type == 34) {
+                needsFormatUpdate = YES;
+            } else if (type <= 31) {
+                hasSlice = YES;
+            }
+        } else {
+            if (type == 7 || type == 8) {
+                needsFormatUpdate = YES;
+            } else if (type == 5 || type == 1) hasSlice = YES;
+        }
+        off += start + len;
+    }
+    if (needsFormatUpdate && [self updateFormatFromAnnexB:buf size:bufSize]) {
+        os_log(g_vdec_log, "[feedSample] format updated from param NALs");
+    }
+    // Header-only buffers (SPS/PPS or VPS/SPS/PPS): always acknowledge without decoding.
+    if (!hasSlice) {
+        if (s_callbackCount <= 5) os_log(g_vdec_log, "[feedSample] header-only size=%zu, ack", bufSize);
+        return YES;
+    }
+    if (!self.formatDesc && ![self updateFormatFromAnnexB:buf size:bufSize]) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR,
+                         "[feedSample] No format description (codec=%{public}s, buf=%zu, lost=%d, recovered=%{public}s)",
+                         isH265 ? "H265" : "H264",
+                         bufSize,
+                         (int)framesLost,
+                         frameRecovered ? "true" : "false");
+        return NO;
+    }
+    if (!self.session) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[feedSample] Decoder session not available");
+        return NO;
+    }
+    NSMutableData *avcc = [NSMutableData dataWithCapacity:bufSize + 256];
+    off = 0;
+    while (findNextNAL(buf + off, bufSize - off, &start, &len)) {
+        const uint8_t *nal = buf + off + start;
+        uint32_t lenBe = CFSwapInt32HostToBig((uint32_t)len);
+        [avcc appendBytes:&lenBe length:4];
+        [avcc appendBytes:nal length:len];
+        off += start + len;
+    }
+    if (avcc.length < 5) return YES;
+    void *avccCopy = CFAllocatorAllocate(kCFAllocatorDefault, avcc.length, 0);
+    if (!avccCopy) return YES;
+    memcpy(avccCopy, avcc.bytes, avcc.length);
+    CMBlockBufferRef blockBuf = NULL;
+    OSStatus err = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, avccCopy, avcc.length, kCFAllocatorDefault, NULL, 0, avcc.length, kCMBlockBufferAssureMemoryNowFlag, &blockBuf);
+    if (err != noErr || !blockBuf) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[feedSample] CMBlockBufferCreateWithMemoryBlock failed: %d", (int)err);
+        CFAllocatorDeallocate(kCFAllocatorDefault, avccCopy);
+        return NO;
+    }
+    CMSampleBufferRef sampleBuf = NULL;
+    CMSampleTimingInfo timing = {
+        .duration = kCMTimeInvalid,
+        .presentationTimeStamp = CMTimeMake(self.presentationTimeStamp, 90000),
+        .decodeTimeStamp = kCMTimeInvalid
+    };
+    err = CMSampleBufferCreate(kCFAllocatorDefault, blockBuf, TRUE, NULL, NULL, self.formatDesc, 1, 1, &timing, 0, NULL, &sampleBuf);
+    CFRelease(blockBuf);
+    if (err != noErr || !sampleBuf) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[feedSample] CMSampleBufferCreate failed: %d", (int)err);
+        return NO;
+    }
+    self.presentationTimeStamp++;
+    VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
+    err = VTDecompressionSessionDecodeFrame(self.session, sampleBuf, flags, NULL, NULL);
+    CFRelease(sampleBuf);
+    if (err != noErr) {
+        os_log_with_type(g_vdec_log, OS_LOG_TYPE_ERROR, "[feedSample] VTDecompressionSessionDecodeFrame err=%d buf=%zu lost=%d", (int)err, bufSize, (int)framesLost);
+        return NO;
+    }
+    if (s_callbackCount <= 5 || (self.presentationTimeStamp > 0 && self.presentationTimeStamp % 300 == 1)) {
+        os_log(g_vdec_log, "[feedSample] queued frame pts=%llu", (unsigned long long)self.presentationTimeStamp);
+    }
+    return YES;
+}
+
+@end
+
+bool PyluxVideoDecoderVideoSampleCallback(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool frame_recovered, void *user) {
+    if (!user) return true;
+    @autoreleasepool {
+        PyluxVideoDecoder *dec = (__bridge PyluxVideoDecoder *)user;
+        return [dec feedSample:buf size:buf_size framesLost:frames_lost frameRecovered:frame_recovered];
+    }
+}
+VDEC_CI_EOF
+
+cat > ios/Pylux/Bridge/ChiakiAudioOutputIOS.m <<'AUDIO_CI_EOF'
+// SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+// PCM playback: Chiaki decodes Opus to int16; we buffer and feed AudioQueue (pull callback, ring buffer).
+// PXSharp: echter 5-Band-Peaking-EQ + Stereo-3D-Weite im Audio-Callback.
+// Die Werte kommen aus den Menue-Reglern (pxAudioEQ0..4 in dB, pxAudio3D 0..1).
+
+#import "ChiakiAudioOutputIOS.h"
+#import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <dispatch/dispatch.h>
+#import <pthread.h>
+#import <stdlib.h>
+#import <string.h>
+#import <math.h>
+#import <os/log.h>
+
+#define RING_BYTES (512 * 1024)
+#define NUM_AQ_BUFS 4
+#define AQ_BUF_BYTES 4096
+#define EQ_BANDS 5
+#define EQ_MAX_CH 8
+
+static os_log_t g_audio_log;
+
+typedef struct {
+    float b0[EQ_BANDS], b1[EQ_BANDS], b2[EQ_BANDS], a1[EQ_BANDS], a2[EQ_BANDS];
+    float width;
+    float preGain;      // Headroom gegen Clipping bei Bass-Boost
+    float bassAlpha;    // Low-Pass fuer Bass-Mono (200 Hz)
+    float hpB0, hpB1, hpB2, hpA1, hpA2; // Hochpass 35 Hz gegen Sub-Rumpe
+    uint32_t channels;
+} PyluxEqCfg;
+
+typedef struct PyluxChiakiAudioOutput {
+    AudioQueueRef aq;
+    AudioQueueBufferRef bufs[NUM_AQ_BUFS];
+    int n_bufs;
+    uint32_t channels;
+    uint32_t rate;
+    uint8_t *ring;
+    size_t ring_cap;
+    size_t read_pos;
+    size_t byte_count;
+    pthread_mutex_t mtx;
+    // EQ-Konfiguration (decode thread schreibt, audio thread liest)
+    PyluxEqCfg cfg;
+    float cfgDb[EQ_BANDS];
+    // Filterzustand (nur audio thread)
+    float z1[EQ_MAX_CH][EQ_BANDS];
+    float z2[EQ_MAX_CH][EQ_BANDS];
+    float hpz1[EQ_MAX_CH], hpz2[EQ_MAX_CH]; // Hochpass-Zustand
+    float lpL, lpR; // Bass-Mono-Tiefpass (nur audio thread)
+} PyluxChiakiAudioOutput;
+
+// Audio-Unterbrechung (z. B. Spotify uebernimmt): Queue pausieren und danach
+// sauber wieder starten. Ohne das konnte ein Callback auf einer bereits
+// abgebauten Queue landen -> Absturz.
+static id g_interruptionObserver = nil;
+static PyluxChiakiAudioOutput *g_interruptionAO = NULL;
+
+static size_t ring_space(PyluxChiakiAudioOutput *a) {
+    return a->ring_cap - a->byte_count;
+}
+
+// Biquad-Koeffizienten (RBJ Cookbook, Peaking EQ). Wird unter a->mtx gerufen.
+static void eq_rebuild_locked(PyluxChiakiAudioOutput *a) {
+    static const double freqs[EQ_BANDS] = {45.0, 150.0, 600.0, 2400.0, 9000.0};
+    double fs = a->rate > 0 ? (double)a->rate : 48000.0;
+    const double Q = 1.0;
+    for (int i = 0; i < EQ_BANDS; i++) {
+        double db = a->cfgDb[i];
+        if (db > 18.0) db = 18.0;
+        if (db < -18.0) db = -18.0;
+        double A = pow(10.0, db / 40.0);
+        double b0, b1, b2, a0, a1, a2;
+        if (i == 0) {
+            // Low-Shelf 100 Hz: hebt den ganzen Bassbereich an, statt eines
+            // schmalen 45-Hz-Peaks (der klingt hohl/roehrend).
+            double w0 = 2.0 * M_PI * 100.0 / fs;
+            double cw = cos(w0);
+            double alpha = sin(w0) / 2.0 * sqrt(2.0);
+            double sq = 2.0 * sqrt(A) * alpha;
+            b0 = A * ((A + 1.0) - (A - 1.0) * cw + sq);
+            b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cw);
+            b2 = A * ((A + 1.0) - (A - 1.0) * cw - sq);
+            a0 = (A + 1.0) + (A - 1.0) * cw + sq;
+            a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cw);
+            a2 = (A + 1.0) + (A - 1.0) * cw - sq;
+        } else {
+            double w0 = 2.0 * M_PI * freqs[i] / fs;
+            double alpha = sin(w0) / (2.0 * Q);
+            b0 = 1.0 + alpha * A;
+            b1 = -2.0 * cos(w0);
+            b2 = 1.0 - alpha * A;
+            a0 = 1.0 + alpha / A;
+            a1 = -2.0 * cos(w0);
+            a2 = 1.0 - alpha / A;
+        }
+        a->cfg.b0[i] = (float)(b0 / a0);
+        a->cfg.b1[i] = (float)(b1 / a0);
+        a->cfg.b2[i] = (float)(b2 / a0);
+        a->cfg.a1[i] = (float)(a1 / a0);
+        a->cfg.a2[i] = (float)(a2 / a0);
+    }
+    // Hochpass 35 Hz (Q=0.707): entfernt Sub-Rumpe, die den Bass aufblaeht.
+    {
+        double w0 = 2.0 * M_PI * 35.0 / fs;
+        double alpha = sin(w0) / (2.0 * 0.70710678);
+        double cw = cos(w0);
+        double hb0 = (1.0 + cw) / 2.0;
+        double hb1 = -(1.0 + cw);
+        double hb2 = (1.0 + cw) / 2.0;
+        double ha0 = 1.0 + alpha;
+        double ha1 = -2.0 * cw;
+        double ha2 = 1.0 - alpha;
+        a->cfg.hpB0 = (float)(hb0 / ha0);
+        a->cfg.hpB1 = (float)(hb1 / ha0);
+        a->cfg.hpB2 = (float)(hb2 / ha0);
+        a->cfg.hpA1 = (float)(ha1 / ha0);
+        a->cfg.hpA2 = (float)(ha2 / ha0);
+    }
+    // KEIN Vorab-Absenken mehr: das hat den Bass um genau den Boost leiser
+    // gemacht (+6 dB Bass, -6 dB Pre-Gain = netto 0). Stattdessen begrenzt
+    // unten ein Soft-Limiter die Spitzen, damit nichts hart clippt.
+    a->cfg.preGain = 1.0f;
+    // Bass-Mono: Low-Pass bei 200 Hz (One-Pole).
+    a->cfg.bassAlpha = (float)(1.0 - exp(-2.0 * M_PI * 200.0 / fs));
+    a->cfg.channels = a->channels;
+}
+
+// Liest die Regler (decode thread, nicht Echtzeit) und aktualisiert nur bei Aenderung.
+static void eq_update_from_defaults(PyluxChiakiAudioOutput *a) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    static const char *keys[EQ_BANDS] = {"pxAudioEQ0", "pxAudioEQ1", "pxAudioEQ2", "pxAudioEQ3", "pxAudioEQ4"};
+    float db[EQ_BANDS];
+    BOOL changed = NO;
+    for (int i = 0; i < EQ_BANDS; i++) {
+        db[i] = (float)[d doubleForKey:[NSString stringWithUTF8String:keys[i]]];
+        if (fabsf(db[i] - a->cfgDb[i]) > 0.01f) changed = YES;
+    }
+    float w = (float)[d doubleForKey:@"pxAudio3D"];
+    if (w < 0.0f) w = 0.0f;
+    if (w > 1.0f) w = 1.0f;
+    if (fabsf(w - a->cfg.width) > 0.005f) changed = YES;
+    if (!changed) return;
+
+    pthread_mutex_lock(&a->mtx);
+    for (int i = 0; i < EQ_BANDS; i++) a->cfgDb[i] = db[i];
+    a->cfg.width = w;
+    eq_rebuild_locked(a);
+    pthread_mutex_unlock(&a->mtx);
+}
+
+static void ring_push(PyluxChiakiAudioOutput *a, const void *data, size_t len) {
+    eq_update_from_defaults(a);
+    pthread_mutex_lock(&a->mtx);
+    if (len > ring_space(a)) {
+        os_log_with_type(g_audio_log, OS_LOG_TYPE_DEFAULT, "[ChiakiAudio] ring overflow, dropping %zu bytes", len);
+        pthread_mutex_unlock(&a->mtx);
+        return;
+    }
+    size_t w = (a->read_pos + a->byte_count) % a->ring_cap;
+    size_t first = len;
+    if (w + first > a->ring_cap)
+        first = a->ring_cap - w;
+    memcpy(a->ring + w, data, first);
+    memcpy(a->ring, (const uint8_t *)data + first, len - first);
+    a->byte_count += len;
+    pthread_mutex_unlock(&a->mtx);
+}
+
+// Pop + Kopie der EQ-Konfiguration unter einem kurzen Lock (keine langen Blocks im Audio-Thread).
+static size_t ring_pop_cfg(PyluxChiakiAudioOutput *a, void *dst, size_t max, PyluxEqCfg *cfg) {
+    pthread_mutex_lock(&a->mtx);
+    size_t n = max < a->byte_count ? max : a->byte_count;
+    size_t first = n;
+    if (a->read_pos + first > a->ring_cap)
+        first = a->ring_cap - a->read_pos;
+    memcpy(dst, a->ring + a->read_pos, first);
+    memcpy((uint8_t *)dst + first, a->ring, n - first);
+    a->read_pos = (a->read_pos + n) % a->ring_cap;
+    a->byte_count -= n;
+    *cfg = a->cfg;
+    pthread_mutex_unlock(&a->mtx);
+    return n;
+}
+
+static void ring_reset(PyluxChiakiAudioOutput *a) {
+    pthread_mutex_lock(&a->mtx);
+    a->read_pos = 0;
+    a->byte_count = 0;
+    pthread_mutex_unlock(&a->mtx);
+    memset(a->z1, 0, sizeof(a->z1));
+    memset(a->z2, 0, sizeof(a->z2));
+    memset(a->hpz1, 0, sizeof(a->hpz1));
+    memset(a->hpz2, 0, sizeof(a->hpz2));
+    a->lpL = 0.0f;
+    a->lpR = 0.0f;
+}
+
+// Chiaki calls settings from a worker thread; AVAudioSession and AudioQueue setup must run on the main thread.
+static void run_on_main(void (^block)(void)) {
+    if ([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), block);
+    }
+}
+
+static void audio_teardown(PyluxChiakiAudioOutput *ao) {
+    if (g_interruptionObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:g_interruptionObserver];
+        g_interruptionObserver = nil;
+    }
+    g_interruptionAO = NULL;
+    if (!ao->aq)
+        return;
+    AudioQueueStop(ao->aq, true);
+    for (int i = 0; i < ao->n_bufs; i++) {
+        if (ao->bufs[i]) {
+            AudioQueueFreeBuffer(ao->aq, ao->bufs[i]);
+            ao->bufs[i] = NULL;
+        }
+    }
+    ao->n_bufs = 0;
+    AudioQueueDispose(ao->aq, true);
+    ao->aq = NULL;
+    ring_reset(ao);
+}
+
+static inline float biquad(float x, float b0, float b1, float b2, float a1, float a2,
+                           float *z1, float *z2) {
+    float y = b0 * x + *z1;
+    *z1 = b1 * x - a1 * y + *z2;
+    *z2 = b2 * x - a2 * y;
+    return y;
+}
+
+// Sanfter Limiter: unter 0.85 linear, darueber weich abgerundet (kein hartes Clipping).
+static inline float softclip(float x) {
+    const float t = 0.95f;
+    if (x > t) return t + (1.0f - t) * tanhf((x - t) / (1.0f - t));
+    if (x < -t) return -t - (1.0f - t) * tanhf((-x - t) / (1.0f - t));
+    return x;
+}
+
+static inline int16_t clamp16(float v) {
+    if (v > 1.0f) v = 1.0f;
+    if (v < -1.0f) v = -1.0f;
+    long r = lrintf(v * 32767.0f);
+    if (r > 32767) r = 32767;
+    if (r < -32768) r = -32768;
+    return (int16_t)r;
+}
+
+static void audio_process(PyluxChiakiAudioOutput *a, int16_t *s, size_t frames, const PyluxEqCfg *cfg) {
+    uint32_t ch = cfg->channels;
+    if (ch < 1 || ch > EQ_MAX_CH) return;
+    float widthGain = 1.0f + cfg->width * 1.5f; // 1.0 .. 2.5
+
+    float pre = cfg->preGain > 0.01f ? cfg->preGain : 1.0f;
+    float alpha = cfg->bassAlpha;
+    if (alpha <= 0.0f || alpha > 1.0f) alpha = 0.02f;
+
+    for (size_t n = 0; n < frames; n++) {
+        if (ch >= 2) {
+            float L = ((float)s[n * ch] / 32768.0f) * pre;
+            float R = ((float)s[n * ch + 1] / 32768.0f) * pre;
+            L = biquad(L, cfg->hpB0, cfg->hpB1, cfg->hpB2, cfg->hpA1, cfg->hpA2,
+                       &a->hpz1[0], &a->hpz2[0]);
+            R = biquad(R, cfg->hpB0, cfg->hpB1, cfg->hpB2, cfg->hpA1, cfg->hpA2,
+                       &a->hpz1[1], &a->hpz2[1]);
+            for (int b = 0; b < EQ_BANDS; b++) {
+                L = biquad(L, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                           &a->z1[0][b], &a->z2[0][b]);
+                R = biquad(R, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                           &a->z1[1][b], &a->z2[1][b]);
+            }
+            // Bass (<200 Hz) bleibt mono -- sonst wird er hohl/phasig ("roehrend").
+            a->lpL += alpha * (L - a->lpL);
+            a->lpR += alpha * (R - a->lpR);
+            float lowM = (a->lpL + a->lpR) * 0.5f;
+            float highL = L - a->lpL;
+            float highR = R - a->lpR;
+            float Mh = (highL + highR) * 0.5f;
+            float Sh = (highL - highR) * 0.5f;
+            L = lowM + Mh + Sh * widthGain;
+            R = lowM + Mh - Sh * widthGain;
+            L = softclip(L);
+            R = softclip(R);
+            s[n * ch] = clamp16(L);
+            s[n * ch + 1] = clamp16(R);
+            // Restliche Kanaele nur EQ (kein Width), falls je >2 geliefert wird.
+            for (uint32_t c = 2; c < ch; c++) {
+                float v = ((float)s[n * ch + c] / 32768.0f) * pre;
+                for (int b = 0; b < EQ_BANDS; b++) {
+                    v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                               &a->z1[c][b], &a->z2[c][b]);
+                }
+                s[n * ch + c] = clamp16(softclip(v));
+            }
+        } else {
+            float v = ((float)s[n * ch] / 32768.0f) * pre;
+            v = biquad(v, cfg->hpB0, cfg->hpB1, cfg->hpB2, cfg->hpA1, cfg->hpA2,
+                       &a->hpz1[0], &a->hpz2[0]);
+            for (int b = 0; b < EQ_BANDS; b++) {
+                v = biquad(v, cfg->b0[b], cfg->b1[b], cfg->b2[b], cfg->a1[b], cfg->a2[b],
+                           &a->z1[0][b], &a->z2[0][b]);
+            }
+            s[n * ch] = clamp16(softclip(v));
+        }
+    }
+}
+
+static void aq_output_callback(void *userdata, AudioQueueRef q, AudioQueueBufferRef buf) {
+    PyluxChiakiAudioOutput *ao = userdata;
+    // Nur die aktuell aktive Queue bedienen. Nach einem Abbau/Neuaufbau darf ein
+    // alter Callback nicht mehr auf die dispose-te Queue schreiben.
+    if (!ao || !q || ao->aq != q) return;
+    UInt32 cap = buf->mAudioDataBytesCapacity;
+    PyluxEqCfg cfg;
+    size_t n = ring_pop_cfg(ao, buf->mAudioData, cap, &cfg);
+    if (n < cap)
+        memset((uint8_t *)buf->mAudioData + n, 0, cap - n);
+    if (n > 0 && cfg.channels > 0) {
+        size_t frames = n / (sizeof(int16_t) * cfg.channels);
+        audio_process(ao, (int16_t *)buf->mAudioData, frames, &cfg);
+    }
+    buf->mAudioDataByteSize = cap;
+    AudioQueueEnqueueBuffer(q, buf, 0, NULL);
+}
+
+void *ios_chiaki_audio_output_create(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        g_audio_log = os_log_create("com.pylux.stream", "ChiakiAudio");
+    });
+    PyluxChiakiAudioOutput *ao = calloc(1, sizeof(*ao));
+    if (!ao)
+        return NULL;
+    ao->ring_cap = RING_BYTES;
+    ao->ring = malloc(ao->ring_cap);
+    if (!ao->ring) {
+        free(ao);
+        return NULL;
+    }
+    pthread_mutex_init(&ao->mtx, NULL);
+    // Startwerte: neutral, bis der Decode-Thread die Regler liest.
+    ao->cfg.width = 0.0f;
+    return ao;
+}
+
+void ios_chiaki_audio_output_free(void *ptr) {
+    if (!ptr)
+        return;
+    PyluxChiakiAudioOutput *ao = ptr;
+    run_on_main(^{
+        audio_teardown(ao);
+    });
+    pthread_mutex_destroy(&ao->mtx);
+    free(ao->ring);
+    free(ao);
+}
+
+void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *ptr) {
+    PyluxChiakiAudioOutput *ao = ptr;
+    if (!ao || channels < 1 || channels > 8 || rate < 8000)
+        return;
+
+    ao->channels = channels;
+    ao->rate = rate;
+
+    run_on_main(^{
+        audio_teardown(ao);
+
+        NSError *nserr = nil;
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        // Reset session before reconfiguring; avoids paramErr -50 when category/options change mid-stream.
+        [session setActive:NO error:nil];
+
+        // Plain Playback only: AllowBluetoothA2DP + Playback yields AVAudioSessionErrorCodeBadParam (-50) when a
+        // mediaplaybackd sibling session exists (e.g. Safari in-app browser after Add to Library). DefaultToSpeaker
+        // is invalid with Playback (PlayAndRecord only). See pylux.log SessionCore.mm:517 / AudioAnalytics Session_Error.
+        if (![session setCategory:AVAudioSessionCategoryPlayback error:&nserr]) {
+            os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] setCategory failed: %{public}@", nserr.localizedDescription);
+        }
+        [session setMode:AVAudioSessionModeMoviePlayback error:&nserr];
+        [session setPreferredSampleRate:(double)rate error:&nserr];
+        [session setPreferredIOBufferDuration:0.02 error:&nserr];
+        if (![session setActive:YES error:&nserr])
+            os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] setActive failed: %{public}@", nserr.localizedDescription);
+
+        AudioStreamBasicDescription fmt;
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.mSampleRate = rate;
+        fmt.mFormatID = kAudioFormatLinearPCM;
+        fmt.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+        fmt.mBitsPerChannel = 16;
+        fmt.mChannelsPerFrame = channels;
+        fmt.mBytesPerFrame = (fmt.mBitsPerChannel / 8) * channels;
+        fmt.mFramesPerPacket = 1;
+        fmt.mBytesPerPacket = fmt.mBytesPerFrame;
+
+        OSStatus st = AudioQueueNewOutput(&fmt, aq_output_callback, ao, NULL, NULL, 0, &ao->aq);
+        if (st != noErr) {
+            os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] AudioQueueNewOutput failed: %d", (int)st);
+            ao->aq = NULL;
+            return;
+        }
+
+        ao->n_bufs = 0;
+        for (int i = 0; i < NUM_AQ_BUFS; i++) {
+            AudioQueueBufferRef b = NULL;
+            st = AudioQueueAllocateBuffer(ao->aq, AQ_BUF_BYTES, &b);
+            if (st != noErr || !b)
+                break;
+            memset(b->mAudioData, 0, AQ_BUF_BYTES);
+            b->mAudioDataByteSize = AQ_BUF_BYTES;
+            AudioQueueEnqueueBuffer(ao->aq, b, 0, NULL);
+            ao->bufs[ao->n_bufs++] = b;
+        }
+
+        st = AudioQueueStart(ao->aq, NULL);
+        if (st != noErr) {
+            os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] AudioQueueStart failed: %d", (int)st);
+        } else {
+            os_log(g_audio_log, "[ChiakiAudio] stream started ch=%u rate=%u", channels, rate);
+            g_interruptionAO = ao;
+            if (g_interruptionObserver) {
+                [[NSNotificationCenter defaultCenter] removeObserver:g_interruptionObserver];
+            }
+            g_interruptionObserver = [[NSNotificationCenter defaultCenter]
+                addObserverForName:AVAudioSessionInterruptionNotification
+                object:nil queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+                    PyluxChiakiAudioOutput *a = g_interruptionAO;
+                    if (!a || !a->aq) return;
+                    NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
+                    if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
+                        AudioQueuePause(a->aq);
+                    } else {
+                        NSNumber *opt = note.userInfo[AVAudioSessionInterruptionOptionKey];
+                        if (opt.unsignedIntegerValue & AVAudioSessionInterruptionOptionShouldResume) {
+                            [[AVAudioSession sharedInstance] setActive:YES error:nil];
+                            AudioQueueStart(a->aq, NULL);
+                        }
+                    }
+                }];
+        }
+    });
+}
+
+void ios_chiaki_audio_output_frame(int16_t *buf, size_t total_interleaved_samples, void *ptr) {
+    PyluxChiakiAudioOutput *ao = ptr;
+    if (!ao || !buf || total_interleaved_samples == 0)
+        return;
+    ring_push(ao, buf, total_interleaved_samples * sizeof(int16_t));
+}
+
+void ios_chiaki_opus_frame_bridge(int16_t *buf, size_t samples_per_channel, void *user) {
+    PyluxChiakiAudioOutput *ao = user;
+    if (!ao || !ao->channels || !buf || samples_per_channel == 0)
+        return;
+    ios_chiaki_audio_output_frame(buf, samples_per_channel * ao->channels, user);
+}
+AUDIO_CI_EOF
+
+cat > ios/Pylux/Views/StreamView.swift <<'STREAMVIEW_CI_EOF'
+// SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
+// Stream screen matching Android's StreamActivity
+
+import SwiftUI
+import UIKit
+import os.log
+
+private struct QuickCardStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.94 : 1.0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+private let streamViewLog = OSLog(subsystem: "com.pylux.stream", category: "StreamView")
+
+private func chiakiQuitReasonDescription(_ reason: Int32) -> String {
+    switch reason {
+    case 0: return "Stream stopped normally."
+    case 1: return "Stopped."
+    case 4: return "Stream connection lost. Check the network and try again."
+    case 0x01000001: return "Session request failed (unknown reason)."
+    case 0x01000002: return "Connection refused by console. It may be in use or not ready."
+    case 0x01000003: return "Streaming is already in use on the console."
+    case 0x01000004: return "The console ended streaming unexpectedly. Please wait and try again."
+    case 0x02000001: return "Control connection failed (unknown)."
+    case 0x02000002: return "Control connection refused. Check network settings."
+    case 0x04000001: return "Stream connection timed out."
+    default:
+        return String(format: "Stream ended (code: 0x%08x).", UInt32(bitPattern: reason))
+    }
+}
+
+enum DisplayMode: String, CaseIterable {
+    case fit = "Fit"
+    case zoom = "Zoom"
+    case stretch = "Stretch"
+}
+
+struct StreamView: View {
+    let connectInfo: StreamConnectInfo
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var session: StreamSession
+    @State private var showOverlay = true
+    @State private var showPXSettings = false
+    @State private var latencyText = ""
+    @State private var lastPresenceCheck: TimeInterval = 0
+    @AppStorage("pxSharpLatencyHud") private var latencyHud = false
+    @State private var displayMode: DisplayMode = .fit
+    @State private var onScreenControls: Bool
+    @State private var touchpadOnly: Bool
+    @State private var showStats: Bool
+    @State private var statsText: String = ""
+    /// Previous cumulative dropped-frame total so the overlay can show drops *this tick*
+    /// (per second) instead of a lifetime total. -1 = uninitialized.
+    @State private var lastDroppedFrames: Int64 = -1
+    @State private var showQuitAlert = false
+    @State private var showErrorAlert = false
+    @State private var errorMessage = ""
+    @State private var showPinAlert = false
+    @State private var pinIncorrect = false
+    @State private var pinEntry = ""
+    @State private var videoHostView: StreamVideoUIView?
+    @State private var hideOverlayTask: Task<Void, Never>?
+    @State private var pipClosedByUser = false
+    @State private var pipIsPossible = false
+    @StateObject private var donationCoordinator = DonationPromptCoordinator.shared
+
+    init(connectInfo: StreamConnectInfo) {
+        self.connectInfo = connectInfo
+        let prefs = StreamPreferences.load()
+        let tpOnly = prefs.touchpadOnlyEnabled
+        let fullOn = prefs.onScreenControlsEnabled
+        _onScreenControls = State(initialValue: tpOnly ? false : fullOn)
+        _touchpadOnly = State(initialValue: tpOnly)
+        _showStats = State(initialValue: prefs.streamStatsOverlayEnabled)
+        _session = StateObject(wrappedValue: StreamSession(connectInfo: connectInfo, input: StreamInput()))
+    }
+
+    private func persistStreamOverlayPreferences() {
+        var p = StreamPreferences.load()
+        p.onScreenControlsEnabled = onScreenControls
+        p.touchpadOnlyEnabled = touchpadOnly
+        p.streamStatsOverlayEnabled = showStats
+        p.save()
+    }
+
+    private var isConnected: Bool {
+        if case .connected = session.state { return true }
+        return false
+    }
+
+    /// Single compact top row with short labels, e.g.
+    /// "4.7 Mbps • PL 1.1% • DF/s 0 • 60 FPS • 90 ms • 1280×720".
+    private func updateStats() {
+        // ECHTE Bitrate immer in den Key schreiben -- frueher blieb dort ein
+        // Testwert (2,5) stehen, die App hat dann Schaerfe weggenommen und
+        // alle 6 s Keyframes angefordert.
+        if isConnected, let m = session.metrics() {
+            UserDefaults.standard.set(String(format: "%.1f", m.bitrateMbps), forKey: "pxSharpStreamMbps")
+            // Latenz-Schaetzung: Controller + Encode + halber RTT + Decode + Frame + Display.
+            let frame = 1000.0 / max(m.fps, 1)
+            let est = 10.0 + 5.0 + m.rttMs * 0.5 + 5.0 + frame + 8.0
+            latencyText = String(format: "LATENZ ~%.0f ms\nRTT %.0f · Frame %.0f · PL %.1f%%",
+                                 est, m.rttMs, frame, m.packetLoss * 100)
+
+            // Bitrate/RTT/Loss-Log (max. 240 Zeilen, ~4 min) fuer die Diagnose.
+            let d = UserDefaults.standard
+            d.set(m.rttMs, forKey: "pxRttMs")
+            d.set(m.packetLoss, forKey: "pxLoss")
+            let line = String(format: "%d,%.1f,%.0f,%.4f,%.0f\n",
+                              Int(Date().timeIntervalSince1970), m.bitrateMbps, m.rttMs,
+                              m.packetLoss, m.fps)
+            var log = d.string(forKey: "pxBwLog") ?? ""
+            log += line
+            let parts = log.split(separator: "\n")
+            if parts.count > 240 { log = parts.suffix(240).joined(separator: "\n") + "\n" }
+            d.set(log, forKey: "pxBwLog")
+
+            // Auto-Profil: alle 30 s PSN-Presence pruefen und passendes Profil laden.
+            let now = Date().timeIntervalSince1970
+            if now - lastPresenceCheck > 30 {
+                lastPresenceCheck = now
+                PSNPresence.fetchCurrentGame { title in
+                    guard let title = title else { return }
+                    if let profile = PXProfileStore.autoProfile(for: title) {
+                        PXProfileStore.apply(profile)
+                    }
+                }
+            }
+        }
+        // No native read unless the overlay is actually showing — zero cost when off.
+        guard showStats, isConnected, let m = session.metrics() else { return }
+        let drops: Int64 = lastDroppedFrames < 0 ? 0 : max(0, Int64(m.droppedFrames) - lastDroppedFrames)
+        lastDroppedFrames = Int64(m.droppedFrames)
+        var parts: [String] = []
+        parts.append(String(format: "%.1f Mbps", m.bitrateMbps))
+        parts.append(String(format: "PL %.1f%%", m.packetLoss * 100.0))
+        parts.append("DF/s \(drops)")
+        parts.append(String(format: "%.0f FPS", m.fps))
+        if m.rttMs > 0 { parts.append(String(format: "%.0f ms", m.rttMs)) }
+        parts.append("\(m.width)×\(m.height)")
+        statsText = parts.joined(separator: "   •   ")
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            // Full-screen video bounds; fit/zoom/stretch come only from AVLayerVideoGravity (matches Android
+            // SurfaceView in a full-screen AspectRatioFrameLayout — a fixed 16:9 SwiftUI box made fit≈zoom for 16:9 streams).
+            StreamVideoView(
+                aspectRatio: CGFloat(connectInfo.videoWidth) / CGFloat(max(connectInfo.videoHeight, 1)),
+                displayMode: displayMode
+            ) { view in
+                videoHostView = view
+                session.attachToView(view)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+            .clipped()
+
+            // Always show at least PS when full/touchpad controls are off (no tap-to-show overlay anymore).
+            StreamTouchControlsOverlayRepresentable(
+                mode: touchpadOnly ? .touchpadOnly : (onScreenControls ? .full : .psOnly),
+                streamInput: session.input,
+                onPSButtonPressed: {
+                    showOverlay = true
+                    scheduleHideOverlay()
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+            .allowsHitTesting(true)
+
+            // Performance stats overlay: single top-centered row. Stays visible while
+            // toggled on and connected, independent of the auto-hiding control bar.
+            if showStats, isConnected {
+                VStack {
+                    Text(statsText)
+                        .font(.system(size: 12, weight: .regular, design: .monospaced))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(Color.black.opacity(0.4))
+                        .cornerRadius(6)
+                        .padding(.top, 1)
+                        .allowsHitTesting(false)
+                    Spacer()
+                }
+                .transition(.opacity)
+            }
+
+            // Latenz-HUD (optional, Standard aus) -- rein additiv.
+            if latencyHud, isConnected, !latencyText.isEmpty {
+                VStack {
+                    HStack {
+                        Text(latencyText)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.black.opacity(0.55))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .strokeBorder(psBlue.opacity(0.35), lineWidth: 1)
+                                    )
+                            )
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(.top, showStats ? 34 : 10)
+                .padding(.leading, 14)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
+
+            // Bottom overlay bar (PlayStation-Kartenmenü)
+            if showOverlay {
+                VStack {
+                    Spacer()
+                    overlayBar
+                }
+                .transition(.move(edge: .bottom))
+            }
+
+            // Full-screen connecting overlay (above touch controls so STUN/holepunch is always visible)
+            if case .connecting = session.state {
+                ZStack {
+                    Color.black.opacity(0.62)
+                        .ignoresSafeArea()
+                    VStack(spacing: 18) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.35)
+                        Text(session.connectionPhase.isEmpty ? "Connecting…" : session.connectionPhase)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 28)
+                        Text("This can take a while on some networks.")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.72))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 36)
+                    }
+                }
+                .allowsHitTesting(true)
+            }
+
+            // PIN entry in-stream (not .alert TextField, not fullScreenCover): those paths use separate UIKit
+            // controllers that can force portrait and fight AppOrientationLock, then crash when rotating back.
+            if showPinAlert {
+                LoginPinEntryView(
+                    pinIncorrect: pinIncorrect,
+                    pinEntry: $pinEntry,
+                    onSubmit: {
+                        let pin = pinEntry
+                        pinEntry = ""
+                        showPinAlert = false
+                        session.sendLoginPin(pin)
+                    },
+                    onCancel: {
+                        pinEntry = ""
+                        showPinAlert = false
+                        session.pause()
+                        dismiss()
+                    }
+                )
+                .zIndex(20_000)
+                .allowsHitTesting(true)
+            }
+        }
+        // NavigationStack / fullScreenCover still propose safe-area-inset size to children; expand to physical edges
+        // so zoom (resizeAspectFill) can use full width (Android SurfaceView is match_parent).
+        .ignoresSafeArea()
+        .statusBar(hidden: true)
+        .onAppear {
+            // Match Android StreamActivity userLandscape (async so presentation from parent is committed).
+            DispatchQueue.main.async { AppOrientationLock.lockLandscapeForStream() }
+            session.pipManager.pipClosedByUser = { [weak session] in
+                session?.pause()
+                pipClosedByUser = true
+            }
+            session.resume()
+            scheduleHideOverlay()
+        }
+        .onChange(of: onScreenControls) { on in
+            if on { touchpadOnly = false }
+            if !on && !touchpadOnly { session.input.clearTouchOverlayState() }
+            persistStreamOverlayPreferences()
+        }
+        .onChange(of: touchpadOnly) { on in
+            if on { onScreenControls = false }
+            if !on && !onScreenControls { session.input.clearTouchOverlayState() }
+            persistStreamOverlayPreferences()
+        }
+        .onChange(of: showStats) { on in
+            if on { lastDroppedFrames = -1 } // first tick reads 0, not the lifetime total
+            persistStreamOverlayPreferences()
+        }
+        // Refresh the overlay once per second to match libchiaki's CONNECTIONQUALITY
+        // cadence. The closure no-ops (no native read) unless the overlay is showing.
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            updateStats()
+        }
+        .onDisappear {
+            session.input.clearTouchOverlayState()
+            AppOrientationLock.unlockAfterStream()
+            donationCoordinator.cancelScheduledOffer()
+            donationCoordinator.flushStreamTime()
+            if !session.pipManager.isActive {
+                session.pause()
+            }
+        }
+        .sheet(isPresented: $donationCoordinator.showPaywall) {
+            DonationPaywallView()
+        }
+        .sheet(isPresented: $showPXSettings) {
+            PXSettingsClean()
+                .preferredColorScheme(.dark)
+        }
+        .onChange(of: session.menuRequestToken) { _ in
+            // OPTIONS+SHARE chord fired -> surface the in-stream menu (auto-hides), same as a tap.
+            showOverlay = true
+            scheduleHideOverlay()
+        }
+        .onChange(of: session.state) { newState in
+            switch newState {
+            case .connected:
+                if let view = videoHostView {
+                    session.attachToView(view)
+                }
+                lastDroppedFrames = -1 // reset stats baseline for the new session
+                donationCoordinator.markConnected()
+                donationCoordinator.scheduleOfferIfEligible()
+            case .quit(_, _):
+                donationCoordinator.cancelScheduledOffer()
+                donationCoordinator.flushStreamTime()
+                showQuitAlert = true
+            case .createError(let code, let message):
+                donationCoordinator.cancelScheduledOffer()
+                donationCoordinator.flushStreamTime()
+                if let m = message, !m.isEmpty {
+                    errorMessage = "\(m) (code \(code))"
+                } else {
+                    errorMessage = "Connection failed (code \(code))"
+                }
+                showErrorAlert = true
+            case .loginPinRequest(let incorrect):
+                donationCoordinator.cancelScheduledOffer()
+                donationCoordinator.flushStreamTime()
+                pinIncorrect = incorrect
+                pinEntry = ""
+                showPinAlert = true
+            case .connecting:
+                donationCoordinator.cancelScheduledOffer()
+            default:
+                break
+            }
+        }
+        .alert("Stream Ended", isPresented: $showQuitAlert) {
+            Button("OK") { dismiss() }
+        } message: {
+            if case .quit(let reason, let reasonStr) = session.state {
+                let msg = reasonStr ?? chiakiQuitReasonDescription(reason)
+                Text(msg)
+            } else {
+                Text("The stream has ended.")
+            }
+        }
+        .alert("Connection Error", isPresented: $showErrorAlert) {
+            Button("OK") { dismiss() }
+        } message: {
+            Text(errorMessage)
+        }
+        .onChange(of: showPinAlert) { show in
+            if show {
+                AppOrientationLock.lockLandscapeForStream()
+            }
+        }
+        .onChange(of: pipClosedByUser) { closed in
+            if closed { dismiss() }
+        }
+        .onReceive(session.pipManager.$isPossible) { possible in
+            pipIsPossible = possible
+        }
+    }
+
+    // MARK: - Overlay bar (matches Android's stream overlay: controls, display mode, disconnect)
+
+    private var overlayBar: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("OPTIONEN")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(2.2)
+                    .foregroundColor(.white.opacity(0.55))
+                Spacer()
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { showOverlay = false }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white.opacity(0.75))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.white.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 12) {
+                quickCard("Trennen", "power", .red) {
+                    session.pause()
+                    dismiss()
+                }
+                quickCard("Bild & Audio", "slider.horizontal.3", psBlue) {
+                    showOverlay = false
+                    showPXSettings = true
+                }
+                quickCard("Anzeige", "rectangle.arrowtriangle.2.inward", psBlue) {
+                    switch displayMode {
+                    case .fit: displayMode = .zoom
+                    case .zoom: displayMode = .stretch
+                    case .stretch: displayMode = .fit
+                    }
+                }
+                quickCard("Steuerung", "gamecontroller.fill", psBlue) {
+                    onScreenControls.toggle()
+                }
+                quickCard("Stats", "chart.bar.fill", psBlue) {
+                    showStats.toggle()
+                }
+                quickCard("Latenz", "speedometer", psBlue) {
+                    latencyHud.toggle()
+                }
+                if pipIsPossible {
+                    quickCard("PiP", "pip.enter", psBlue) {
+                        session.pipManager.startIfPossible()
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(Color(red: 0.03, green: 0.05, blue: 0.09).opacity(0.55))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(colors: [psBlue.opacity(0.55), Color.white.opacity(0.06)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing),
+                            lineWidth: 1
+                        )
+                )
+                .shadow(color: .black.opacity(0.55), radius: 24, y: 12)
+        )
+        .padding(.horizontal, 20)
+        .padding(.bottom, 24)
+    }
+
+    private var psBlue: Color { Color(red: 0.0, green: 0.44, blue: 0.82) }
+
+    private func quickCard(_ title: String, _ icon: String, _ tint: Color,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 9) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .fill(LinearGradient(colors: [tint.opacity(0.32), tint.opacity(0.08)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 52, height: 52)
+                    Image(systemName: icon)
+                        .font(.system(size: 21, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.92))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .frame(height: 26)
+            }
+            .frame(width: 84)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(QuickCardStyle())
+    }
+
+    private func displayModeButton(_ mode: DisplayMode, icon: String) -> some View {
+        Button {
+            displayMode = mode
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(displayMode == mode ? .accentColor : .white.opacity(0.7))
+                .frame(width: 48, height: 36)
+        }
+    }
+
+    private func scheduleHideOverlay() {
+        hideOverlayTask?.cancel()
+        hideOverlayTask = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000) // 4 seconds, matches Android
+            if !Task.isCancelled {
+                withAnimation { showOverlay = false }
+            }
+        }
+    }
+}
+
+// MARK: - Login PIN entry (in-stream overlay; avoids UIAlertController and fullScreenCover)
+
+private struct LoginPinEntryView: View {
+    let pinIncorrect: Bool
+    @Binding var pinEntry: String
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+    @State private var keyboardBottomInset: CGFloat = 0
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.92)
+                .ignoresSafeArea()
+            VStack(spacing: 18) {
+                Text(pinIncorrect ? "Incorrect PIN" : "Login PIN required")
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                Text(
+                    pinIncorrect
+                        ? "The PIN was incorrect. Enter the PIN shown on your console."
+                        : "Enter the PIN displayed on your console."
+                )
+                .font(.body)
+                .foregroundStyle(.white.opacity(0.88))
+                .multilineTextAlignment(.center)
+                TextField("PIN", text: $pinEntry)
+                    .keyboardType(.numberPad)
+                    .textContentType(.oneTimeCode)
+                    .multilineTextAlignment(.center)
+                    .font(.system(size: 26, weight: .medium, design: .monospaced))
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 16)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.15)))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: 280)
+                    .onChange(of: pinEntry) { newValue in
+                        let digits = String(newValue.filter(\.isNumber).prefix(4))
+                        if digits != newValue {
+                            pinEntry = digits
+                        }
+                    }
+                HStack(spacing: 24) {
+                    Button("Cancel", role: .cancel, action: onCancel)
+                        .foregroundStyle(.white)
+                    Button("Submit", action: onSubmit)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(pinEntry.count != 4)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, 28)
+            .padding(.top, 52)
+            .padding(.bottom, 20 + keyboardBottomInset)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+            let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+            let inset = keyboardBottomOverlap(keyboardFrameScreen: frame)
+            withAnimation(.easeOut(duration: duration)) {
+                keyboardBottomInset = inset
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
+            let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+            withAnimation(.easeOut(duration: duration)) {
+                keyboardBottomInset = 0
+            }
+        }
+    }
+
+    private func keyboardBottomOverlap(keyboardFrameScreen: CGRect) -> CGFloat {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first(where: { $0.isKeyWindow })
+        else {
+            return max(0, UIScreen.main.bounds.height - keyboardFrameScreen.minY)
+        }
+        let kbInWindow = window.convert(keyboardFrameScreen, from: nil)
+        return max(0, window.bounds.maxY - kbInWindow.minY)
+    }
+}
+STREAMVIEW_CI_EOF
 
 python3 - <<'PATCH_EOF'
 p = 'ios/Pylux/Views/SettingsView.swift'
