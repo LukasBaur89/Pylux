@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2003 ] 2>/dev/null; then BUILD_NUM=2003; fi
+if [ "$BUILD_NUM" -lt 2004 ] 2>/dev/null; then BUILD_NUM=2004; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -7448,10 +7448,12 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
         // Reset session before reconfiguring; avoids paramErr -50 when category/options change mid-stream.
         [session setActive:NO error:nil];
 
-        // Plain Playback only: AllowBluetoothA2DP + Playback yields AVAudioSessionErrorCodeBadParam (-50) when a
-        // mediaplaybackd sibling session exists (e.g. Safari in-app browser after Add to Library). DefaultToSpeaker
-        // is invalid with Playback (PlayAndRecord only). See pylux.log SessionCore.mm:517 / AudioAnalytics Session_Error.
-        if (![session setCategory:AVAudioSessionCategoryPlayback error:&nserr]) {
+        // MixWithOthers: Spotify darf parallel weiterlaufen (Spielton + Musik).
+        // pxAudioMix (Default an) erlaubt das Abschalten per /set.
+        NSNumber *mixNum = [[NSUserDefaults standardUserDefaults] objectForKey:@"pxAudioMix"];
+        BOOL mix = mixNum ? mixNum.boolValue : YES;
+        AVAudioSessionCategoryOptions opts = mix ? AVAudioSessionCategoryOptionMixWithOthers : 0;
+        if (![session setCategory:AVAudioSessionCategoryPlayback withOptions:opts error:&nserr]) {
             os_log_with_type(g_audio_log, OS_LOG_TYPE_ERROR, "[ChiakiAudio] setCategory failed: %{public}@", nserr.localizedDescription);
         }
         [session setMode:AVAudioSessionModeMoviePlayback error:&nserr];
