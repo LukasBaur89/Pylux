@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2017 ] 2>/dev/null; then BUILD_NUM=2017; fi
+if [ "$BUILD_NUM" -lt 2018 ] 2>/dev/null; then BUILD_NUM=2018; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -5351,6 +5351,10 @@ struct SharpnessRow: View {
             eq0 = 7.0; eq1 = 4.0; eq2 = 0; eq3 = 2.0; eq4 = 2.0; audio3D = 0.15
         case 9: // Sony WH-1000XM4 maximal (mit Subbass)
             eq0 = 9.0; eq1 = 5.0; eq2 = 0; eq3 = 2.5; eq4 = 2.0; audio3D = 0.20
+        case 11: // Club (mein Setup)
+            eq0 = 14.0; eq1 = 12.0; eq2 = 5.5; eq3 = 7.0; eq4 = 10.5
+            audioEQ90 = 12.0; audioPunch = 0.30; audioSpace = 0.82
+            audioBass = 0.20; audio3D = 0.50; audioGain = 0.90
         default: break
         }
     }
@@ -5781,8 +5785,9 @@ struct SharpnessRow: View {
                 Text("Sony WH-1000XM4 (starker Bass)").tag(8)
                 Text("Sony WH-1000XM4 maximal").tag(9)
                 Text("Eigene").tag(10)
+                Text("Club (mein Setup)").tag(11)
             }
-            .onChange(of: audioPreset) { p in if p < 10 { applyAudioPreset(p) } }
+            .onChange(of: audioPreset) { p in if p < 10 || p == 11 { applyAudioPreset(p) } }
             Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. â€žSony Spielâ€œ hebt Tiefbass und PrÃ¤senz an, damit Schritte und SchÃ¼sse ortbar sind.")
                 .font(.caption)
                 .foregroundColor(.secondary)
