@@ -8,7 +8,7 @@ workflows:
       cancel_previous_builds: true
     environment:
       vars:
-        BUILD_NUM: "2017"
+        BUILD_NUM: "2018"
       xcode: latest
     scripts:
       - name: Werkzeuge
