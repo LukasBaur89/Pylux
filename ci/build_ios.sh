@@ -2,7 +2,7 @@
 set -euo pipefail
 export BUILD_NUM="${BUILD_NUM:-$(date +%s)}"
 # iOS verweigert Downgrades: immer ueber der installierten Version bleiben.
-if [ "$BUILD_NUM" -lt 2018 ] 2>/dev/null; then BUILD_NUM=2018; fi
+if [ "$BUILD_NUM" -lt 2019 ] 2>/dev/null; then BUILD_NUM=2019; fi
 echo "=== PXSharp Build $BUILD_NUM ==="
 
 echo "--- Submodules (sr.ht über GitHub-Mirror) ---"
@@ -5355,6 +5355,14 @@ struct SharpnessRow: View {
             eq0 = 14.0; eq1 = 12.0; eq2 = 5.5; eq3 = 7.0; eq4 = 10.5
             audioEQ90 = 12.0; audioPunch = 0.30; audioSpace = 0.82
             audioBass = 0.20; audio3D = 0.50; audioGain = 0.90
+        case 12: // Musik / Radio (neutral, kein Bass-Boost)
+            eq0 = 0.0; eq1 = 0.0; eq2 = 0.0; eq3 = 0.0; eq4 = 0.0
+            audioEQ90 = 0.0; audioPunch = 0.0; audioBass = 0.0
+            audioSpace = 0.30; audio3D = 0.30; audioGain = 1.00
+        case 13: // Film / Serie (Sprache klar, wenig Bass)
+            eq0 = 2.0; eq1 = 0.5; eq2 = 2.0; eq3 = 1.5; eq4 = 0.5
+            audioEQ90 = 0.0; audioPunch = 0.10; audioBass = 0.0
+            audioSpace = 0.40; audio3D = 0.25; audioGain = 0.95
         default: break
         }
     }
@@ -5785,9 +5793,11 @@ struct SharpnessRow: View {
                 Text("Sony WH-1000XM4 (starker Bass)").tag(8)
                 Text("Sony WH-1000XM4 maximal").tag(9)
                 Text("Eigene").tag(10)
-                Text("Club (mein Setup)").tag(11)
+                Text("Club (Spiel)").tag(11)
+                Text("Musik / Radio (neutral)").tag(12)
+                Text("Film / Serie").tag(13)
             }
-            .onChange(of: audioPreset) { p in if p < 10 || p == 11 { applyAudioPreset(p) } }
+            .onChange(of: audioPreset) { p in if p != 10 { applyAudioPreset(p) } }
             Text("Die Profile setzen Equalizer und 3D-Weite gemeinsam. â€žSony Spielâ€œ hebt Tiefbass und PrÃ¤senz an, damit Schritte und SchÃ¼sse ortbar sind.")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -7264,12 +7274,9 @@ typedef struct PyluxChiakiAudioOutput {
     float z90_1[EQ_MAX_CH], z90_2[EQ_MAX_CH];
     float hpz1[EQ_MAX_CH], hpz2[EQ_MAX_CH]; // Hochpass-Zustand
     float lpL, lpR; // Bass-Mono-Tiefpass (nur audio thread)
-    float sideBuf[1024]; // Haas-Verzoegerung fuer den Seitenanteil
+    float sideRing[4096]; // Raum: ein Puffer, vier Reflexionen (9/17/27/41 ms)
     int sidePos;
-    int sideLen;
-    float sideBuf2[2048]; // zweite, laengere Reflexion (~22 ms)
-    int sidePos2;
-    int sideLen2;
+    int tapS[4];
     float dampZ;          // Daempfung der Reflexionen
     float bassEnv;        // Huellkurve des Bass-Kompressors
     float atkA, relA;     // Attack/Release-Koeffizienten
@@ -7584,22 +7591,25 @@ static void audio_process(PyluxChiakiAudioOutput *a, int16_t *s, size_t frames, 
             float Sh = (highL - highR) * 0.5f;
             L = lowM + Mh + Sh * widthGain;
             R = lowM + Mh - Sh * widthGain;
-            // Raum: zwei Reflexionen (9 ms + 22 ms), die zweite gedaempft.
-            // Der Vorrang-Effekt haelt Stimmen vorn, der Rest kommt von ringsum.
-            if (a->sideLen > 0) {
-                float sd = a->sideBuf[a->sidePos];
-                a->sideBuf[a->sidePos] = Sh;
-                if (++a->sidePos >= a->sideLen) a->sidePos = 0;
-                float sd2 = a->sideBuf2[a->sidePos2];
-                a->sideBuf2[a->sidePos2] = Sh;
-                if (++a->sidePos2 >= a->sideLen2) a->sidePos2 = 0;
-                if (cfg->space > 0.005f) {
-                    a->dampZ += 0.35f * (sd2 - a->dampZ);
-                    float add = (sd * 0.85f + a->dampZ * 0.55f) * cfg->space;
-                    L += add;
-                    R -= add;
+            // Raum: vier Reflexionen (9/17/27/41 ms) aus einem Ringpuffer.
+            // Die spaeteren sind leiser und werden gedaempft -- Reflexionen
+            // sind dunkler als der Direktschall. Das erzeugt das Gefuehl,
+            // "im Raum" zu stehen, nicht nur breites Stereo.
+            a->sideRing[a->sidePos] = Sh;
+            if (cfg->space > 0.005f) {
+                static const float rg[4] = {0.85f, 0.52f, 0.38f, 0.26f};
+                float acc = 0.0f;
+                for (int t = 0; t < 4; t++) {
+                    int idx = a->sidePos - a->tapS[t];
+                    if (idx < 0) idx += 4096;
+                    acc += a->sideRing[idx] * rg[t];
                 }
+                a->dampZ += 0.45f * (acc - a->dampZ);
+                float add = a->dampZ * cfg->space * 0.60f;
+                L += add;
+                R -= add;
             }
+            if (++a->sidePos >= 4096) a->sidePos = 0;
             // Bass-Harmonik: aus dem Mono-Bass die 3. Oberwelle. Bewusst
             // schlank gehalten -- zu viel davon klingt "röhrig" (Kiste).
             if (cfg->bass > 0.005f) {
@@ -7690,19 +7700,20 @@ void ios_chiaki_audio_output_settings(uint32_t channels, uint32_t rate, void *pt
 
     ao->channels = channels;
     ao->rate = rate;
-    // Haas-Laenge: ~9 ms bei der aktuellen Samplerate.
-    ao->sideLen = (int)(rate * 0.009);
-    if (ao->sideLen < 8) ao->sideLen = 8;
-    if (ao->sideLen > 1023) ao->sideLen = 1023;
+    // Raum: vier Reflexionen (9/17/27/41 ms) aus einem Ringpuffer. Das ist
+    // ein echtes fruehes Reflexionsmuster -- dadurch klingt es nach Raum
+    // statt nur nach breitem Stereo.
+    ao->tapS[0] = (int)(rate * 0.009);
+    ao->tapS[1] = (int)(rate * 0.017);
+    ao->tapS[2] = (int)(rate * 0.027);
+    ao->tapS[3] = (int)(rate * 0.041);
+    for (int t = 0; t < 4; t++) {
+        if (ao->tapS[t] < 8) ao->tapS[t] = 8;
+        if (ao->tapS[t] > 4095) ao->tapS[t] = 4095;
+    }
     ao->sidePos = 0;
-    memset(ao->sideBuf, 0, sizeof(ao->sideBuf));
-    // Zweite Reflexion: ~22 ms, dunkler (Daempfung im Callback).
-    ao->sideLen2 = (int)(rate * 0.022);
-    if (ao->sideLen2 < 16) ao->sideLen2 = 16;
-    if (ao->sideLen2 > 2047) ao->sideLen2 = 2047;
-    ao->sidePos2 = 0;
     ao->dampZ = 0.0f;
-    memset(ao->sideBuf2, 0, sizeof(ao->sideBuf2));
+    memset(ao->sideRing, 0, sizeof(ao->sideRing));
     // Bass-Punch: 8 ms Attack, 150 ms Release.
     ao->atkA = 1.0f - expf(-1.0f / ((float)rate * 0.008f));
     ao->relA = 1.0f - expf(-1.0f / ((float)rate * 0.150f));
